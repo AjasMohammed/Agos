@@ -367,12 +367,21 @@ pub async fn clone_pipeline(
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
 
+    // A clone is a create: the operator types the target name, so `install_pipeline`
+    // (INSERT OR REPLACE) would let a typo silently destroy the pipeline it collides
+    // with. `create_pipeline` leans on the name primary key instead.
+    let clone_name = definition.name.clone();
     match tokio::task::spawn_blocking(move || {
-        store.install_pipeline(&definition.name, &definition.version, &yaml)
+        store.create_pipeline(&definition.name, &definition.version, &yaml)
     })
     .await
     {
-        Ok(Ok(())) => axum::response::Redirect::to("/pipelines").into_response(),
+        Ok(Ok(true)) => axum::response::Redirect::to("/pipelines").into_response(),
+        Ok(Ok(false)) => (
+            StatusCode::CONFLICT,
+            format!("A pipeline named '{clone_name}' already exists — choose another name"),
+        )
+            .into_response(),
         Ok(Err(e)) => {
             tracing::error!(pipeline = %name, error = %e, "Failed to clone pipeline");
             (

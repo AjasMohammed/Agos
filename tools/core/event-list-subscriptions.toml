@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "event-list-subscriptions"
@@ -17,7 +18,7 @@ outputs = ["subscriptions"]
 input  = "EventListSubscriptionsIntent"
 output = "EventListSubscriptionsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name = "env-create"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Create an isolated workspace for package management (Python, Node.js, Rust, or generic)"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "write_scoped"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = [
@@ -20,15 +21,15 @@ outputs = ["content.json"]
 input = "EnvCreateIntent"
 output = "EnvCreateResult"
 
-[input_schema]
+[payload_schema]
 required = ["name"]
 type = "object"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 description = "Workspace name (alphanumeric + hyphens/underscores, max 64 chars)"
 type = "string"
 
-[input_schema.properties.ecosystem]
+[payload_schema.properties.ecosystem]
 description = "Package ecosystem: python, nodejs, rust, or generic (default: generic)"
 type = "string"
 default = "generic"

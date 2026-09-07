@@ -4,6 +4,18 @@ use agentos_types::{HookEvent, HookResult, TraceID};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// True when a `ToolPost` output payload describes a failed call.
+///
+/// `fire_tool_post` renders `Err(_)` as `{"error": …}`. A successful tool
+/// whose own body carries a non-null `error` key counts as a failure too:
+/// the audit trail may over-report failures, never successes.
+fn tool_post_failed(output_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output_json)
+        .ok()
+        .and_then(|v| v.get("error").cloned())
+        .is_some_and(|e| !e.is_null())
+}
+
 /// Built-in hook that writes an `AuditLog` entry for every lifecycle event.
 ///
 /// Registered as the *first* hook during kernel boot so that every event
@@ -64,13 +76,25 @@ impl Hook for AuditHook {
                 AuditEventType::ToolExecutionStarted,
                 serde_json::json!({ "task_id": task_id, "tool_name": tool_name }),
             ),
+            // `ToolPost` carries no success flag (`HookEvent` lives in
+            // agentos-types), so the outcome is read off the payload: every
+            // arm renders a failure through `fire_tool_post` as
+            // `{"error": …}`. Without this branch a FAILED call logged
+            // `ToolExecutionCompleted` here *and* `ToolExecutionFailed` from
+            // the arm — anything counting Completed as successes
+            // over-reported on the common path.
             HookEvent::ToolPost {
                 task_id,
                 tool_name,
+                output_json,
                 duration_ms,
                 ..
             } => (
-                AuditEventType::ToolExecutionCompleted,
+                if tool_post_failed(output_json) {
+                    AuditEventType::ToolExecutionFailed
+                } else {
+                    AuditEventType::ToolExecutionCompleted
+                },
                 serde_json::json!({
                     "task_id": task_id,
                     "tool_name": tool_name,
@@ -137,6 +161,11 @@ impl Hook for AuditHook {
             _ => (None, None),
         };
 
+        let severity = if matches!(event_type, AuditEventType::ToolExecutionFailed) {
+            AuditSeverity::Warn
+        } else {
+            AuditSeverity::Info
+        };
         let entry = AuditEntry {
             timestamp: chrono::Utc::now(),
             trace_id: hook_trace_id,
@@ -145,7 +174,7 @@ impl Hook for AuditHook {
             task_id: entry_task_id,
             tool_id: None, // tool_name is in details JSON; ToolID not available in hook context
             details,
-            severity: AuditSeverity::Info,
+            severity,
             reversible: false,
             rollback_ref: None,
         };
@@ -287,5 +316,65 @@ impl AuditHook {
                 "Failed to write host-package-install audit entry"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_types::{AgentID, TaskID};
+
+    fn make_hook() -> (Arc<AuditHook>, Arc<AuditLog>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        (AuditHook::new(Arc::clone(&audit)), audit, dir)
+    }
+
+    fn tool_post(output_json: &str) -> HookEvent {
+        HookEvent::ToolPost {
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            tool_name: "shell-exec".to_string(),
+            output_json: output_json.to_string(),
+            duration_ms: 7,
+        }
+    }
+
+    #[test]
+    fn tool_post_failure_detection() {
+        assert!(tool_post_failed(r#"{"error":"boom"}"#));
+        assert!(!tool_post_failed(r#"{"exit_code":0}"#));
+        // Explicit null `error` is the success shape many tools emit.
+        assert!(!tool_post_failed(r#"{"error":null}"#));
+        // Unparseable output is not evidence of failure.
+        assert!(!tool_post_failed("not-json"));
+    }
+
+    /// A failed tool call must NOT leave a `ToolExecutionCompleted` row —
+    /// both arms already write their own `ToolExecutionFailed`, so counting
+    /// Completed as successes used to over-report every failure.
+    #[tokio::test]
+    async fn failed_tool_post_logs_failed_not_completed() {
+        let (hook, audit, _dir) = make_hook();
+        hook.on_event(&tool_post(r#"{"error":"boom"}"#)).await;
+
+        let entries = audit.query_recent(10).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.event_type == AuditEventType::ToolExecutionFailed));
+        assert!(!entries
+            .iter()
+            .any(|e| e.event_type == AuditEventType::ToolExecutionCompleted));
+    }
+
+    #[tokio::test]
+    async fn successful_tool_post_still_logs_completed() {
+        let (hook, audit, _dir) = make_hook();
+        hook.on_event(&tool_post(r#"{"exit_code":0}"#)).await;
+
+        let entries = audit.query_recent(10).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.event_type == AuditEventType::ToolExecutionCompleted));
     }
 }

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kernel Mediated Capabilities · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a><div class="nav-subs"><a class="nav-sub" href="#philosophy" data-target="philosophy">Philosophy</a><a class="nav-sub" href="#architecture" data-target="architecture">Architecture</a><a class="nav-sub" href="#the-five-capability-domains" data-target="the-five-capability-domains">The Five Capability Domains</a><a class="nav-sub" href="#policy-engine" data-target="policy-engine">Policy Engine</a><a class="nav-sub" href="#security-model" data-target="security-model">Security Model</a><a class="nav-sub" href="#permissions-reference" data-target="permissions-reference">Permissions Reference</a><a class="nav-sub" href="#configuration" data-target="configuration">Configuration</a><a class="nav-sub" href="#crate-map" data-target="crate-map">Crate Map</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 27 · Kernel Mediated Capabilities</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 27</div><h1 class="ch-title">Kernel Mediated Capabilities</h1><p class="ch-summary">5 managed capability domains (env, storage, proc, net, build) with 17 bridge tools — policy engine, dynamic grants, 7-layer SSRF defense, structured output parsing, per-agent isolation</p></div>
+    <article class="prose"><h1 id="kernel-mediated-capabilities-kmc" class="anchored"><a class="hanchor" href="#kernel-mediated-capabilities-kmc" aria-label="link">#</a>Kernel-Mediated Capabilities (KMC)</h1>
+<blockquote><p>Agents interact with the system through kernel-mediated abstractions instead of raw OS access. The kernel validates, audits, and policy-controls every system interaction.</p></blockquote>
+<hr>
+<h2 id="philosophy" class="anchored"><a class="hanchor" href="#philosophy" aria-label="link">#</a>Philosophy</h2>
+<p>Traditional agent frameworks give agents raw shell access inside Docker containers. This works but requires Docker, provides no per-action audit trail, no policy control, and fails catastrophically on prompt injection.</p>
+<p>AgentOS takes a different approach: <strong>bring system capabilities inside the ecosystem.</strong> Agents declare what they need (install a package, start a server, access a directory), and the kernel decides how to provide it safely.</p>
+<p>This follows the same pattern as Android (system services), WASI (capability handles), iOS (scoped storage), and browsers (fetch + CORS).</p>
+<hr>
+<h2 id="architecture" class="anchored"><a class="hanchor" href="#architecture" aria-label="link">#</a>Architecture</h2>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent Intent: &quot;Install numpy and run pytest&quot;
+         |
+         v
++-------------------------------------+
+|       KERNEL CAPABILITY BROKER       |
+|                                      |
+|  CapabilityProvider trait             |
+|  +-- EnvProvider      (env.*)        |
+|  +-- StorageProvider  (storage.*)    |
+|  +-- ProcessProvider  (proc.*)       |
+|  +-- NetworkProvider  (net.*)        |
+|  +-- BuildProvider    (build.*)      |
+|                                      |
+|  For each request:                   |
+|  1. Validate capability token        |
+|  2. Check policy (allowlists)        |
+|  3. Execute via managed abstraction  |
+|  4. Audit with per-resource detail   |
+|  5. Return structured result         |
++-------------------------------------+
+         |
+         v
+Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &quot;1.26.4&quot; }
+(structured data, not raw stdout)
+</pre></div>
+</div>
+<hr>
+<h2 id="the-five-capability-domains" class="anchored"><a class="hanchor" href="#the-five-capability-domains" aria-label="link">#</a>The Five Capability Domains</h2>
+<h3 id="1-managed-environments-env" class="anchored"><a class="hanchor" href="#1-managed-environments-env" aria-label="link">#</a>1. Managed Environments (<code>env.*</code>)</h3>
+<p>Create isolated workspaces for package management. Each workspace is scoped per-agent with a specific ecosystem.</p>
+<p><strong>Tools:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Action</th><th>Description</th></tr></thead><tbody><tr><td><code>env-create</code></td><td><code>env.create</code></td><td>Create a workspace (Python venv, Node.js node_modules, Rust target, or generic)</td></tr><tr><td><code>env-install</code></td><td><code>env.install</code></td><td>Install a package (validated against allowlist)</td></tr><tr><td><code>env-list</code></td><td><code>env.list</code></td><td>List installed packages</td></tr><tr><td><code>env-destroy</code></td><td><code>env.destroy</code></td><td>Remove workspace and all packages</td></tr></tbody></table></div>
+<p><strong>Permissions:</strong> <code>env.create:x</code>, <code>env.install:x</code>, <code>env.list:r</code>, <code>env.destroy:x</code>, <code>net.outbound:x</code> (for install)</p>
+<p><strong>Package Policy:</strong> Three modes per ecosystem:</p>
+<ul><li><code>curated</code> (default) -- only packages on the allowlist (in <code>config/allowlists/</code>)</li><li><code>open</code> -- any package allowed</li><li><code>locked</code> -- all packages require operator approval</li></ul>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Create a Python workspace</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ecosystem&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;python&quot;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Install a package</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;package&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;flask&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&gt;=3.0&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="2-managed-storage-zones-storage" class="anchored"><a class="hanchor" href="#2-managed-storage-zones-storage" aria-label="link">#</a>2. Managed Storage Zones (<code>storage.*</code>)</h3>
+<p>Expand filesystem access beyond <code>data_dir</code> through policy-controlled zones.</p>
+<p><strong>Tools:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Action</th><th>Description</th></tr></thead><tbody><tr><td><code>storage-zone-create</code></td><td><code>storage.zone.create</code></td><td>Request access to a directory</td></tr><tr><td><code>storage-zone-list</code></td><td><code>storage.zone.list</code></td><td>List active zones</td></tr><tr><td><code>storage-zone-revoke</code></td><td><code>storage.zone.revoke</code></td><td>Revoke a zone</td></tr></tbody></table></div>
+<p><strong>Path Policy:</strong></p>
+<ul><li><strong>Default allowed:</strong> <code>/home/*/projects/**</code>, <code>/home/*/Desktop/**</code>, <code>/tmp/agentos-*/**</code></li><li><strong>Always denied:</strong> <code>/etc/**</code>, <code>/root/**</code>, <code>~/.ssh/**</code>, <code>~/.gnupg/**</code>, <code>~/.aws/**</code>, <code>/var/**</code>, <code>/usr/**</code>, <code>/boot/**</code>, <code>/proc/**</code>, <code>/sys/**</code></li><li>Deny always takes precedence over allow</li><li>Overlapping zones use longest-prefix match for access level</li></ul>
+<p><strong>Zone Access Levels:</strong></p>
+<ul><li><code>ro</code> (read-only) -- file tools can read but not write</li><li><code>rw</code> (read-write) -- full access</li></ul>
+<p><strong>File Tool Integration:</strong> Once a zone is active, all 8 file tools (reader, writer, editor, delete, move, glob, grep, diff) automatically recognize files within the zone. Write tools enforce <code>ReadOnly</code> zones.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/home/user/projects/myapp&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;access&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;rw&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="3-managed-processes-proc" class="anchored"><a class="hanchor" href="#3-managed-processes-proc" aria-label="link">#</a>3. Managed Processes (<code>proc.*</code>)</h3>
+<p>Spawn, monitor, signal, and manage background processes with resource controls.</p>
+<p><strong>Tools:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Action</th><th>Description</th></tr></thead><tbody><tr><td><code>proc-spawn</code></td><td><code>proc.spawn</code></td><td>Start a background process</td></tr><tr><td><code>proc-signal</code></td><td><code>proc.signal</code></td><td>Send signal (SIGTERM, SIGKILL, etc.)</td></tr><tr><td><code>proc-output</code></td><td><code>proc.output</code></td><td>Read recent stdout/stderr (ring buffer)</td></tr><tr><td><code>proc-list</code></td><td><code>proc.list</code></td><td>List agent's processes</td></tr><tr><td><code>proc-wait</code></td><td><code>proc.wait</code></td><td>Wait for process to exit</td></tr></tbody></table></div>
+<p><strong>Binary Controls:</strong></p>
+<ul><li>Agents must use <strong>bare names</strong> (no paths) -- <code>python</code>, not <code>/usr/bin/python</code></li><li>Default allowlist: python, python3, node, npm, cargo, git, make, sh, bash, curl, etc.</li><li>Deny list (always blocked): sudo, su, rm, systemctl, iptables, chmod, etc.</li><li>Deny takes precedence over allow</li></ul>
+<p><strong>Resource Limits:</strong></p>
+<ul><li>Max 8 processes per agent (configurable)</li><li>Output captured in 500-line ring buffer per process</li><li>Wall-clock timeout (default 1 hour) -- auto-kill on expiry</li></ul>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Start a dev server</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;binary&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;python&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;-m&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;http.server&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;8080&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Check its output</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;process_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;proc-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;lines&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Stop it</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;process_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;proc-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;signal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SIGTERM&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="4-managed-networking-net" class="anchored"><a class="hanchor" href="#4-managed-networking-net" aria-label="link">#</a>4. Managed Networking (<code>net.*</code>)</h3>
+<p>HTTP requests and DNS lookups through a policy-controlled proxy.</p>
+<p><strong>Tools:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Action</th><th>Description</th></tr></thead><tbody><tr><td><code>net-http</code></td><td><code>net.http</code></td><td>Make an HTTP request</td></tr><tr><td><code>net-dns</code></td><td><code>net.dns</code></td><td>Resolve a hostname</td></tr></tbody></table></div>
+<p><strong>SSRF Defense (7 layers):</strong></p>
+<ol><li>Hostname checked against deny/allow glob patterns</li><li>IP addresses parsed and checked for private ranges (IPv4 + IPv6)</li><li>IPv4-mapped IPv6 addresses caught (<code>[::ffff:10.0.0.1]</code>)</li><li>DNS resolution before connect -- resolved IPs checked against private ranges</li><li>DNS rebinding defense in <code>net.dns</code> action</li><li>HTTP redirects disabled (<code>Policy::none</code>) -- agents see 3xx and must follow explicitly</li><li>Rate limiting per agent per destination (default 60 rpm)</li></ol>
+<p><strong>Default Allowed Destinations:</strong> <code>*.github.com</code>, <code>api.openai.com</code>, <code>api.anthropic.com</code>, <code>pypi.org</code>, <code>registry.npmjs.org</code>, <code>crates.io</code>, <code>*.googleapis.com</code></p>
+<p><strong>Default Denied:</strong> <code>169.254.169.254</code> (cloud metadata), all RFC 1918 ranges (<code>10.*</code>, <code>172.16-31.*</code>, <code>192.168.*</code>), loopback (<code>127.*</code>), IPv6 private/link-local</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/owner/repo&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;GET&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="5-managed-builds-build" class="anchored"><a class="hanchor" href="#5-managed-builds-build" aria-label="link">#</a>5. Managed Builds (<code>build.*</code>)</h3>
+<p>Compile code, run tests, and lint with structured output parsing.</p>
+<p><strong>Tools:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Action</th><th>Description</th></tr></thead><tbody><tr><td><code>build-run</code></td><td><code>build.run</code></td><td>Execute a build command</td></tr><tr><td><code>build-test</code></td><td><code>build.test</code></td><td>Run tests (auto-detects ecosystem)</td></tr><tr><td><code>build-lint</code></td><td><code>build.lint</code></td><td>Run linter (auto-detects ecosystem)</td></tr></tbody></table></div>
+<p><strong>Ecosystem Auto-Detection:</strong></p>
+<ul><li><code>Cargo.toml</code> present --&gt; Rust (<code>cargo test</code>, <code>cargo clippy</code>)</li><li><code>package.json</code> present --&gt; Node.js (<code>npm test</code>, <code>npx eslint</code>)</li><li><code>pyproject.toml</code> / <code>setup.py</code> present --&gt; Python (<code>pytest</code>, <code>python -m flake8</code>)</li><li><code>go.mod</code> present --&gt; Go (<code>go test ./...</code>, <code>go vet ./...</code>)</li><li><code>Makefile</code> present --&gt; Make (<code>make test</code>)</li></ul>
+<p><strong>Structured Output:</strong> Test results are parsed into JSON with pass/fail counts:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;failed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;exit_code&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tests&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;failed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ignored&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;failures&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;test_auth_flow&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assertion failed...&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;duration_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8234</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Command Allowlist:</strong> Commands must match an allowed prefix at a word boundary: <code>cargo test</code>, <code>npm test</code>, <code>pytest</code>, <code>make</code>, etc.</p>
+<hr>
+<h2 id="policy-engine" class="anchored"><a class="hanchor" href="#policy-engine" aria-label="link">#</a>Policy Engine</h2>
+<p>The policy engine evaluates capability requests against prioritized rules.</p>
+<h3 id="profiles" class="anchored"><a class="hanchor" href="#profiles" aria-label="link">#</a>Profiles</h3>
+<div class="table-wrap"><table><thead><tr><th>Profile</th><th>Description</th></tr></thead><tbody><tr><td><strong>Development</strong></td><td>Broad access -- env/build/proc domains auto-allowed, deny sensitive paths</td></tr><tr><td><strong>Production</strong></td><td>Curated allowlists for packages, escalation for unknowns</td></tr><tr><td><strong>Restricted</strong></td><td>All network denied, everything else requires approval</td></tr></tbody></table></div>
+<h3 id="rule-structure" class="anchored"><a class="hanchor" href="#rule-structure" aria-label="link">#</a>Rule Structure</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Priority 100 (checked first): DENY /etc/** for storage.*
+Priority 10: ALLOW * for env.* (development profile)
+Default (no match): ESCALATE (requires operator approval)
+</pre></div>
+</div>
+<p>Deny rules always take precedence over allow rules at the same priority.</p>
+<h3 id="dynamic-capability-negotiation" class="anchored"><a class="hanchor" href="#dynamic-capability-negotiation" aria-label="link">#</a>Dynamic Capability Negotiation</h3>
+<p>The capability broker mints ephemeral grants for runtime capability requests:</p>
+<ol><li>Agent requests a capability it doesn't hold</li><li>Policy engine evaluates: Allow / Deny / Escalate</li><li>If allowed: ephemeral grant issued (1-hour TTL, scoped to specific resource)</li><li>If escalated: PendingEscalation created for operator review</li><li>If denied: error returned immediately</li></ol>
+<p>Grants are per-agent, automatically swept on expiry, and revoked on agent disconnect.</p>
+<hr>
+<h2 id="security-model" class="anchored"><a class="hanchor" href="#security-model" aria-label="link">#</a>Security Model</h2>
+<h3 id="defense-in-depth" class="anchored"><a class="hanchor" href="#defense-in-depth" aria-label="link">#</a>Defense in Depth</h3>
+<div class="table-wrap"><table><thead><tr><th>Layer</th><th>Protection</th></tr></thead><tbody><tr><td><strong>CapabilityToken</strong></td><td>HMAC-SHA256 signed permission proof per task</td></tr><tr><td><strong>Provider Policy</strong></td><td>Per-domain allowlists/denylists (packages, binaries, destinations, paths)</td></tr><tr><td><strong>Input Validation</strong></td><td>Character-level allowlists for names, versions, paths (no shell metacharacters)</td></tr><tr><td><strong>Deny &gt; Allow</strong></td><td>Deny rules checked before allow rules in every provider</td></tr><tr><td><strong>Per-Agent Isolation</strong></td><td>All data structures keyed by agent_id; agents can't see each other's resources</td></tr><tr><td><strong>Audit Trail</strong></td><td>Every capability action logged with per-resource detail</td></tr><tr><td><strong>SSRF Defense</strong></td><td>7-layer protection including IPv6, DNS rebinding, redirect blocking</td></tr><tr><td><strong>No Shell Injection</strong></td><td>All commands use <code>Command::new().args()</code>, never <code>sh -c</code></td></tr></tbody></table></div>
+<h3 id="audit-events" class="anchored"><a class="hanchor" href="#audit-events" aria-label="link">#</a>Audit Events</h3>
+<p>Every KMC action produces structured audit entries:</p>
+<div class="table-wrap"><table><thead><tr><th>Event</th><th>Description</th></tr></thead><tbody><tr><td><code>CapabilityRequested</code></td><td>Agent requested a managed capability</td></tr><tr><td><code>CapabilityExecuted</code></td><td>Capability action completed successfully</td></tr><tr><td><code>CapabilityFailed</code></td><td>Capability action failed</td></tr><tr><td><code>EnvironmentCreated</code> / <code>PackageInstalled</code> / <code>EnvironmentDestroyed</code></td><td>Environment lifecycle</td></tr><tr><td><code>StorageZoneCreated</code> / <code>StorageZoneRevoked</code></td><td>Storage zone lifecycle</td></tr><tr><td><code>ManagedProcessSpawned</code> / <code>ManagedProcessSignaled</code> / <code>ManagedProcessTerminated</code></td><td>Process lifecycle</td></tr><tr><td><code>NetworkRequestExecuted</code> / <code>NetworkDestinationBlocked</code></td><td>Network activity</td></tr><tr><td><code>BuildExecuted</code> / <code>BuildFailed</code></td><td>Build activity</td></tr></tbody></table></div>
+<hr>
+<h2 id="permissions-reference" class="anchored"><a class="hanchor" href="#permissions-reference" aria-label="link">#</a>Permissions Reference</h2>
+<div class="table-wrap"><table><thead><tr><th>Permission</th><th>Tools</th><th>Description</th></tr></thead><tbody><tr><td><code>env.create:x</code></td><td>env-create</td><td>Create workspaces</td></tr><tr><td><code>env.install:x</code></td><td>env-install</td><td>Install packages</td></tr><tr><td><code>env.list:r</code></td><td>env-list</td><td>List packages</td></tr><tr><td><code>env.destroy:x</code></td><td>env-destroy</td><td>Destroy workspaces</td></tr><tr><td><code>net.outbound:x</code></td><td>env-install</td><td>Network for package downloads</td></tr><tr><td><code>storage.zone.create:x</code></td><td>storage-zone-create</td><td>Request filesystem zones</td></tr><tr><td><code>storage.zone.list:r</code></td><td>storage-zone-list</td><td>List zones</td></tr><tr><td><code>storage.zone.revoke:x</code></td><td>storage-zone-revoke</td><td>Revoke zones</td></tr><tr><td><code>proc.spawn:x</code></td><td>proc-spawn</td><td>Spawn processes</td></tr><tr><td><code>proc.signal:x</code></td><td>proc-signal</td><td>Signal processes</td></tr><tr><td><code>proc.output:r</code></td><td>proc-output</td><td>Read process output</td></tr><tr><td><code>proc.list:r</code></td><td>proc-list</td><td>List processes</td></tr><tr><td><code>proc.wait:r</code></td><td>proc-wait</td><td>Wait for processes</td></tr><tr><td><code>build.run:x</code></td><td>build-run</td><td>Run build commands</td></tr><tr><td><code>build.test:x</code></td><td>build-test</td><td>Run tests</td></tr><tr><td><code>build.lint:x</code></td><td>build-lint</td><td>Run linters</td></tr><tr><td><code>net.http:x</code></td><td>net-http</td><td>HTTP requests</td></tr><tr><td><code>net.dns:r</code></td><td>net-dns</td><td>DNS resolution</td></tr></tbody></table></div>
+<p>The <code>--root</code> flag at agent connect grants <code>*:rwxqo</code> which includes all KMC permissions.</p>
+<hr>
+<h2 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h2>
+<h3 id="package-allowlists" class="anchored"><a class="hanchor" href="#package-allowlists" aria-label="link">#</a>Package Allowlists</h3>
+<p>Located in <code>config/allowlists/</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>File</th><th>Ecosystem</th><th>Default Count</th></tr></thead><tbody><tr><td><code>python.toml</code></td><td>Python</td><td>35 packages (flask, django, numpy, pytest, etc.)</td></tr><tr><td><code>nodejs.toml</code></td><td>Node.js</td><td>28 packages (express, jest, typescript, etc.)</td></tr><tr><td><code>rust.toml</code></td><td>Rust</td><td>11 packages (cargo-watch, ripgrep, etc.)</td></tr></tbody></table></div>
+<h3 id="key-config-values" class="anchored"><a class="hanchor" href="#key-config-values" aria-label="link">#</a>Key Config Values</h3>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>python_policy</code></td><td><code>curated</code></td><td>Package policy: curated/open/locked</td></tr><tr><td><code>max_zones_per_agent</code></td><td>10</td><td>Maximum storage zones per agent</td></tr><tr><td><code>max_processes_per_agent</code></td><td>8</td><td>Maximum managed processes per agent</td></tr><tr><td><code>default_rate_limit_rpm</code></td><td>60</td><td>HTTP requests per minute per destination</td></tr><tr><td><code>build_timeout_secs</code></td><td>300</td><td>Build command timeout (5 minutes)</td></tr><tr><td><code>install_timeout_secs</code></td><td>120</td><td>Package install timeout (2 minutes)</td></tr></tbody></table></div>
+<hr>
+<h2 id="crate-map" class="anchored"><a class="hanchor" href="#crate-map" aria-label="link">#</a>Crate Map</h2>
+<div class="table-wrap"><table><thead><tr><th>Crate</th><th>Module</th><th>Provider</th></tr></thead><tbody><tr><td><code>agentos-kernel</code></td><td><code>capability_provider.rs</code></td><td><code>CapabilityProvider</code> trait</td></tr><tr><td><code>agentos-kernel</code></td><td><code>capability_registry.rs</code></td><td><code>CapabilityRegistry</code> (BTreeMap)</td></tr><tr><td><code>agentos-kernel</code></td><td><code>capability_dispatch.rs</code></td><td><code>KernelCapabilityDispatcher</code></td></tr><tr><td><code>agentos-kernel</code></td><td><code>capability_broker.rs</code></td><td><code>CapabilityBroker</code> (dynamic grants)</td></tr><tr><td><code>agentos-kernel</code></td><td><code>policy_engine.rs</code></td><td><code>PolicyEngine</code> (rules + profiles)</td></tr><tr><td><code>agentos-kernel</code></td><td><code>managed_env.rs</code></td><td><code>EnvProvider</code></td></tr><tr><td><code>agentos-kernel</code></td><td><code>managed_storage.rs</code></td><td><code>StorageProvider</code> + <code>ZoneTable</code></td></tr><tr><td><code>agentos-kernel</code></td><td><code>managed_process.rs</code></td><td><code>ProcessProvider</code> + <code>ProcessTable</code></td></tr><tr><td><code>agentos-kernel</code></td><td><code>managed_network.rs</code></td><td><code>NetworkProvider</code> + <code>RateLimiter</code></td></tr><tr><td><code>agentos-kernel</code></td><td><code>managed_build.rs</code></td><td><code>BuildProvider</code> + output parsers</td></tr><tr><td><code>agentos-tools</code></td><td><code>kmc_tools.rs</code></td><td>17 bridge tools (macro-generated)</td></tr><tr><td><code>agentos-types</code></td><td><code>registry_query.rs</code></td><td>Cross-crate traits (<code>CapabilityDispatcher</code>, <code>StorageZoneQuery</code>)</td></tr></tbody></table></div></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-26.html"><span class="pn-dir">← Previous</span><span class="pn-title">Channel Adapters</span></a><a class="pn pn-next" href="ch-28.html"><span class="pn-dir">Next →</span><span class="pn-title">Agent Inbox and Notifications</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#philosophy" data-target="philosophy">Philosophy</a></li><li class="toc-h2"><a href="#architecture" data-target="architecture">Architecture</a></li><li class="toc-h2"><a href="#the-five-capability-domains" data-target="the-five-capability-domains">The Five Capability Domains</a></li><li class="toc-h3"><a href="#1-managed-environments-env" data-target="1-managed-environments-env">1. Managed Environments (<code>env.*</code>)</a></li><li class="toc-h3"><a href="#2-managed-storage-zones-storage" data-target="2-managed-storage-zones-storage">2. Managed Storage Zones (<code>storage.*</code>)</a></li><li class="toc-h3"><a href="#3-managed-processes-proc" data-target="3-managed-processes-proc">3. Managed Processes (<code>proc.*</code>)</a></li><li class="toc-h3"><a href="#4-managed-networking-net" data-target="4-managed-networking-net">4. Managed Networking (<code>net.*</code>)</a></li><li class="toc-h3"><a href="#5-managed-builds-build" data-target="5-managed-builds-build">5. Managed Builds (<code>build.*</code>)</a></li><li class="toc-h2"><a href="#policy-engine" data-target="policy-engine">Policy Engine</a></li><li class="toc-h3"><a href="#profiles" data-target="profiles">Profiles</a></li><li class="toc-h3"><a href="#rule-structure" data-target="rule-structure">Rule Structure</a></li><li class="toc-h3"><a href="#dynamic-capability-negotiation" data-target="dynamic-capability-negotiation">Dynamic Capability Negotiation</a></li><li class="toc-h2"><a href="#security-model" data-target="security-model">Security Model</a></li><li class="toc-h3"><a href="#defense-in-depth" data-target="defense-in-depth">Defense in Depth</a></li><li class="toc-h3"><a href="#audit-events" data-target="audit-events">Audit Events</a></li><li class="toc-h2"><a href="#permissions-reference" data-target="permissions-reference">Permissions Reference</a></li><li class="toc-h2"><a href="#configuration" data-target="configuration">Configuration</a></li><li class="toc-h3"><a href="#package-allowlists" data-target="package-allowlists">Package Allowlists</a></li><li class="toc-h3"><a href="#key-config-values" data-target="key-config-values">Key Config Values</a></li><li class="toc-h2"><a href="#crate-map" data-target="crate-map">Crate Map</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

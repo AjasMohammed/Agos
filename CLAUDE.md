@@ -39,7 +39,7 @@ crates/
   agentos-sdk/          # Ergonomic macros and re-exports for tool development
   agentos-sdk-macros/   # Proc-macro crate for #[tool] attribute
   agentos-web/          # Web UI server (Axum + HTMX + Pico CSS)
-  agentos-api/          # 50 REST endpoints, OpenAI-compat /v1/chat/completions SSE, API key auth
+  agentos-api/          # 35+ REST endpoints, OpenAI-compat /v1/chat/completions SSE, API key auth
   agentos-channels/     # ChannelAdapter trait + Discord, Slack, Telegram, Teams, Matrix, etc.
   agentos-skills/       # SkillManifest (SKILL.toml), SkillRegistry; 7 core skills in skills/core/
   agentos-agent-tester/ # LLM-driven agent test harness
@@ -527,7 +527,7 @@ The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired 
 - `CostAttribution` audit event; structured cost JSON per inference
 
 ### REST API (`agentos-api`)
-- 50 REST endpoints + OpenAI-compat `/v1/chat/completions` SSE streaming
+- 35+ REST endpoints (34 routes / 39 operations) + OpenAI-compat `/v1/chat/completions` SSE streaming
 - API key auth via HMAC-SHA256
 - `KernelService` trait decouples `agentos-api` and `agentos-web` from kernel internals
 

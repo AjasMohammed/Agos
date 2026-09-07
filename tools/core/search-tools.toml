@@ -1,4 +1,5 @@
 tags = ["meta", "read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "search-tools"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Search available tools by keyword and return the top matches."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+search_hints = ["find a tool for", "which tool can", "is there a tool that"]
 tags        = ["meta", "read"]
 
 [capabilities_required]
@@ -19,15 +20,15 @@ outputs = ["content.structured"]
 input  = "ToolSearchQuery"
 output = "ToolSearchResults"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["query"]
 
-[input_schema.properties.query]
+[payload_schema.properties.query]
 type = "string"
 description = "Keyword query for tool discovery"
 
-[input_schema.properties.top_k]
+[payload_schema.properties.top_k]
 type = "integer"
 minimum = 1
 maximum = 20

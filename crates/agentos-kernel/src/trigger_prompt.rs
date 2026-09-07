@@ -62,6 +62,58 @@ impl Kernel {
         }
     }
 
+    /// Frame a coalesced batch the way `build_trigger_prompt` frames a single
+    /// event: same agent identity, permissions, OS snapshot and guidance.
+    ///
+    /// A 1-item batch takes the per-type builders above; a >=2-item batch used
+    /// to reach the agent as a bare `[EVENT BATCH]` digest with no context at
+    /// all, which with the 5s production window is what two webhooks a second
+    /// apart produce.
+    pub(crate) async fn build_batch_prompt(&self, sub: &EventSubscription, digest: &str) -> String {
+        let agent_info = self.get_agent_info_for_prompt(&sub.agent_id).await;
+        let os_state = self.build_os_state_snapshot().await;
+
+        format!(
+            r#"[SYSTEM CONTEXT]
+You are {subscriber_name}, an AI agent running inside AgentOS.
+
+Your Agent ID: {subscriber_id}
+Your Role: {subscriber_role}
+
+Your current permissions:
+{subscriber_permissions}
+
+[EVENT NOTIFICATION]
+Several events you subscribe to arrived inside one batching window and were
+coalesced into a single digest, so you pay one turn for the burst instead of
+one per event.
+
+{digest}
+[CURRENT OS STATE]
+{os_state}
+
+[AVAILABLE ACTIONS]
+The digest summarizes; the full payload of every event above is in your agent
+inbox. Use agent-inbox-list to see them and agent-inbox-read to open the ones
+whose details the digest omits, then act with your available tools.
+
+[GUIDANCE]
+Respond to the burst as a whole — look for the pattern across the events rather
+than reacting to each one. Read individual payloads only when a decision
+actually depends on them.
+
+[RESPONSE EXPECTATION]
+Take appropriate action, report findings, escalate if needed, or acknowledge
+silently. Silence is a valid response for a purely informational batch."#,
+            subscriber_name = agent_info.name,
+            subscriber_id = sub.agent_id,
+            subscriber_role = agent_info.role,
+            subscriber_permissions = agent_info.permissions,
+            digest = digest,
+            os_state = os_state,
+        )
+    }
+
     // ── AgentAdded ────────────────────────────────────────────────
 
     async fn build_agent_added_prompt(

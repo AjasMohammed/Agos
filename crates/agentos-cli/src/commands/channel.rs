@@ -65,6 +65,30 @@ pub enum ChannelCommands {
         /// Channel ID (from `channel list`)
         id: String,
     },
+
+    /// Manage the DM pairing allowlist (approve/revoke senders)
+    Pair {
+        #[command(subcommand)]
+        command: PairCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PairCommands {
+    /// List approved senders and pending pairing requests
+    List,
+    /// Approve a pending 6-character pairing code
+    Approve {
+        /// The pairing code the sender received from the bot
+        code: String,
+    },
+    /// Revoke an approved sender from a channel's allowlist
+    Revoke {
+        /// Channel ID the sender is approved on
+        channel_id: String,
+        /// External sender ID to remove
+        sender_id: String,
+    },
 }
 
 pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow::Result<()> {
@@ -198,6 +222,94 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
             match resp {
                 KernelResponse::Success { .. } => {
                     println!("Test notification sent to channel '{id}'.");
+                }
+                KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
+                _ => anyhow::bail!("Unexpected response from kernel"),
+            }
+        }
+
+        ChannelCommands::Pair { command } => handle_pair(client, command).await?,
+    }
+
+    Ok(())
+}
+
+async fn handle_pair(client: &mut BusClient, command: PairCommands) -> anyhow::Result<()> {
+    match command {
+        PairCommands::List => {
+            let resp = client.send_command(KernelCommand::ListPairings).await?;
+            match resp {
+                KernelResponse::PairingList { approved, pending } => {
+                    if approved.is_empty() && pending.is_empty() {
+                        println!("No approved senders or pending pairing requests.");
+                        return Ok(());
+                    }
+                    if !approved.is_empty() {
+                        println!("APPROVED SENDERS");
+                        println!("{:<20} {:<28} APPROVED AT", "CHANNEL ID", "SENDER ID");
+                        println!("{}", "-".repeat(70));
+                        for s in &approved {
+                            println!(
+                                "{:<20} {:<28} {}",
+                                truncate(&s.channel_id, 20),
+                                truncate(&s.sender_id, 28),
+                                s.approved_at,
+                            );
+                        }
+                    }
+                    if !pending.is_empty() {
+                        if !approved.is_empty() {
+                            println!();
+                        }
+                        println!("PENDING REQUESTS (approve with the code the sender received)");
+                        println!("{:<20} {:<28} EXPIRES AT", "CHANNEL ID", "SENDER ID");
+                        println!("{}", "-".repeat(70));
+                        for p in &pending {
+                            println!(
+                                "{:<20} {:<28} {}",
+                                truncate(&p.channel_id, 20),
+                                truncate(&p.sender_id, 28),
+                                p.expires_at,
+                            );
+                        }
+                    }
+                }
+                KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
+                _ => anyhow::bail!("Unexpected response from kernel"),
+            }
+        }
+
+        PairCommands::Approve { code } => {
+            let resp = client
+                .send_command(KernelCommand::ApprovePairing { code })
+                .await?;
+            match resp {
+                KernelResponse::Success { data } => {
+                    let sender = data
+                        .as_ref()
+                        .and_then(|d| d.get("sender_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sender");
+                    println!("Pairing approved — '{sender}' is now allowlisted.");
+                }
+                KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
+                _ => anyhow::bail!("Unexpected response from kernel"),
+            }
+        }
+
+        PairCommands::Revoke {
+            channel_id,
+            sender_id,
+        } => {
+            let resp = client
+                .send_command(KernelCommand::RevokePairing {
+                    channel_id,
+                    sender_id: sender_id.clone(),
+                })
+                .await?;
+            match resp {
+                KernelResponse::Success { .. } => {
+                    println!("Pairing revoked for sender '{sender_id}'.");
                 }
                 KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
                 _ => anyhow::bail!("Unexpected response from kernel"),

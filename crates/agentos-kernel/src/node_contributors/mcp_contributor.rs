@@ -49,10 +49,7 @@ impl NodeContributor for McpNodeContributor {
                     description: description.clone(),
                     ..Default::default()
                 }];
-                if let Some(obj) = tool
-                    .input_schema
-                    .get("properties")
-                    .and_then(|p| p.as_object())
+                if let Some(obj) = tool.input_schema.get("properties").and_then(|p| p.as_object())
                 {
                     properties = obj
                         .iter()

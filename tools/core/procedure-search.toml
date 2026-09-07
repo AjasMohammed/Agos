@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "procedure-search"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Search procedural memory for learned procedures and SOPs using hybrid semantic search"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "memory"
+search_hints = ["how did I do this last time", "find a saved procedure", "known playbook"]
 
 [capabilities_required]
 permissions = ["memory.procedural:r"]
@@ -17,22 +20,22 @@ outputs = ["content.text"]
 input  = "ProcedureSearchIntent"
 output = "ProcedureSearchResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["query"]
 
-[input_schema.properties.query]
+[payload_schema.properties.query]
 type = "string"
 description = "Natural-language procedure query"
 
-[input_schema.properties.top_k]
+[payload_schema.properties.top_k]
 type = "integer"
 default = 5
 minimum = 1
 maximum = 20
 description = "Maximum results"
 
-[input_schema.properties.min_score]
+[payload_schema.properties.min_score]
 type = "number"
 default = 0.0
 description = "Minimum relevance threshold"

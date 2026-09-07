@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "archival-insert"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Insert long-term archival memory into semantic storage"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["archive this for long-term keeping", "store a document in archival memory"]
 
 [capabilities_required]
 permissions = ["memory.semantic:w"]
@@ -17,24 +19,24 @@ outputs = ["content.text"]
 input  = "ArchivalInsertIntent"
 output = "ArchivalInsertResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["content"]
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Document content to insert into archival semantic memory"
 
-[input_schema.properties.key]
+[payload_schema.properties.key]
 type = "string"
 default = "archival-note"
 description = "Optional semantic key"
 
-[input_schema.properties.tags]
+[payload_schema.properties.tags]
 type = "array"
 description = "Optional tags"
 
-[input_schema.properties.tags.items]
+[payload_schema.properties.tags.items]
 type = "string"
 
 [sandbox]

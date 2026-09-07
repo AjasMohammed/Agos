@@ -72,6 +72,19 @@ pub struct PluginEntry {
     pub registered_tool_ids: Vec<ToolID>,
 }
 
+/// A plugin (or connector) id that is safe as a single path component:
+/// non-empty, `[A-Za-z0-9_-]` only, no separators, no traversal.
+pub fn valid_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && reject_traversal(id).is_ok()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Registry that discovers plugins from manifests and lazily activates them.
 ///
 /// Discovery is fast (TOML reads only, no code execution). Activation loads
@@ -163,14 +176,7 @@ impl PluginRegistry {
 
         // Validate plugin ID: must be non-empty, kebab-case, no path traversal.
         let id = &manifest.id;
-        if id.is_empty()
-            || reject_traversal(id).is_err()
-            || id.contains('/')
-            || id.contains('\\')
-            || !id
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
+        if !valid_plugin_id(id) {
             warn!(plugin_id = %id, "Rejected plugin with invalid ID");
             return None;
         }
@@ -350,6 +356,23 @@ impl PluginRegistry {
         Ok(())
     }
 
+    /// Forget a plugin entirely. Refuses while it is active — callers
+    /// `deactivate` first so its tools are unregistered. Returns the manifest
+    /// path so the caller can delete the files.
+    pub async fn remove(&self, plugin_id: &str) -> anyhow::Result<PathBuf> {
+        let mut entries = self.entries.write().await;
+        match entries.get(plugin_id) {
+            None => anyhow::bail!("Plugin '{}' not found", plugin_id),
+            Some(e) if e.status == PluginStatus::Active => {
+                anyhow::bail!("Plugin '{}' is active — deactivate it first", plugin_id)
+            }
+            Some(_) => {}
+        }
+        let entry = entries.remove(plugin_id).expect("checked above");
+        info!(plugin_id = %plugin_id, "Removed plugin from registry");
+        Ok(entry.manifest_path)
+    }
+
     /// Return a snapshot of all discovered plugins, sorted by plugin ID.
     pub async fn list(&self) -> Vec<PluginEntry> {
         let mut entries: Vec<PluginEntry> = self.entries.read().await.values().cloned().collect();
@@ -370,6 +393,16 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_id_validation() {
+        assert!(valid_plugin_id("foo-bar_2"));
+        assert!(!valid_plugin_id(""));
+        assert!(!valid_plugin_id("../x"));
+        assert!(!valid_plugin_id("a/b"));
+        assert!(!valid_plugin_id("a b"));
+        assert!(!valid_plugin_id(&"x".repeat(65)));
+    }
     use std::io::Write;
     use tempfile::TempDir;
 

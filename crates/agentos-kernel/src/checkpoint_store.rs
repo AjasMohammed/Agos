@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 pub const CHECKPOINT_SCHEMA_VERSION: i64 = 1;
 pub const CHECKPOINT_KEY_VERSION: i64 = 1;
-const LATEST_MIGRATION_VERSION: i64 = 1;
+const LATEST_MIGRATION_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointPayload {
@@ -85,6 +85,10 @@ impl CheckpointStore {
         &self.path
     }
 
+    /// Upsert the (single) checkpoint for a task. Resets `resume_count`: a
+    /// checkpoint write means the task made progress since the last boot-resume,
+    /// so it is not a poison pill — only crash-without-progress accumulates
+    /// strikes toward the boot-resume cap (see `increment_resume_count`).
     pub async fn write(&self, record: CheckpointRecord) -> anyhow::Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -105,7 +109,8 @@ impl CheckpointStore {
                         updated_at = excluded.updated_at,
                         schema_version = excluded.schema_version,
                         key_version = excluded.key_version,
-                        state_blob = excluded.state_blob",
+                        state_blob = excluded.state_blob,
+                        resume_count = 0",
                     params![
                         record.task_id.to_string(),
                         record.checkpoint_id,
@@ -193,23 +198,87 @@ impl CheckpointStore {
         .context("Checkpoint list task failed")?
     }
 
-    pub async fn prune_older_than(&self, max_age: chrono::Duration) -> anyhow::Result<usize> {
+    /// Delete checkpoints older than `max_age`, except those belonging to a task
+    /// in `keep_alive` (the scheduler's non-terminal task set).
+    ///
+    /// A checkpoint IS the recovery point: pruning one for a task that is merely
+    /// parked (an unanswered `ask-user` outlives 72h easily) makes that task
+    /// permanently unresumable — `cmd_resume_task` then reports "no checkpoint
+    /// found". Only checkpoints of tasks the scheduler no longer considers live
+    /// are collectable.
+    pub async fn prune_older_than(
+        &self,
+        max_age: chrono::Duration,
+        keep_alive: &std::collections::HashSet<TaskID>,
+    ) -> anyhow::Result<usize> {
         let conn = self.conn.clone();
         let cutoff = (chrono::Utc::now() - max_age).to_rfc3339();
+        // Filtering in Rust rather than a `NOT IN (…)` list keeps the statement
+        // free of SQLite's bound-variable limit; only expired rows are visited.
+        let keep: std::collections::HashSet<String> =
+            keep_alive.iter().map(|id| id.to_string()).collect();
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let guard = conn
                 .lock()
                 .map_err(|_| anyhow!("Checkpoint DB mutex poisoned"))?;
-            let deleted = guard
-                .execute(
-                    "DELETE FROM checkpoints WHERE updated_at < ?1",
-                    params![cutoff],
-                )
-                .context("Failed to prune expired checkpoints")?;
+            let expired: Vec<String> = {
+                let mut stmt = guard
+                    .prepare("SELECT task_id FROM checkpoints WHERE updated_at < ?1")
+                    .context("Failed to prepare checkpoint prune scan")?;
+                let rows = stmt
+                    .query_map(params![cutoff], |row| row.get::<_, String>(0))
+                    .context("Failed to scan expired checkpoints")?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .context("Failed to decode expired checkpoint row")?
+            };
+            let mut deleted = 0usize;
+            for task_id in expired {
+                if keep.contains(&task_id) {
+                    continue;
+                }
+                deleted += guard
+                    .execute(
+                        "DELETE FROM checkpoints WHERE task_id = ?1",
+                        params![task_id],
+                    )
+                    .context("Failed to prune expired checkpoints")?;
+            }
             Ok(deleted)
         })
         .await
         .context("Checkpoint prune task failed")?
+    }
+
+    /// Increment the boot-resume counter for a task's checkpoint and return the
+    /// new count. Guards against a poison-pill checkpoint: a task that crashes
+    /// the kernel would otherwise be auto-resumed on every boot, crash again,
+    /// and loop forever across systemd restarts. Returns 0 if no row exists.
+    pub async fn increment_resume_count(&self, task_id: &TaskID) -> anyhow::Result<u32> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<u32> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Checkpoint DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "UPDATE checkpoints SET resume_count = resume_count + 1 WHERE task_id = ?1",
+                    params![task_id],
+                )
+                .context("Failed to increment checkpoint resume_count")?;
+            let count: i64 = guard
+                .query_row(
+                    "SELECT resume_count FROM checkpoints WHERE task_id = ?1",
+                    params![task_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("Failed to read checkpoint resume_count")?
+                .unwrap_or(0);
+            Ok(count.max(0) as u32)
+        })
+        .await
+        .context("Checkpoint increment_resume_count task failed")?
     }
 
     /// Delete every checkpoint row owned by `agent_id`. Returns the number of rows removed.
@@ -318,6 +387,18 @@ impl CheckpointStore {
             .context("Failed to run checkpoint schema migration v1")?;
         }
 
+        if version < 2 {
+            conn.execute_batch(
+                "
+                ALTER TABLE checkpoints ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0;
+                INSERT INTO checkpoint_meta(key, value)
+                VALUES ('schema_version', '2')
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                ",
+            )
+            .context("Failed to run checkpoint schema migration v2")?;
+        }
+
         Ok(())
     }
 
@@ -396,6 +477,80 @@ mod tests {
         assert_eq!(loaded.agent_id, record.agent_id);
         assert_eq!(loaded.step_num, 2);
         assert_eq!(loaded.state_blob, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_resume_count_increments_and_resets_on_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::open(dir.path().join("checkpoints.db"))
+            .await
+            .unwrap();
+        let task = AgentTask::default();
+        let record = CheckpointRecord {
+            checkpoint_id: "cp-poison".to_string(),
+            task_id: task.id,
+            agent_id: task.agent_id,
+            step_num: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            key_version: CHECKPOINT_KEY_VERSION,
+            state_blob: vec![1],
+        };
+        store.write(record.clone()).await.unwrap();
+
+        // Crash-without-progress: each boot bumps the counter.
+        assert_eq!(store.increment_resume_count(&task.id).await.unwrap(), 1);
+        assert_eq!(store.increment_resume_count(&task.id).await.unwrap(), 2);
+        assert_eq!(store.increment_resume_count(&task.id).await.unwrap(), 3);
+
+        // A checkpoint write = progress since last resume → counter resets,
+        // so unrelated kernel restarts never kill a long-running task.
+        store.write(record).await.unwrap();
+        assert_eq!(store.increment_resume_count(&task.id).await.unwrap(), 1);
+
+        // No row → 0, never an error.
+        let other = AgentTask::default();
+        assert_eq!(store.increment_resume_count(&other.id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_spares_live_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::open(dir.path().join("checkpoints.db"))
+            .await
+            .unwrap();
+        let stale = chrono::Utc::now() - chrono::Duration::hours(100);
+        let mk = |task: &AgentTask, id: &str| CheckpointRecord {
+            checkpoint_id: id.to_string(),
+            task_id: task.id,
+            agent_id: task.agent_id,
+            step_num: 1,
+            created_at: stale,
+            updated_at: stale,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            key_version: CHECKPOINT_KEY_VERSION,
+            state_blob: vec![7],
+        };
+        // Parked for days on an unanswered question — still resumable.
+        let live = AgentTask::default();
+        // Terminal — nothing will ever resume it.
+        let dead = AgentTask::default();
+        store.write(mk(&live, "cp-live")).await.unwrap();
+        store.write(mk(&dead, "cp-dead")).await.unwrap();
+
+        let keep: std::collections::HashSet<TaskID> = [live.id].into_iter().collect();
+        let pruned = store
+            .prune_older_than(chrono::Duration::hours(72), &keep)
+            .await
+            .unwrap();
+
+        assert_eq!(pruned, 1);
+        assert!(
+            store.get_latest(&live.id).await.unwrap().is_some(),
+            "a non-terminal task must keep its recovery point"
+        );
+        assert!(store.get_latest(&dead.id).await.unwrap().is_none());
     }
 
     #[test]

@@ -4,9 +4,9 @@ use agentos_llm::{
 };
 use agentos_types::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 
 /// Per-agent cost accumulation state.
 struct AgentCostState {
@@ -25,6 +25,16 @@ struct AgentCostState {
     /// agents map — `compare_exchange` ensures exactly one thread performs the
     /// daily reset even under concurrent inference calls.
     period_start_unix: AtomicI64,
+    /// Highest operator-alert tier already delivered for the current period
+    /// (0 = none, 1 = warn, 2 = pause/downgrade, 3 = hard limit). Latched so a
+    /// budget crossing notifies once per period instead of on every inference.
+    /// Reset with the counters when the period rolls.
+    alert_tier: AtomicU8,
+    /// Separate latch for the `max_tool_calls_per_day` notification. Tool calls
+    /// and inference spend are different resources; sharing `alert_tier` meant
+    /// a tripped tool-call cap (tier 3) silenced every later cost warning/pause
+    /// for the rest of the period.
+    tool_limit_notified: std::sync::atomic::AtomicBool,
     /// Budget configuration.
     budget: AgentBudget,
     /// Agent display name (for reporting).
@@ -62,20 +72,10 @@ pub enum BudgetCheckResult {
     WallTimeExceeded { elapsed_secs: u64, limit_secs: u64 },
 }
 
-/// A budget alert sent over the notification channel.
-#[derive(Debug, Clone)]
-pub struct BudgetAlert {
-    pub agent_id: AgentID,
-    pub agent_name: String,
-    pub result: BudgetCheckResult,
-}
-
 /// Kernel-owned cost tracking for all agents.
 pub struct CostTracker {
     agents: RwLock<HashMap<AgentID, AgentCostState>>,
     pricing: RwLock<Vec<ModelPricing>>,
-    /// Broadcast channel for budget alerts (Warning / PauseRequired / HardLimitExceeded).
-    notify_tx: broadcast::Sender<BudgetAlert>,
     /// Optional persistence backend for crash-safe counter restoration.
     state_store: Option<Arc<KernelStateStore>>,
     /// Last persisted snapshots (includes agents that are currently disconnected).
@@ -88,11 +88,9 @@ impl CostTracker {
     }
 
     pub fn with_state_store(state_store: Option<Arc<KernelStateStore>>) -> Self {
-        let (notify_tx, _) = broadcast::channel(64);
         Self {
             agents: RwLock::new(HashMap::new()),
             pricing: RwLock::new(default_pricing_table()),
-            notify_tx,
             state_store,
             persisted_snapshots: RwLock::new(HashMap::new()),
         }
@@ -115,12 +113,95 @@ impl CostTracker {
         Ok(restored)
     }
 
-    /// Subscribe to budget alerts (Warning, PauseRequired, HardLimitExceeded).
-    pub fn subscribe(&self) -> broadcast::Receiver<BudgetAlert> {
-        self.notify_tx.subscribe()
+    /// Latch for operator budget notifications: returns `true` only the first
+    /// time `tier` (1 = warn, 2 = pause/downgrade, 3 = hard limit) is reached
+    /// within the current budget period, so a crossing notifies once instead of
+    /// on every inference. Escalating to a higher tier still fires; the latch
+    /// is cleared when the period rolls. Unknown agent → `false`.
+    pub async fn should_alert(&self, agent_id: &AgentID, tier: u8) -> bool {
+        let agents = self.agents.read().await;
+        match agents.get(agent_id) {
+            Some(state) => state.alert_tier.fetch_max(tier, Ordering::AcqRel) < tier,
+            None => false,
+        }
+    }
+
+    /// Once-per-period latch for the tool-call hard-limit notification,
+    /// independent of [`Self::should_alert`] (see `tool_limit_notified`).
+    pub async fn should_alert_tool_calls(&self, agent_id: &AgentID) -> bool {
+        let agents = self.agents.read().await;
+        match agents.get(agent_id) {
+            Some(state) => !state.tool_limit_notified.swap(true, Ordering::AcqRel),
+            None => false,
+        }
+    }
+
+    /// Length of a budget period. One definition, shared by the live rollover
+    /// (`maybe_roll_period`) and its display-only mirror
+    /// (`persisted_to_snapshot`) so the two cannot drift apart.
+    const PERIOD_SECS: i64 = 24 * 3600;
+
+    /// True when `elapsed` seconds since `period_start` puts us outside the
+    /// current period. Signed on purpose: a `period_start` in the *future*
+    /// (host clock ahead — VM resumed before NTP, bad RTC, hand-edited row)
+    /// yields a negative elapsed and must count as expired, or the lockout
+    /// survives every restart.
+    fn period_expired(elapsed: i64) -> bool {
+        !(0..Self::PERIOD_SECS).contains(&elapsed)
+    }
+
+    /// Roll the 24-hour budget period (and zero the counters) if it has elapsed.
+    ///
+    /// This must run on the *read* paths too, not only when usage is recorded.
+    /// Enforcement bails before inference once a hard limit trips, so a rollover
+    /// that lived only in `record_inference_with_cost` sat downstream of the very
+    /// gate that stopped it — a hard-limited agent could never reach the code
+    /// that would have freed it (MA-03).
+    ///
+    /// `compare_exchange` keeps the concurrent-reset race safe: exactly one
+    /// caller advances `period_start_unix` and zeroes the counters; losers
+    /// observe the new timestamp and skip.
+    ///
+    /// Returns `true` when the period was rolled by this call **or** is being
+    /// rolled right now by another caller. In both cases the counters the
+    /// caller is about to read are not authoritative for the new period (the
+    /// winner's `store(0)` calls may not have landed yet), so a `true` here
+    /// must never be read as "over limit".
+    ///
+    // ponytail: `period_start_unix` and the five counters are separate atomics,
+    // all `Relaxed`, so there is a nanosecond-wide window between the
+    // `compare_exchange` below and the `store(0)` calls where a third caller
+    // loads the *new* timestamp, computes `elapsed ~= 0`, returns `false`, and
+    // then reads the winner's not-yet-zeroed counters as if they were the new
+    // period's. Closing it needs the timestamp and counters behind one atomic
+    // (a generation counter bumped by the winner, compared by readers) —
+    // upgrade path if a false one-shot over-limit at the rollover boundary ever
+    // shows up in practice.
+    fn maybe_roll_period(state: &AgentCostState) -> bool {
+        let now_ts = chrono::Utc::now().timestamp();
+        let start_ts = state.period_start_unix.load(Ordering::Relaxed);
+        if !Self::period_expired(now_ts - start_ts) {
+            return false;
+        }
+        if state
+            .period_start_unix
+            .compare_exchange(start_ts, now_ts, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            state.input_tokens.store(0, Ordering::Relaxed);
+            state.output_tokens.store(0, Ordering::Relaxed);
+            state.tokens_used.store(0, Ordering::Relaxed);
+            state.cost_micro_usd.store(0, Ordering::Relaxed);
+            state.tool_calls.store(0, Ordering::Relaxed);
+            // Fresh period — the operator gets a new set of budget alerts.
+            state.alert_tier.store(0, Ordering::Relaxed);
+            state.tool_limit_notified.store(false, Ordering::Relaxed);
+        }
+        true
     }
 
     fn state_to_snapshot(agent_id: AgentID, state: &AgentCostState) -> CostSnapshot {
+        Self::maybe_roll_period(state);
         let tokens = state.tokens_used.load(Ordering::Relaxed);
         let cost_micro = state.cost_micro_usd.load(Ordering::Relaxed);
         let calls = state.tool_calls.load(Ordering::Relaxed);
@@ -165,33 +246,52 @@ impl CostTracker {
 
     fn persisted_to_snapshot(snapshot: &PersistedCostSnapshot) -> CostSnapshot {
         let budget = AgentBudget::default();
-        let tokens_used = snapshot.input_tokens.saturating_add(snapshot.output_tokens);
+        // Display-only mirror of `maybe_roll_period`. Read paths must not write
+        // to the DB, so an in-memory rollover is never persisted: a row whose
+        // period expired still carries pre-roll counters, and a disconnected
+        // agent would be reported as stale over-100% when it is not actually
+        // limited. Same signed-elapsed rule as `maybe_roll_period` — a
+        // future-dated `period_start` counts as expired too.
+        let expired = Self::period_expired(
+            chrono::Utc::now()
+                .signed_duration_since(snapshot.period_start)
+                .num_seconds(),
+        );
+        let (tokens_used, cost_usd, tool_calls) = if expired {
+            (0, 0.0, 0)
+        } else {
+            (
+                snapshot.input_tokens.saturating_add(snapshot.output_tokens),
+                snapshot.total_cost_usd,
+                snapshot.tool_calls,
+            )
+        };
         let tokens_pct = if budget.max_tokens_per_day > 0 {
             (tokens_used as f64 / budget.max_tokens_per_day as f64) * 100.0
         } else {
             0.0
         };
         let cost_pct = if budget.max_cost_usd_per_day > 0.0 {
-            (snapshot.total_cost_usd / budget.max_cost_usd_per_day) * 100.0
+            (cost_usd / budget.max_cost_usd_per_day) * 100.0
         } else {
             0.0
         };
         let tool_calls_pct = if budget.max_tool_calls_per_day > 0 {
-            (snapshot.tool_calls as f64 / budget.max_tool_calls_per_day as f64) * 100.0
+            (tool_calls as f64 / budget.max_tool_calls_per_day as f64) * 100.0
         } else {
             0.0
         };
 
         let forecast_exhaustion_hours =
-            Self::forecast_hours(snapshot.period_start, snapshot.total_cost_usd, &budget);
+            Self::forecast_hours(snapshot.period_start, cost_usd, &budget);
 
         CostSnapshot {
             agent_id: snapshot.agent_id,
             agent_name: snapshot.agent_name.clone(),
             period_start: snapshot.period_start,
             tokens_used,
-            cost_usd: snapshot.total_cost_usd,
-            tool_calls: snapshot.tool_calls,
+            cost_usd,
+            tool_calls,
             budget,
             tokens_pct,
             cost_pct,
@@ -306,6 +406,10 @@ impl CostTracker {
             cost_micro_usd: AtomicU64::new(cost_micro_usd),
             tool_calls: AtomicU64::new(tool_calls),
             period_start_unix: AtomicI64::new(period_start_unix),
+            // ponytail: not persisted — a reconnecting agent re-notifies once
+            // per tier. Persist alongside the counters if the repeat is noisy.
+            alert_tier: AtomicU8::new(0),
+            tool_limit_notified: std::sync::atomic::AtomicBool::new(false),
             budget,
             agent_name,
             persist_version: AtomicU64::new(version),
@@ -408,34 +512,13 @@ impl CostTracker {
             };
 
             // Reset counters if we've crossed into a new budget period (24 hours).
-            //
-            // `period_start_unix` is an AtomicI64 so it can be updated under a read lock.
-            // `compare_exchange` ensures exactly one concurrent caller performs the reset:
-            // the winner atomically advances the period timestamp before zeroing counters,
-            // so losers see the new timestamp and skip the reset.
-            let now = chrono::Utc::now();
-            let start_ts = state.period_start_unix.load(Ordering::Relaxed);
-            let hours_since_reset = (now.timestamp() - start_ts) / 3600;
-            if hours_since_reset >= 24 {
-                // Attempt to claim the reset; only the thread that wins the CAS proceeds.
-                if state
-                    .period_start_unix
-                    .compare_exchange(
-                        start_ts,
-                        now.timestamp(),
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    state.input_tokens.store(0, Ordering::Relaxed);
-                    state.output_tokens.store(0, Ordering::Relaxed);
-                    state.tokens_used.store(0, Ordering::Relaxed);
-                    state.cost_micro_usd.store(0, Ordering::Relaxed);
-                    state.tool_calls.store(0, Ordering::Relaxed);
-                }
-                // Whether or not we won the CAS, the counters are now in the new period.
-            }
+            // W2: a `true` means the period rolled — here, or concurrently in a
+            // CAS winner whose `store(0)` calls may not have landed yet. Either
+            // way the totals we read back below are pre-reset, so judge this
+            // call as the first of a fresh period instead of enforcing a limit
+            // against a budget that just reset (downstream that is a
+            // `BudgetAction::Suspend`/`Kill` on a live task).
+            let rolled = Self::maybe_roll_period(state);
 
             // Accumulate
             state
@@ -444,18 +527,22 @@ impl CostTracker {
             state
                 .output_tokens
                 .fetch_add(usage.completion_tokens, Ordering::Relaxed);
-            let new_tokens = state
+            let acc_tokens = state
                 .tokens_used
                 .fetch_add(usage.total_tokens, Ordering::Relaxed)
                 + usage.total_tokens;
-            let new_cost_micro = state
+            let acc_cost_micro = state
                 .cost_micro_usd
                 .fetch_add(cost_micro, Ordering::Relaxed)
                 + cost_micro;
+            let (new_tokens, new_cost_micro) = if rolled {
+                (usage.total_tokens, cost_micro)
+            } else {
+                (acc_tokens, acc_cost_micro)
+            };
 
             // Check limits
             let result = self.check_limits(state, new_tokens, new_cost_micro);
-            self.maybe_notify(*agent_id, &state.agent_name, &result);
             let snapshot = self.next_persisted_snapshot(*agent_id, state);
             (result, snapshot)
         };
@@ -485,6 +572,12 @@ impl CostTracker {
             Some(s) => s,
             None => return BudgetCheckResult::Ok,
         };
+        // Fresh period (rolled here, or being rolled concurrently) — the
+        // counters below may still be the pre-reset values, so reading them
+        // would reject a turn one second after its budget actually reset.
+        if Self::maybe_roll_period(state) {
+            return BudgetCheckResult::Ok;
+        }
         let tokens = state.tokens_used.load(Ordering::Relaxed);
         let cost_micro = state.cost_micro_usd.load(Ordering::Relaxed);
         self.check_limits(state, tokens, cost_micro)
@@ -499,11 +592,16 @@ impl CostTracker {
                 None => return BudgetCheckResult::Ok,
             };
 
-            let new_calls = state.tool_calls.fetch_add(1, Ordering::Relaxed) + 1;
+            // W2: same rolled-period rule as `record_inference_with_cost` — a
+            // rollover (ours or a concurrent CAS winner's) makes this the first
+            // call of a fresh period, not the Nth of the old one.
+            let rolled = Self::maybe_roll_period(state);
+            let acc_calls = state.tool_calls.fetch_add(1, Ordering::Relaxed) + 1;
+            let new_calls = if rolled { 1 } else { acc_calls };
 
             let result = if state.budget.max_tool_calls_per_day > 0 {
                 let pct = (new_calls as f64 / state.budget.max_tool_calls_per_day as f64) * 100.0;
-                let result = if pct >= 100.0 {
+                if pct >= 100.0 {
                     BudgetCheckResult::HardLimitExceeded {
                         resource: "tool_calls".into(),
                         action: state.budget.on_hard_limit,
@@ -520,9 +618,7 @@ impl CostTracker {
                     }
                 } else {
                     BudgetCheckResult::Ok
-                };
-                self.maybe_notify(*agent_id, &state.agent_name, &result);
-                result
+                }
             } else {
                 BudgetCheckResult::Ok
             };
@@ -549,18 +645,17 @@ impl CostTracker {
             None => return BudgetCheckResult::Ok,
         };
 
+        Self::maybe_roll_period(state);
         if state.budget.max_wall_time_seconds > 0 {
             let elapsed = chrono::Utc::now()
                 .signed_duration_since(task_started_at)
                 .num_seconds()
                 .max(0) as u64;
             if elapsed >= state.budget.max_wall_time_seconds {
-                let result = BudgetCheckResult::WallTimeExceeded {
+                return BudgetCheckResult::WallTimeExceeded {
                     elapsed_secs: elapsed,
                     limit_secs: state.budget.max_wall_time_seconds,
                 };
-                self.maybe_notify(*agent_id, &state.agent_name, &result);
-                return result;
             }
         }
 
@@ -678,20 +773,6 @@ impl CostTracker {
 
         BudgetCheckResult::Ok
     }
-
-    /// Send a budget alert over the notification channel if the result is non-Ok.
-    fn maybe_notify(&self, agent_id: AgentID, agent_name: &str, result: &BudgetCheckResult) {
-        match result {
-            BudgetCheckResult::Ok => {}
-            _ => {
-                let _ = self.notify_tx.send(BudgetAlert {
-                    agent_id,
-                    agent_name: agent_name.to_string(),
-                    result: result.clone(),
-                });
-            }
-        }
-    }
 }
 
 impl Default for CostTracker {
@@ -803,6 +884,289 @@ mod tests {
             result,
             BudgetCheckResult::HardLimitExceeded { .. }
         ));
+    }
+
+    /// MA-03 regression: a hard-limited agent must become callable again once
+    /// the 24h period elapses, *without* any intervening
+    /// `record_inference_with_cost`. The rollover used to live only inside that
+    /// method, which the pre-inference gate never reaches once the limit trips.
+    #[tokio::test]
+    async fn test_hard_limit_clears_after_period_rollover_without_recording() {
+        let tracker = CostTracker::new();
+        let agent_id = AgentID::new();
+        let budget = AgentBudget {
+            max_tokens_per_day: 100,
+            max_cost_usd_per_day: 0.0,
+            max_tool_calls_per_day: 10,
+            warn_at_pct: 80,
+            pause_at_pct: 95,
+            on_hard_limit: BudgetAction::Suspend,
+            downgrade_model: None,
+            allowed_models: vec![],
+            max_wall_time_seconds: 0,
+        };
+        tracker
+            .register_agent(agent_id, "test-agent".into(), budget)
+            .await;
+
+        let usage = TokenUsage {
+            prompt_tokens: 80,
+            completion_tokens: 30,
+            total_tokens: 110,
+        };
+        tracker
+            .record_inference(&agent_id, &usage, "ollama", "llama3")
+            .await;
+        assert!(matches!(
+            tracker.check_budget(&agent_id).await,
+            BudgetCheckResult::HardLimitExceeded { .. }
+        ));
+
+        // Backdate the period start by 25h. Nothing else happens — in
+        // particular no inference is recorded, exactly as when the gate is
+        // bailing before every LLM call.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).unwrap();
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() - 25 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+
+        assert_eq!(
+            tracker.check_budget(&agent_id).await,
+            BudgetCheckResult::Ok,
+            "check_budget must roll the expired period instead of staying locked out"
+        );
+        assert_eq!(
+            tracker.record_tool_call(&agent_id).await,
+            BudgetCheckResult::Ok
+        );
+        let snap = tracker.get_snapshot(&agent_id).await.unwrap();
+        assert_eq!(snap.tokens_used, 0, "counters reset for the new period");
+        assert_eq!(
+            snap.tool_calls, 1,
+            "only the post-rollover tool call counts"
+        );
+    }
+
+    /// W1 regression: a `period_start` in the *future* must still roll. The
+    /// old guard subtracted signed timestamps, so a snapshot written while the
+    /// host clock was ahead (VM resumed before NTP, bad RTC, hand-edited row)
+    /// made `elapsed` negative, passed the guard, and never rolled — and
+    /// `register_agent` reseeds `period_start_unix` from that same row, so the
+    /// lockout survived every restart.
+    #[tokio::test]
+    async fn test_future_dated_period_start_still_rolls() {
+        let tracker = CostTracker::new();
+        let agent_id = AgentID::new();
+        let budget = AgentBudget {
+            max_tokens_per_day: 100,
+            max_cost_usd_per_day: 0.0,
+            max_tool_calls_per_day: 0,
+            warn_at_pct: 80,
+            pause_at_pct: 95,
+            on_hard_limit: BudgetAction::Suspend,
+            downgrade_model: None,
+            allowed_models: vec![],
+            max_wall_time_seconds: 0,
+        };
+        tracker
+            .register_agent(agent_id, "clock-skew".into(), budget)
+            .await;
+
+        let usage = TokenUsage {
+            prompt_tokens: 80,
+            completion_tokens: 30,
+            total_tokens: 110,
+        };
+        tracker
+            .record_inference(&agent_id, &usage, "ollama", "llama3")
+            .await;
+        assert!(matches!(
+            tracker.check_budget(&agent_id).await,
+            BudgetCheckResult::HardLimitExceeded { .. }
+        ));
+
+        // Period start 48h in the *future* — as restored from a snapshot
+        // written under a fast clock.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).unwrap();
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() + 48 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+
+        assert_eq!(
+            tracker.check_budget(&agent_id).await,
+            BudgetCheckResult::Ok,
+            "a future-dated period_start must roll, not lock the agent out forever"
+        );
+        let snap = tracker.get_snapshot(&agent_id).await.unwrap();
+        assert_eq!(snap.tokens_used, 0, "counters reset for the new period");
+    }
+
+    /// W6 regression: the `compare_exchange` loser must not report the
+    /// pre-reset counters as a hard limit. Exactly one of these concurrent
+    /// gates wins the CAS; the losers return before its `store(0)` calls land,
+    /// so reading `tokens_used` there produced a one-shot false "cannot run
+    /// until its daily budget resets" one second after it did reset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_period_rollover_does_not_falsely_hard_limit() {
+        let tracker = Arc::new(CostTracker::new());
+        let agent_id = AgentID::new();
+        let budget = AgentBudget {
+            max_tokens_per_day: 100,
+            max_cost_usd_per_day: 0.0,
+            max_tool_calls_per_day: 0,
+            warn_at_pct: 80,
+            pause_at_pct: 95,
+            on_hard_limit: BudgetAction::Suspend,
+            downgrade_model: None,
+            allowed_models: vec![],
+            max_wall_time_seconds: 0,
+        };
+        tracker
+            .register_agent(agent_id, "race-agent".into(), budget)
+            .await;
+
+        let usage = TokenUsage {
+            prompt_tokens: 80,
+            completion_tokens: 30,
+            total_tokens: 110,
+        };
+        tracker
+            .record_inference(&agent_id, &usage, "ollama", "llama3")
+            .await;
+
+        // Park the period start just over the boundary, then send several
+        // chat turns through the gate at once.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).unwrap();
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() - 25 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let tracker = Arc::clone(&tracker);
+            handles.push(tokio::spawn(async move {
+                tracker.check_budget(&agent_id).await
+            }));
+        }
+        for handle in handles {
+            assert_eq!(
+                handle.await.expect("gate task should not panic"),
+                BudgetCheckResult::Ok,
+                "a rollover CAS loser must not be reported as hard-limited"
+            );
+        }
+    }
+
+    /// W2 regression: `record_tool_call` and `record_inference_with_cost`
+    /// discarded `maybe_roll_period`'s verdict. The `compare_exchange` loser
+    /// therefore incremented the **pre-reset** counters and reported
+    /// `HardLimitExceeded` — which `task_executor` turns into a
+    /// `BudgetAction::Suspend`/`Kill` — for a budget that had just reset. Its
+    /// increment was then lost to the winner's `store(0)` as well.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_rollover_does_not_falsely_hard_limit_recording() {
+        let tracker = Arc::new(CostTracker::new());
+        let agent_id = AgentID::new();
+        let budget = AgentBudget {
+            max_tokens_per_day: 1000,
+            max_cost_usd_per_day: 0.0,
+            max_tool_calls_per_day: 100,
+            warn_at_pct: 80,
+            pause_at_pct: 95,
+            on_hard_limit: BudgetAction::Kill,
+            downgrade_model: None,
+            allowed_models: vec![],
+            max_wall_time_seconds: 0,
+        };
+        tracker
+            .register_agent(agent_id, "race-record".into(), budget)
+            .await;
+
+        // Both budgets sitting at the hard limit, with the period parked just
+        // over the 24h boundary — the state every caller sees at a rollover.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).unwrap();
+            state.tokens_used.store(1100, Ordering::Relaxed);
+            state.tool_calls.store(100, Ordering::Relaxed);
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() - 25 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let tracker = Arc::clone(&tracker);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                if i % 2 == 0 {
+                    tracker.record_tool_call(&agent_id).await
+                } else {
+                    let usage = TokenUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                    };
+                    tracker
+                        .record_inference(&agent_id, &usage, "ollama", "llama3")
+                        .await
+                }
+            }));
+        }
+        for handle in handles {
+            let result = handle.await.expect("recording task should not panic");
+            assert!(
+                !matches!(result, BudgetCheckResult::HardLimitExceeded { .. }),
+                "a rollover CAS loser must not report a just-reset budget as exceeded, got {:?}",
+                result
+            );
+        }
+    }
+
+    /// W5 regression: read paths deliberately never write the rollover back to
+    /// SQLite, so a persisted row can outlive its period. The display-only
+    /// conversion must mirror the rollover, otherwise the panel and
+    /// `agentos cost` show a stale over-100% agent that is not actually limited.
+    #[test]
+    fn test_persisted_snapshot_zeroes_counters_past_period() {
+        let budget = AgentBudget::default();
+        let mut persisted = PersistedCostSnapshot {
+            agent_id: AgentID::new(),
+            agent_name: "stale-agent".into(),
+            input_tokens: budget.max_tokens_per_day,
+            output_tokens: budget.max_tokens_per_day,
+            total_cost_usd: budget.max_cost_usd_per_day * 2.0,
+            tool_calls: 99,
+            period_start: chrono::Utc::now() - chrono::Duration::hours(25),
+            version: 7,
+        };
+
+        let snap = CostTracker::persisted_to_snapshot(&persisted);
+        assert_eq!(snap.tokens_used, 0, "expired period reports zeroed tokens");
+        assert_eq!(snap.cost_usd, 0.0, "expired period reports zeroed cost");
+        assert_eq!(snap.tool_calls, 0, "expired period reports zeroed calls");
+        assert!(snap.tokens_pct < 100.0 && snap.cost_pct < 100.0);
+
+        // Inside the period the counters are reported verbatim.
+        persisted.period_start = chrono::Utc::now() - chrono::Duration::hours(1);
+        let snap = CostTracker::persisted_to_snapshot(&persisted);
+        assert_eq!(snap.tokens_used, budget.max_tokens_per_day * 2);
+        assert_eq!(snap.tool_calls, 99);
     }
 
     #[tokio::test]
@@ -1122,5 +1486,102 @@ mod tests {
             snap.tokens_used, 150,
             "Token usage should still be recorded"
         );
+    }
+
+    async fn tracker_with_agent(name: &str) -> (CostTracker, AgentID) {
+        let tracker = CostTracker::new();
+        let agent_id = AgentID::new();
+        tracker
+            .register_agent(agent_id, name.into(), AgentBudget::default())
+            .await;
+        (tracker, agent_id)
+    }
+
+    /// The operator gets one notification per tier crossing, not one per
+    /// inference: the first `should_alert(1)` fires, later ones do not.
+    #[tokio::test]
+    async fn test_should_alert_latches_per_tier() {
+        let (tracker, agent_id) = tracker_with_agent("latch-agent").await;
+
+        assert!(tracker.should_alert(&agent_id, 1).await);
+        assert!(!tracker.should_alert(&agent_id, 1).await);
+        assert!(!tracker.should_alert(&agent_id, 1).await);
+
+        // Unknown agents never alert.
+        assert!(!tracker.should_alert(&AgentID::new(), 1).await);
+    }
+
+    /// Escalation must still notify: a warn already latched at tier 1 must not
+    /// swallow the pause notification at tier 2, while tier 1 stays latched.
+    #[tokio::test]
+    async fn test_should_alert_escalates_to_higher_tier() {
+        let (tracker, agent_id) = tracker_with_agent("escalate-agent").await;
+
+        assert!(tracker.should_alert(&agent_id, 1).await);
+        assert!(tracker.should_alert(&agent_id, 2).await);
+        assert!(!tracker.should_alert(&agent_id, 2).await);
+        assert!(
+            !tracker.should_alert(&agent_id, 1).await,
+            "a lower tier must not re-fire after a higher one latched"
+        );
+        assert!(tracker.should_alert(&agent_id, 3).await);
+    }
+
+    /// The latch is per budget period — once the period rolls, the operator is
+    /// notified again for the new period's crossings.
+    #[tokio::test]
+    async fn test_should_alert_resets_after_period_rollover() {
+        let (tracker, agent_id) = tracker_with_agent("roll-agent").await;
+
+        assert!(tracker.should_alert(&agent_id, 2).await);
+        assert!(!tracker.should_alert(&agent_id, 1).await);
+
+        // Backdate past the 24h boundary and let a read path roll the period.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).expect("agent registered");
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() - 25 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+        assert_eq!(tracker.check_budget(&agent_id).await, BudgetCheckResult::Ok);
+
+        assert!(
+            tracker.should_alert(&agent_id, 1).await,
+            "a rolled period must re-arm the operator alert latch"
+        );
+    }
+
+    /// Tool calls and inference spend are separate resources: a tripped
+    /// tool-call cap must not silence a later cost warning, and vice versa.
+    #[tokio::test]
+    async fn test_tool_call_latch_is_independent_of_tier_latch() {
+        let (tracker, agent_id) = tracker_with_agent("tool-agent").await;
+
+        assert!(tracker.should_alert_tool_calls(&agent_id).await);
+        assert!(!tracker.should_alert_tool_calls(&agent_id).await);
+        assert!(
+            tracker.should_alert(&agent_id, 1).await,
+            "a tool-call limit must not suppress the first cost warning"
+        );
+
+        // Reverse order: a hard cost limit must not suppress the tool-call alert.
+        let (tracker, agent_id) = tracker_with_agent("tool-agent-2").await;
+        assert!(tracker.should_alert(&agent_id, 3).await);
+        assert!(tracker.should_alert_tool_calls(&agent_id).await);
+
+        // Both latches re-arm on rollover.
+        {
+            let agents = tracker.agents.read().await;
+            let state = agents.get(&agent_id).expect("agent registered");
+            state.period_start_unix.store(
+                chrono::Utc::now().timestamp() - 25 * 3600,
+                Ordering::Relaxed,
+            );
+        }
+        assert_eq!(tracker.check_budget(&agent_id).await, BudgetCheckResult::Ok);
+        assert!(tracker.should_alert_tool_calls(&agent_id).await);
+        assert!(tracker.should_alert(&agent_id, 1).await);
     }
 }

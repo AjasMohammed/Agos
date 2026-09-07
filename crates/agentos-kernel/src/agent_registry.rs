@@ -49,6 +49,7 @@ impl AgentRegistry {
         };
         registry.load_from_disk();
         registry.ensure_base_role();
+        registry.ensure_reactive_roles();
         registry.save_to_disk();
         registry
     }
@@ -63,6 +64,49 @@ impl AgentRegistry {
                 .permissions
                 .grant("fs.user_data".to_string(), true, true, false, None);
             self.register_role(base_role);
+        }
+    }
+
+    /// Register the role names the event system keys off, if missing.
+    ///
+    /// `event_bus::default_subscriptions_for_role` matches these five names
+    /// exactly, but none of them existed as roles, and `assign_role` rejects a
+    /// name it does not know. So every agent fell through to the catch-all
+    /// defaults (AgentAdded / DirectMessageReceived / DelegationReceived) and
+    /// onboarding was the only autonomous activity the system could produce.
+    /// Each role carries the matching `events.<category>:observe` grants so a
+    /// holder can also refine its own subscriptions via `event-subscribe`.
+    fn ensure_reactive_roles(&mut self) {
+        const REACTIVE_ROLES: &[(&str, &str)] = &[
+            (
+                "orchestrator",
+                "Reacts to agent lifecycle, task lifecycle, and inter-agent communication events",
+            ),
+            (
+                "security-monitor",
+                "Reacts to security events, sandbox violations, and tool checksum mismatches",
+            ),
+            (
+                "sysops",
+                "Reacts to system health, hardware, and scheduled-task failure events",
+            ),
+            ("memory-manager", "Reacts to memory events"),
+            (
+                "tool-manager",
+                "Reacts to tool registry and execution events",
+            ),
+        ];
+
+        for (name, description) in REACTIVE_ROLES {
+            if self.role_name_index.contains_key(*name) {
+                continue;
+            }
+            let mut role = Role::new(name.to_string(), description.to_string());
+            for resource in crate::event_bus::event_observe_permissions_for_role(name) {
+                role.permissions
+                    .grant_op(resource.to_string(), PermissionOp::Observe, None);
+            }
+            self.register_role(role);
         }
     }
 
@@ -156,6 +200,15 @@ impl AgentRegistry {
         }
     }
 
+    /// Refresh an agent's `last_active` to now. Used by the heartbeat runner to
+    /// restart the wake interval after firing a check turn.
+    pub fn touch_last_active(&mut self, id: &AgentID) {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.last_active = chrono::Utc::now();
+            self.save_to_disk();
+        }
+    }
+
     /// Mark an agent as intentionally offline so auto-reactivation skips it on restart.
     pub fn set_manually_offline(&mut self, id: &AgentID, value: bool) {
         if let Some(agent) = self.agents.get_mut(id) {
@@ -213,21 +266,34 @@ impl AgentRegistry {
 
     /// Update editable profile settings by agent name.
     /// Returns the updated agent ID on success.
+    /// Partial update: a `None` argument leaves that field as it is. This is a
+    /// partial update rather than a replace because callers (the panel, the web
+    /// form) edit one field at a time and cannot resend values the API never
+    /// handed them — assigning unconditionally silently erased system prompts.
+    ///
+    /// `system_prompt` is doubly wrapped on purpose: `None` = unchanged,
+    /// `Some(None)` = clear, `Some(Some(s))` = set.
     pub fn update_profile_settings(
         &mut self,
         name: &str,
-        description: String,
-        default_thinking_level: ThinkingLevel,
-        system_prompt: Option<String>,
+        description: Option<String>,
+        default_thinking_level: Option<ThinkingLevel>,
+        system_prompt: Option<Option<String>>,
     ) -> Result<AgentID, String> {
         let id = *self
             .name_index
             .get(name)
             .ok_or_else(|| format!("Agent '{}' not found", name))?;
         if let Some(agent) = self.agents.get_mut(&id) {
-            agent.description = description;
-            agent.default_thinking_level = default_thinking_level;
-            agent.system_prompt = system_prompt;
+            if let Some(d) = description {
+                agent.description = d;
+            }
+            if let Some(t) = default_thinking_level {
+                agent.default_thinking_level = t;
+            }
+            if let Some(p) = system_prompt {
+                agent.system_prompt = p;
+            }
             self.save_to_disk();
             Ok(id)
         } else {
@@ -849,6 +915,55 @@ mod tests {
             second.is_empty(),
             "Second drain should be empty after first drain"
         );
+    }
+
+    #[test]
+    fn update_profile_settings_is_partial() {
+        let dir = TempDir::new().unwrap();
+        let mut registry = AgentRegistry::with_persistence(dir.path().to_path_buf());
+        let mut agent = make_agent("alice");
+        agent.description = "original".to_string();
+        agent.default_thinking_level = ThinkingLevel::Max;
+        agent.system_prompt = Some("you are careful".to_string());
+        registry.register(agent);
+
+        // All-None = touch nothing. This is the case that used to erase a system
+        // prompt when an operator edited only the description.
+        registry
+            .update_profile_settings("alice", None, None, None)
+            .expect("partial update");
+        let a = registry.get_by_name("alice").unwrap();
+        assert_eq!(a.description, "original");
+        assert_eq!(a.default_thinking_level, ThinkingLevel::Max);
+        assert_eq!(a.system_prompt.as_deref(), Some("you are careful"));
+
+        // Description only: the other two survive.
+        registry
+            .update_profile_settings("alice", Some("edited".to_string()), None, None)
+            .expect("description-only update");
+        let a = registry.get_by_name("alice").unwrap();
+        assert_eq!(a.description, "edited");
+        assert_eq!(a.default_thinking_level, ThinkingLevel::Max);
+        assert_eq!(a.system_prompt.as_deref(), Some("you are careful"));
+
+        // Some(Some(_)) sets, Some(None) clears.
+        registry
+            .update_profile_settings("alice", None, None, Some(Some("new prompt".to_string())))
+            .expect("set prompt");
+        assert_eq!(
+            registry
+                .get_by_name("alice")
+                .unwrap()
+                .system_prompt
+                .as_deref(),
+            Some("new prompt")
+        );
+        registry
+            .update_profile_settings("alice", None, Some(ThinkingLevel::Low), Some(None))
+            .expect("clear prompt");
+        let a = registry.get_by_name("alice").unwrap();
+        assert_eq!(a.system_prompt, None);
+        assert_eq!(a.default_thinking_level, ThinkingLevel::Low);
     }
 
     #[test]

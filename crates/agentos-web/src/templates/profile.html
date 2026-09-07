@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+<article>
+  <header>
+    <hgroup>
+      <h2>User Profile</h2>
+      <p>Stored facts the agent has learned about you. Edit a value or forget an entry.</p>
+    </hgroup>
+  </header>
+
+  {% if entries %}
+  <figure>
+    <table role="grid">
+      <thead>
+        <tr>
+          <th scope="col">Category</th>
+          <th scope="col">Key</th>
+          <th scope="col">Value</th>
+          <th scope="col">Confidence</th>
+          <th scope="col">Pin</th>
+          <th scope="col">Uses</th>
+          <th scope="col">Status</th>
+          <th scope="col">Updated</th>
+          <th scope="col">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td>{{ e.category }}</td>
+          <td>{{ e.key }}</td>
+          <td>{{ e.value }}</td>
+          <td>{{ "%.2f"|format(e.confidence) }}</td>
+          <td>{{ e.pin_rank }}</td>
+          <td>{{ e.usage_count }}</td>
+          <td>{{ e.status }}</td>
+          <td><small>{{ e.updated_at | relative_time }}</small></td>
+          <td>
+            <form method="post" action="/profile/edit">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="id" value="{{ e.id }}">
+              <input type="text" name="value" value="{{ e.value }}" placeholder="Value" aria-label="Value">
+              <input type="number" name="confidence" value="{{ "%.2f"|format(e.confidence) }}" step="0.01" min="0" max="1" placeholder="Confidence" aria-label="Confidence">
+              <input type="text" name="category" value="{{ e.category }}" placeholder="Category" aria-label="Category">
+              <button type="submit">Save</button>
+            </form>
+            <form method="post" action="/profile/forget">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="id" value="{{ e.id }}">
+              <button type="submit" class="secondary outline">Forget</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+  {% else %}
+  <p><em>No profile entries stored yet. The agent will record facts about you as it works.</em></p>
+  {% endif %}
+</article>
+{% endblock %}

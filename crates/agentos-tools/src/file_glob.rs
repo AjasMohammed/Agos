@@ -65,15 +65,14 @@ impl AgentTool for FileGlob {
             });
         }
 
-        let base_resolved = crate::traits::resolve_tool_path(
-            sub_path,
-            &context.data_dir,
-            &context.workspace_paths,
-        )?;
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
+        let base_resolved =
+            crate::traits::resolve_tool_path(sub_path, &agent_root, &context.workspace_paths)?;
 
-        let canonical_data_dir =
-            context
-                .data_dir
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-glob".into(),
@@ -98,7 +97,7 @@ impl AgentTool for FileGlob {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_base))
             .unwrap_or(false);
-        if !canonical_base.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
+        if !canonical_base.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", sub_path),
@@ -119,12 +118,12 @@ impl AgentTool for FileGlob {
         let full_pattern = format!("{}/{}", canonical_base.display(), pattern);
         let pattern_clone = pattern.clone();
         // Allowed roots for this execution: data_dir + any workspace paths.
-        let allowed_roots: Vec<PathBuf> = std::iter::once(canonical_data_dir.clone())
+        let allowed_roots: Vec<PathBuf> = std::iter::once(canonical_agent_root.clone())
             .chain(context.workspace_paths.iter().cloned())
             .collect();
 
-        let (matches, canonical_data_dir_clone) = tokio::task::spawn_blocking(move || {
-            collect_glob_matches(&full_pattern, &canonical_data_dir, &allowed_roots)
+        let (matches, canonical_agent_root_clone) = tokio::task::spawn_blocking(move || {
+            collect_glob_matches(&full_pattern, &canonical_agent_root, &allowed_roots)
         })
         .await
         .map_err(|e| AgentOSError::ToolExecutionFailed {
@@ -138,7 +137,7 @@ impl AgentTool for FileGlob {
             .into_iter()
             .map(|(path, meta)| {
                 let rel = path
-                    .strip_prefix(&canonical_data_dir_clone)
+                    .strip_prefix(&canonical_agent_root_clone)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| path.to_string_lossy().to_string());
                 serde_json::json!({
@@ -176,7 +175,7 @@ struct FileMeta {
 
 fn collect_glob_matches(
     full_pattern: &str,
-    canonical_data_dir: &Path,
+    canonical_agent_root: &Path,
     allowed_roots: &[PathBuf],
 ) -> Result<(Vec<(PathBuf, FileMeta)>, PathBuf), AgentOSError> {
     let options = glob::MatchOptions {
@@ -224,5 +223,5 @@ fn collect_glob_matches(
         results.push((canonical_path, file_meta));
     }
 
-    Ok((results, canonical_data_dir.to_path_buf()))
+    Ok((results, canonical_agent_root.to_path_buf()))
 }

@@ -10,17 +10,26 @@ data:
     context_window_max_entries = 200
     context_window_token_budget = 128000
     health_port = {{ .Values.config.healthPort }}
+    health_bind = {{ .Values.config.healthBind | default "0.0.0.0" | quote }}
     state_db_path = "/var/lib/agentos/data/kernel_state.db"
 
     [kernel.tool_calls]
     allow_parallel = true
     max_parallel = 5
 
+    [kernel.tool_execution]
+    # Align in-process tool timeout with the other profiles (the code default is
+    # 60s — 5x lower — and would silently truncate long tool calls).
+    default_timeout_seconds = 300
+
     [bus]
     socket_path = "/var/lib/agentos/data/agentos.sock"
 
     [audit]
     log_path = "/var/lib/agentos/data/audit.db"
+    # Cap audit-log growth on the persistent volume; older rows pruned by the
+    # TimeoutChecker sweep. 0 = unlimited.
+    max_audit_entries = 500000
 
     [secrets]
     vault_path = "/var/lib/agentos/data/vault.db"

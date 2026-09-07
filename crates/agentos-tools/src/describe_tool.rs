@@ -184,17 +184,53 @@ impl AgentTool for DescribeToolTool {
         }
 
         let input_schema_docs =
-            AgentManualTool::public_summarize_input_schema(tool.input_schema.as_ref());
+            AgentManualTool::public_summarize_input_schema(tool.payload_schema.as_ref());
 
-        let example = tool
-            .input_schema
+        // Prefer author-curated examples from the manifest. These are validated
+        // against the schema at registry load, so they're guaranteed conformant
+        // and they teach the agent the *intended* shape rather than a
+        // mechanically-generated stub. Fall back to a synthesized example when
+        // the manifest didn't ship any.
+        let synthesized = tool
+            .payload_schema
             .as_ref()
             .and_then(Self::make_example)
             .unwrap_or(serde_json::Value::Null);
 
+        let (examples, primary_example) = if !tool.examples.is_empty() {
+            let arr: Vec<serde_json::Value> = tool
+                .examples
+                .iter()
+                .map(|ex| match &ex.description {
+                    Some(d) => json!({ "description": d, "payload": ex.payload }),
+                    None => json!({ "payload": ex.payload }),
+                })
+                .collect();
+            let primary = tool.examples[0].payload.clone();
+            (arr, primary)
+        } else if !synthesized.is_null() {
+            (vec![synthesized.clone()], synthesized)
+        } else {
+            (Vec::new(), serde_json::Value::Null)
+        };
+
+        // Not hidden, unlike `list-tools`/`search-tools`: an agent that has a
+        // tool's name (from a skill, a manual page, another agent) is better
+        // served by "you lack fs.artifacts:w" than by `ToolNotFound`, because
+        // the missing grant is something it can ask the operator for.
+        let missing_permissions: Vec<&String> = tool
+            .permissions
+            .iter()
+            .filter(|p| !agentos_capability::permission_str_granted(&context.permissions, p))
+            .collect();
+        let callable =
+            agentos_capability::any_permission_granted(&context.permissions, &tool.permissions);
+
         let mut result = json!({
             "name": tool.name,
             "description": tool.description,
+            "payload_schema": tool.payload_schema,
+            "examples": examples,
             "version": tool.version,
             "trust_tier": tool.trust_tier,
             "category": tool.category,
@@ -203,11 +239,24 @@ impl AgentTool for DescribeToolTool {
             "permissions": tool.permissions,
             "capability_tags": tool.capability_tags,
             "input_schema_docs": input_schema_docs,
-            "example": example,
+            "example": primary_example,
+            "callable": callable,
         });
 
+        if !missing_permissions.is_empty() {
+            result["missing_permissions"] = json!(missing_permissions);
+            result["permission_note"] = json!(if callable {
+                "Some actions of this tool need permissions you do not hold; calls needing them are denied."
+            } else {
+                "You hold none of this tool's permissions — every call is denied. Ask the operator to grant them."
+            });
+        }
+
         if verbose {
-            result["input_schema"] = tool.input_schema.clone().unwrap_or(serde_json::Value::Null);
+            result["payload_schema"] = tool
+                .payload_schema
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
         }
 
         Ok(result)

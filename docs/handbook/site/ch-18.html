@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Advanced Operations · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a><div class="nav-subs"><a class="nav-sub" href="#hardware-abstraction-layer-hal" data-target="hardware-abstraction-layer-hal">Hardware Abstraction Layer (HAL)</a><a class="nav-sub" href="#resource-arbitration" data-target="resource-arbitration">Resource Arbitration</a><a class="nav-sub" href="#snapshots-and-rollback" data-target="snapshots-and-rollback">Snapshots and Rollback</a><a class="nav-sub" href="#escalation-management" data-target="escalation-management">Escalation Management</a><a class="nav-sub" href="#identity-management" data-target="identity-management">Identity Management</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 18 · Advanced Operations</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 18</div><h1 class="ch-title">Advanced Operations</h1><p class="ch-summary">HAL (20 drivers incl. audio, bluetooth, webcam, printer, display, raw USB, GPU, MQTT, Home Assistant, mounts, sockets, open-files, services), device twins &amp; safety engine, consent store, resource locks, snapshots, escalation, identity</p></div>
+    <article class="prose"><h1 id="advanced-operations" class="anchored"><a class="hanchor" href="#advanced-operations" aria-label="link">#</a>Advanced Operations</h1>
+<blockquote><p>Reference for advanced AgentOS subsystems: Hardware Abstraction Layer (HAL), resource arbitration, context snapshots and rollback, escalation management, and agent identity.</p></blockquote>
+<hr>
+<h2 id="hardware-abstraction-layer-hal" class="anchored"><a class="hanchor" href="#hardware-abstraction-layer-hal" aria-label="link">#</a>Hardware Abstraction Layer (HAL)</h2>
+<p>The HAL (<code>crates/agentos-hal</code>) provides a device registry that controls which agents can access hardware resources. All newly detected devices start in a quarantined state and must be explicitly approved before any agent can use them.</p>
+<h3 id="device-lifecycle" class="anchored"><a class="hanchor" href="#device-lifecycle" aria-label="link">#</a>Device Lifecycle</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Detected → Pending → Approved    (approved for specific agents)
+                   → Quarantined (hard-denied for all agents)
+</pre></div>
+</div>
+<p>State transitions:</p>
+<div class="table-wrap"><table><thead><tr><th>Transition</th><th>Operation</th></tr></thead><tbody><tr><td>Any → Pending</td><td>Device detected for the first time (awaiting approval)</td></tr><tr><td>Pending → Approved</td><td>Administrator approves the device for one or more agents</td></tr><tr><td>Pending → Quarantined</td><td>Administrator explicitly blocks the device</td></tr><tr><td>Approved → Quarantined</td><td>Last approved agent's access is revoked, or administrator blocks the device</td></tr><tr><td>Quarantined → _(no transition)_</td><td>Quarantined devices cannot be re-approved. The <code>register_device</code> method is idempotent and does not reset existing state, so there is currently no code path to move a device out of <code>Quarantined</code>.</td></tr></tbody></table></div>
+<blockquote><p><strong>Per-agent denial:</strong> The implementation also supports <code>deny_for_agent(device_id, agent_id)</code>, which adds granular per-agent denial on an otherwise <code>Approved</code> device. Denied agent IDs are tracked in a <code>denied_to</code> set on the device entry. This allows blocking a specific agent from a device without quarantining it for all agents.</p></blockquote>
+<h3 id="device-id-format" class="anchored"><a class="hanchor" href="#device-id-format" aria-label="link">#</a>Device ID Format</h3>
+<p>Devices are identified by strings like <code>gpu:0</code>, <code>usb:1</code>, <code>cam:0</code>, <code>mic:0</code>. The identifier scheme is <code>&lt;type&gt;:&lt;index&gt;</code>.</p>
+<h3 id="hal-cli" class="anchored"><a class="hanchor" href="#hal-cli" aria-label="link">#</a>HAL CLI</h3>
+<p>The HAL CLI is available via <code>agentos hal</code>:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List all registered devices</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>list
+
+<span class="c1"># Show devices currently in quarantine</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>quarantine
+
+<span class="c1"># Approve a device for a specific agent</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>approve<span class="w"> </span>--device<span class="w"> </span>gpu:0<span class="w"> </span>--agent<span class="w"> </span>coder
+
+<span class="c1"># Deny a device for all agents</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>deny<span class="w"> </span>--device<span class="w"> </span>usb:1
+
+<span class="c1"># Revoke an agent&#39;s access to a device</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>revoke<span class="w"> </span>--device<span class="w"> </span>cam:0<span class="w"> </span>--agent<span class="w"> </span>researcher
+</pre></div>
+</div>
+<h3 id="audit-events" class="anchored"><a class="hanchor" href="#audit-events" aria-label="link">#</a>Audit Events</h3>
+<p>Device lifecycle changes are recorded in the audit log:</p>
+<div class="table-wrap"><table><thead><tr><th>Event</th><th>Trigger</th></tr></thead><tbody><tr><td><code>HardwareDeviceDetected</code></td><td>Device first seen by the registry</td></tr><tr><td><code>HardwareDeviceApproved</code></td><td>Device approved for an agent</td></tr><tr><td><code>HardwareDeviceDenied</code></td><td>Device denied</td></tr><tr><td><code>HardwareDeviceRevoked</code></td><td>Agent's access revoked</td></tr></tbody></table></div>
+<h3 id="hal-drivers" class="anchored"><a class="hanchor" href="#hal-drivers" aria-label="link">#</a>HAL Drivers</h3>
+<p>The HAL ships <strong>20 drivers</strong> — some always available, others feature-gated at compile time. IoT drivers (<code>mqtt</code>, <code>homeassistant</code>) integrate with the HAL device-twin model: an agent sets a desired state, the safety engine validates the request, and an actuator update is dispatched.</p>
+<div class="table-wrap"><table><thead><tr><th>Driver</th><th>Feature Gate</th><th>Description</th></tr></thead><tbody><tr><td><code>system</code></td><td>— (always)</td><td>System info: hostname, uptime, OS, CPU, memory</td></tr><tr><td><code>process</code></td><td>— (always)</td><td>Process listing, signals, resource usage</td></tr><tr><td><code>network</code></td><td>— (always)</td><td>Network interfaces, connections, bandwidth</td></tr><tr><td><code>storage</code></td><td>— (always)</td><td>Block device listing, disk usage</td></tr><tr><td><code>sensor</code></td><td>— (always)</td><td>Thermal sensor readings</td></tr><tr><td><code>gpu</code></td><td>— (always)</td><td>GPU metrics (VRAM, temperature, utilization)</td></tr><tr><td><code>log_reader</code></td><td>— (always)</td><td>System and application log reading</td></tr><tr><td><code>mounts</code></td><td>— (always)</td><td>Mounted filesystems via procfs mountinfo + statvfs</td></tr><tr><td><code>network_sockets</code></td><td>— (always)</td><td>Open TCP/UDP sockets via procfs <code>/proc/net</code> (perm <code>network.sockets:r</code>)</td></tr><tr><td><code>open_files</code></td><td>— (always)</td><td>Per-process open file descriptors via procfs fd walk (perm <code>system.open_files:r</code>)</td></tr><tr><td><code>services</code></td><td>— (always)</td><td>systemd service list/status/logs via zbus D-Bus (read-only)</td></tr><tr><td><code>audio</code></td><td><code>audio</code></td><td>Audio capture and playback via PipeWire/PulseAudio</td></tr><tr><td><code>bluetooth</code></td><td><code>bluetooth</code></td><td>Bluetooth device scanning, pairing, and connection</td></tr><tr><td><code>display</code></td><td><code>display</code></td><td>Display output configuration (resolution, refresh rate)</td></tr><tr><td><code>printer</code></td><td><code>printer</code></td><td>Print job submission and management via CUPS</td></tr><tr><td><code>raw_usb</code></td><td><code>raw-usb</code></td><td>Direct USB device access (bulk/interrupt/control transfers)</td></tr><tr><td><code>usb_storage</code></td><td><code>usb-storage</code></td><td>USB mass storage mount/unmount/eject via UDisks2</td></tr><tr><td><code>webcam</code></td><td><code>webcam</code></td><td>Webcam image and burst capture via Video4Linux</td></tr><tr><td><code>mqtt</code></td><td><code>mqtt</code></td><td>MQTT broker bridge — publish, subscribe, and back IoT device twins</td></tr><tr><td><code>homeassistant</code></td><td><code>homeassistant</code></td><td>Home Assistant integration — enumerate entities, set states, observe events</td></tr></tbody></table></div>
+<h3 id="device-twins-safety-engine" class="anchored"><a class="hanchor" href="#device-twins-safety-engine" aria-label="link">#</a>Device Twins &amp; Safety Engine</h3>
+<p>IoT drivers represent each addressable entity as a <strong>device twin</strong> with a desired state and a reported state.</p>
+<ul><li><strong>DesiredStateSet</strong> — an agent updates the desired state of a twin via the corresponding HAL action. The safety engine evaluates the requested value against per-device rules (range checks, rate limits, allowlists) before forwarding it to the device.</li><li><strong>SafetyRuleViolation</strong> — emitted when the safety engine refuses a desired-state change. The actuator command is not sent.</li><li><strong>ReportedStateUpdated</strong> — emitted when the device reports a new measured value (sensor reading, switch state). Twins remember the last reported state so agents can read it without re-querying the device.</li></ul>
+<p>Use <code>hal register --twin &lt;id&gt;</code> to register a twin (also done automatically by the <code>mqtt</code> and <code>homeassistant</code> drivers when they discover a new entity).</p>
+<p>Feature-gated drivers are compiled only when their feature flag is enabled:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Build with specific HAL drivers</span>
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>agentos-kernel<span class="w"> </span>--features<span class="w"> </span>audio,bluetooth,webcam
+
+<span class="c1"># Build with all peripheral drivers</span>
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>agentos-kernel<span class="w"> </span>--features<span class="w"> </span>audio,bluetooth,display,printer,raw-usb,usb-storage,webcam
+</pre></div>
+</div>
+<h3 id="consent-store" class="anchored"><a class="hanchor" href="#consent-store" aria-label="link">#</a>Consent Store</h3>
+<p>Privacy-sensitive HAL drivers (webcam, audio, bluetooth) require explicit consent before accessing hardware. The <code>ConsentStore</code> (<code>crates/agentos-hal/src/consent.rs</code>) manages time-limited consent grants:</p>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Description</th></tr></thead><tbody><tr><td><code>grant(agent_id, resource, ttl)</code></td><td>Grant access to a resource for a specified duration</td></tr><tr><td><code>check(agent_id, resource)</code></td><td>Check if an active, non-expired grant exists</td></tr><tr><td><code>revoke(agent_id, resource)</code></td><td>Immediately revoke access</td></tr><tr><td><code>list()</code></td><td>List all active grants with remaining TTL</td></tr></tbody></table></div>
+<p>Grants are keyed by <code>(agent_id, resource)</code> and automatically expire after their TTL. A background prune removes expired grants on every check. Example resources: <code>hardware.webcam.capture</code>, <code>hardware.audio.record</code>, <code>hardware.bluetooth.scan</code>.</p>
+<h3 id="audio-driver" class="anchored"><a class="hanchor" href="#audio-driver" aria-label="link">#</a>Audio Driver</h3>
+<p>The audio driver (<code>crates/agentos-hal/src/drivers/audio.rs</code>) provides capture and playback via PipeWire or PulseAudio.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List audio sources and sinks</td><td>None</td></tr><tr><td><code>capture</code></td><td>Record audio from a source</td><td><code>source</code>, <code>duration_seconds</code>, <code>sample_rate</code></td></tr><tr><td><code>playback</code></td><td>Play an audio file to a sink</td><td><code>sink</code>, <code>audio_path</code></td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.audio:x</code> — <strong>Events:</strong> <code>AudioCaptureStarted</code>, <code>AudioCaptureStopped</code>, <code>AudioPlaybackStarted</code></p>
+<h3 id="bluetooth-driver" class="anchored"><a class="hanchor" href="#bluetooth-driver" aria-label="link">#</a>Bluetooth Driver</h3>
+<p>The Bluetooth driver (<code>crates/agentos-hal/src/drivers/bluetooth.rs</code>) provides device discovery, pairing, and connection.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>scan</code></td><td>Scan for nearby Bluetooth devices</td><td><code>duration_seconds</code></td></tr><tr><td><code>pair</code></td><td>Initiate pairing with a device</td><td><code>device_address</code></td></tr><tr><td><code>connect</code></td><td>Connect to a paired device</td><td><code>device_address</code></td></tr><tr><td><code>list</code></td><td>List known/paired devices</td><td>None</td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.bluetooth:x</code> — <strong>Events:</strong> <code>BluetoothScanStarted</code>, <code>BluetoothPairRequested</code>, <code>BluetoothConnected</code></p>
+<h3 id="display-driver" class="anchored"><a class="hanchor" href="#display-driver" aria-label="link">#</a>Display Driver</h3>
+<p>The display driver (<code>crates/agentos-hal/src/drivers/display.rs</code>) manages display output configuration.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List connected display outputs</td><td>None</td></tr><tr><td><code>configure</code></td><td>Apply resolution/refresh rate</td><td><code>output</code>, <code>width</code>, <code>height</code>, <code>refresh_rate</code></td></tr><tr><td><code>revert</code></td><td>Revert to previous configuration</td><td><code>output</code></td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.display:x</code> — <strong>Events:</strong> <code>DisplayConfigApplied</code>, <code>DisplayConfigReverted</code></p>
+<h3 id="printer-driver" class="anchored"><a class="hanchor" href="#printer-driver" aria-label="link">#</a>Printer Driver</h3>
+<p>The printer driver (<code>crates/agentos-hal/src/drivers/printer.rs</code>) submits and manages print jobs via CUPS.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List available printers</td><td>None</td></tr><tr><td><code>print</code></td><td>Submit a print job</td><td><code>printer</code>, <code>document_path</code>, <code>job_name</code></td></tr><tr><td><code>cancel</code></td><td>Cancel a print job</td><td><code>printer</code>, <code>job_id</code></td></tr><tr><td><code>status</code></td><td>Check printer/job status</td><td><code>printer</code></td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.printer:x</code> — <strong>Audit events:</strong> <code>PrintJobSubmitted</code>, <code>PrintJobCancelled</code></p>
+<h3 id="raw-usb-driver" class="anchored"><a class="hanchor" href="#raw-usb-driver" aria-label="link">#</a>Raw USB Driver</h3>
+<p>The raw USB driver (<code>crates/agentos-hal/src/drivers/raw_usb.rs</code>) provides direct device access for bulk, interrupt, and control transfers.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List USB devices</td><td>None</td></tr><tr><td><code>open</code></td><td>Open a USB device for transfers</td><td><code>vendor_id</code>, <code>product_id</code>, <code>interface</code></td></tr><tr><td><code>transfer</code></td><td>Perform a USB transfer</td><td><code>device_key</code>, <code>transfer_kind</code>, <code>endpoint</code>, <code>direction</code></td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.raw-usb:x</code> — <strong>Events:</strong> <code>RawUsbDeviceOpened</code>, <code>RawUsbTransferCompleted</code></p>
+<h3 id="webcam-driver" class="anchored"><a class="hanchor" href="#webcam-driver" aria-label="link">#</a>Webcam Driver</h3>
+<p>The webcam driver (<code>crates/agentos-hal/src/drivers/webcam.rs</code>) captures images and burst sequences via Video4Linux.</p>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Key Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List webcam devices</td><td>None</td></tr><tr><td><code>capture</code></td><td>Capture a single frame</td><td><code>device</code>, <code>width</code>, <code>height</code>, <code>format</code></td></tr><tr><td><code>burst</code></td><td>Capture multiple frames</td><td><code>device</code>, <code>count</code>, <code>interval_ms</code></td></tr></tbody></table></div>
+<p><strong>Permission:</strong> <code>hardware.webcam:x</code> — <strong>Events:</strong> <code>WebcamCaptureStarted</code>, <code>WebcamCaptureStopped</code></p>
+<h3 id="usb-storage-driver" class="anchored"><a class="hanchor" href="#usb-storage-driver" aria-label="link">#</a>USB Storage Driver</h3>
+<p>The <code>UsbStorageDriver</code> enables agents to mount, unmount, eject, and list USB storage devices via the UDisks2 D-Bus API. It is feature-gated behind <code>usb-storage</code> and must be compiled explicitly.</p>
+<h4 id="enabling" class="anchored"><a class="hanchor" href="#enabling" aria-label="link">#</a>Enabling</h4>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Build the HAL crate with USB support</span>
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>agentos-hal<span class="w"> </span>--features<span class="w"> </span>usb-storage
+
+<span class="c1"># Build the kernel with USB support (propagates to HAL)</span>
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>agentos-kernel<span class="w"> </span>--features<span class="w"> </span>usb-storage
+</pre></div>
+</div>
+<p>When the feature is disabled, the driver module is excluded entirely — no <code>zbus</code> dependency is pulled in.</p>
+<h4 id="actions" class="anchored"><a class="hanchor" href="#actions" aria-label="link">#</a>Actions</h4>
+<div class="table-wrap"><table><thead><tr><th>Action</th><th>Description</th><th>Required Params</th></tr></thead><tbody><tr><td><code>list</code></td><td>List USB-backed filesystems via UDisks2 ObjectManager</td><td>None</td></tr><tr><td><code>mount</code></td><td>Mount a USB filesystem with safe options (<code>nosuid,noexec,nodev</code>)</td><td><code>device</code></td></tr><tr><td><code>unmount</code></td><td>Unmount a USB filesystem</td><td><code>device</code></td></tr><tr><td><code>eject</code></td><td>Power off the parent USB drive</td><td><code>device</code></td></tr></tbody></table></div>
+<h4 id="usage-via-agentos" class="anchored"><a class="hanchor" href="#usage-via-agentos" aria-label="link">#</a>Usage via <code>agentos</code></h4>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List all USB filesystems</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>query<span class="w"> </span>usb-storage<span class="w"> </span><span class="s1">&#39;{&quot;action&quot;: &quot;list&quot;}&#39;</span>
+
+<span class="c1"># Mount a USB drive partition</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>query<span class="w"> </span>usb-storage<span class="w"> </span><span class="s1">&#39;{&quot;action&quot;: &quot;mount&quot;, &quot;device&quot;: &quot;sdb1&quot;}&#39;</span>
+
+<span class="c1"># Unmount</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>query<span class="w"> </span>usb-storage<span class="w"> </span><span class="s1">&#39;{&quot;action&quot;: &quot;unmount&quot;, &quot;device&quot;: &quot;sdb1&quot;}&#39;</span>
+
+<span class="c1"># Eject (power off the drive)</span>
+agentos<span class="w"> </span>hal<span class="w"> </span>query<span class="w"> </span>usb-storage<span class="w"> </span><span class="s1">&#39;{&quot;action&quot;: &quot;eject&quot;, &quot;device&quot;: &quot;sdb1&quot;}&#39;</span>
+</pre></div>
+</div>
+<h4 id="security" class="anchored"><a class="hanchor" href="#security" aria-label="link">#</a>Security</h4>
+<ul><li><strong>Permission required:</strong> <code>hardware.usb-storage:x</code> (Execute) — enforced by the HAL driver trait</li><li><strong>Device quarantine:</strong> The HAL device registry gates access; the device key <code>usb-storage:&lt;device&gt;</code> must be approved for the requesting agent before any operation proceeds</li><li><strong>USB-only enforcement:</strong> Before mount, unmount, or eject, the driver reads the UDisks2 <code>Drive.ConnectionBus</code> property and rejects any device where the bus is not <code>&quot;usb&quot;</code></li><li><strong>Device name validation:</strong> Only alphanumeric characters, hyphens (<code>-</code>), underscores (<code>_</code>), and dots (<code>.</code>) are allowed; path traversal sequences (<code>..</code>) and slashes are rejected before any D-Bus call is made</li><li><strong>Safe mount options:</strong> All mounts use <code>nosuid,noexec,nodev</code> — agents cannot execute binaries or create device nodes on mounted USB drives</li></ul>
+<h4 id="audit-events-2" class="anchored"><a class="hanchor" href="#audit-events-2" aria-label="link">#</a>Audit Events</h4>
+<p>Successful USB operations emit events into the kernel event/audit pipeline:</p>
+<div class="table-wrap"><table><thead><tr><th>Event Type</th><th>Trigger</th><th>Payload</th></tr></thead><tbody><tr><td><code>DeviceMounted</code></td><td>Successful mount</td><td><code>driver</code>, <code>device</code>, <code>mount_path</code></td></tr><tr><td><code>DeviceUnmounted</code></td><td>Successful unmount</td><td><code>driver</code>, <code>device</code></td></tr><tr><td><code>DeviceEjected</code></td><td>Successful eject/power-off</td><td><code>driver</code>, <code>device</code></td></tr></tbody></table></div>
+<p>These events are signed and recorded in the append-only audit log.</p>
+<h4 id="limitations" class="anchored"><a class="hanchor" href="#limitations" aria-label="link">#</a>Limitations</h4>
+<ul><li>Requires a running UDisks2 daemon on the host (standard on most desktop Linux distributions)</li><li>Communicates via the system D-Bus — the AgentOS process must have permission to call UDisks2 methods (typically requires <code>polkit</code> authorization or running as a user in the <code>plugdev</code>/<code>disk</code> group)</li><li>Loopback devices report <code>ConnectionBus</code> as empty, so they are rejected by the USB-only check; only physical USB-backed block devices are accepted</li></ul>
+<hr>
+<h2 id="resource-arbitration" class="anchored"><a class="hanchor" href="#resource-arbitration" aria-label="link">#</a>Resource Arbitration</h2>
+<p>The <code>ResourceArbiter</code> (<code>crates/agentos-kernel/src/resource_arbiter.rs</code>) enforces shared/exclusive locking on named resources to prevent concurrent conflicts between agents running in parallel (Spec §8).</p>
+<h3 id="lock-modes" class="anchored"><a class="hanchor" href="#lock-modes" aria-label="link">#</a>Lock Modes</h3>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Behaviour</th></tr></thead><tbody><tr><td><code>Shared</code></td><td>Multiple agents can hold a shared lock simultaneously (read-only access)</td></tr><tr><td><code>Exclusive</code></td><td>Only one agent can hold the lock at a time (read/write access)</td></tr></tbody></table></div>
+<p>A <code>Shared</code> lock blocks any new <code>Exclusive</code> request. An <code>Exclusive</code> lock blocks all other requests.</p>
+<h3 id="resource-id-format" class="anchored"><a class="hanchor" href="#resource-id-format" aria-label="link">#</a>Resource ID Format</h3>
+<p>Resources are identified by strings. Convention:</p>
+<ul><li><code>fs:/path/to/file</code> — filesystem paths</li><li><code>browser:0</code> — browser slot 0</li><li><code>api:&lt;service&gt;</code> — external API rate-limited slot</li></ul>
+<h3 id="fifo-waiter-queue" class="anchored"><a class="hanchor" href="#fifo-waiter-queue" aria-label="link">#</a>FIFO Waiter Queue</h3>
+<p>When a lock cannot be immediately granted, the requesting agent is placed in a FIFO queue for that resource. When the current holder releases the lock, the next eligible waiter is woken and granted the lock. For shared locks, multiple consecutive shared waiters are woken simultaneously.</p>
+<h3 id="deadlock-detection" class="anchored"><a class="hanchor" href="#deadlock-detection" aria-label="link">#</a>Deadlock Detection</h3>
+<p>Before queuing any waiter, the arbiter checks for deadlock using a DFS cycle scan on the wait-for graph (<code>agent → agent-it-is-blocked-on</code>). If adding the new wait edge would create a cycle, the request is rejected with an error immediately.</p>
+<p>Example: Agent A holds <code>res1</code>, Agent B holds <code>res2</code>. B waits on <code>res1</code> (queued). If A then tries to acquire <code>res2</code>, the wait-for graph would have A→B→A — a cycle. The arbiter detects this and returns <code>Err(&quot;Deadlock detected: ...&quot;)</code>.</p>
+<p><strong>Priority-based preemption:</strong> If the deadlocked requester has a higher priority than the current holder, the holder is preempted (its lock forcibly released) and the requester is granted the lock. This is used for high-priority system tasks that must not deadlock.</p>
+<h3 id="ttl-auto-release" class="anchored"><a class="hanchor" href="#ttl-auto-release" aria-label="link">#</a>TTL (Auto-Release)</h3>
+<p>Locks can have a TTL in seconds. A background sweep (<code>sweep_expired()</code>) runs every 10 minutes and releases any locks that have exceeded their TTL. TTL of <code>0</code> means no auto-release.</p>
+<h3 id="resource-cli" class="anchored"><a class="hanchor" href="#resource-cli" aria-label="link">#</a>Resource CLI</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List all currently held resource locks</span>
+agentos<span class="w"> </span>resource<span class="w"> </span>list
+
+<span class="c1"># Show resource contention (waiters, blocked agents)</span>
+agentos<span class="w"> </span>resource<span class="w"> </span>contention
+
+<span class="c1"># Forcibly release a specific lock</span>
+agentos<span class="w"> </span>resource<span class="w"> </span>release<span class="w"> </span>--resource<span class="w"> </span>fs:/var/data/report.md<span class="w"> </span>--agent<span class="w"> </span>researcher
+
+<span class="c1"># Release all locks held by an agent</span>
+agentos<span class="w"> </span>resource<span class="w"> </span>release-all<span class="w"> </span>--agent<span class="w"> </span>researcher
+</pre></div>
+</div>
+<p>Output of <code>agentos resource list</code>:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Resource                       Mode       Held By              TTL(s)
+--------------------------------------------------------------------------
+fs:/var/data/report.md         exclusive  researcher           30
+fs:/var/data/summary.csv       shared     coder, analyst       0
+</pre></div>
+</div>
+<hr>
+<h2 id="snapshots-and-rollback" class="anchored"><a class="hanchor" href="#snapshots-and-rollback" aria-label="link">#</a>Snapshots and Rollback</h2>
+<p>Context snapshots save a complete serialized copy of a task's context window so it can be restored later.</p>
+<h3 id="auto-snapshot-triggers" class="anchored"><a class="hanchor" href="#auto-snapshot-triggers" aria-label="link">#</a>Auto-Snapshot Triggers</h3>
+<p>The kernel takes a snapshot automatically before:</p>
+<ol><li><strong>Write operations</strong> — any tool execution that modifies persistent state (file writes, secret creation)</li><li><strong>Budget exhaustion</strong> — when a task's token budget is about to be exceeded</li></ol>
+<p>This ensures every destructive or budget-constrained operation has a safe rollback point.</p>
+<h3 id="snapshot-expiry" class="anchored"><a class="hanchor" href="#snapshot-expiry" aria-label="link">#</a>Snapshot Expiry</h3>
+<p>A background sweep runs every 10 minutes and deletes snapshots older than 72 hours. This prevents unbounded growth of the audit database. Expired snapshots emit a <code>SnapshotExpired</code> audit event.</p>
+<h3 id="listing-snapshots" class="anchored"><a class="hanchor" href="#listing-snapshots" aria-label="link">#</a>Listing Snapshots</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>snapshot<span class="w"> </span>list<span class="w"> </span>--task<span class="w"> </span>&lt;task-id&gt;
+</pre></div>
+</div>
+<p>Output:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>SNAPSHOT_REF                             ACTION               SIZE         CREATED
+snap_0001                                before_write         4096         1742205781
+snap_0002                                budget_limit         4128         1742205892
+
+Total: 2 snapshot(s)
+</pre></div>
+</div>
+<p>The same data is accessible via:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>snapshots<span class="w"> </span>--task<span class="w"> </span>&lt;task-id&gt;
+</pre></div>
+</div>
+<h3 id="rolling-back" class="anchored"><a class="hanchor" href="#rolling-back" aria-label="link">#</a>Rolling Back</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Roll back to the most recent snapshot</span>
+agentos<span class="w"> </span>snapshot<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>&lt;task-id&gt;
+
+<span class="c1"># Roll back to a specific snapshot</span>
+agentos<span class="w"> </span>snapshot<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>&lt;task-id&gt;<span class="w"> </span>--snapshot<span class="w"> </span>snap_0001
+</pre></div>
+</div>
+<p>Also accessible via:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>&lt;task-id&gt;<span class="w"> </span><span class="o">[</span>--snapshot<span class="w"> </span>&lt;ref&gt;<span class="o">]</span>
+</pre></div>
+</div>
+<p>After rollback, the task context is restored to the snapshot state. The task can then resume or be resubmitted.</p>
+<hr>
+<h2 id="escalation-management" class="anchored"><a class="hanchor" href="#escalation-management" aria-label="link">#</a>Escalation Management</h2>
+<p>Escalations are created when a risk classifier scores an agent action at Level 3 or Level 4. The task is paused and waits for a human operator decision.</p>
+<h3 id="when-escalations-are-created" class="anchored"><a class="hanchor" href="#when-escalations-are-created" aria-label="link">#</a>When Escalations Are Created</h3>
+<ul><li><strong>Level 3</strong> — high-risk action requiring human review before proceeding</li><li><strong>Level 4</strong> — critical action (e.g., destructive file operations, external API calls with irreversible effects)</li></ul>
+<p>The escalation record includes the task context, agent ID, the specific action being blocked, a risk summary, and available decision options.</p>
+<h3 id="auto-expiry" class="anchored"><a class="hanchor" href="#auto-expiry" aria-label="link">#</a>Auto-Expiry</h3>
+<p>Escalations that are not resolved within <strong>5 minutes</strong> are automatically denied. The paused task receives a rejection and can handle it as an error or retry.</p>
+<h3 id="escalation-cli" class="anchored"><a class="hanchor" href="#escalation-cli" aria-label="link">#</a>Escalation CLI</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List pending escalations</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>list
+
+<span class="c1"># List all escalations including resolved ones</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>list<span class="w"> </span>--all
+
+<span class="c1"># Show details of a specific escalation</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>get<span class="w"> </span>&lt;id&gt;
+
+<span class="c1"># Resolve an escalation with a decision</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;id&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Approved&quot;</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;id&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Denied&quot;</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;id&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Acknowledged&quot;</span>
+</pre></div>
+</div>
+<p>Output of <code>agentos escalation list</code>:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>ID     TASK         URGENCY    BLOCKING   STATUS   SUMMARY
+----------------------------------------------------------------------
+42     abc12345     high       yes        pending  Agent wants to delete all files in /var/...
+43     def67890     medium     no         pending  Agent wants to call external payment API...
+</pre></div>
+</div>
+<p>Output of <code>agentos escalation get 42</code>:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Escalation #42
+============================================================
+Task ID:      abc12345-...
+Agent ID:     coder
+Reason:       High-risk file deletion in system directory
+Urgency:      high
+Blocking:     yes
+Status:       pending
+
+Summary:
+  Agent is attempting to delete 47 files under /var/lib/...
+
+Decision point:
+  Should the agent proceed with bulk file deletion?
+
+Options:
+  - Approve
+  - Deny
+  - Request confirmation for each file
+</pre></div>
+</div>
+<h3 id="resolution" class="anchored"><a class="hanchor" href="#resolution" aria-label="link">#</a>Resolution</h3>
+<p>When an escalation is resolved, the kernel receives the decision and resumes the paused task with the decision injected into its context. The task can then act on the approval or denial.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Escalation #42 resolved: Approved
+Task abc12345 resumed.
+</pre></div>
+</div>
+<hr>
+<h2 id="identity-management" class="anchored"><a class="hanchor" href="#identity-management" aria-label="link">#</a>Identity Management</h2>
+<p>Each agent has an Ed25519 keypair used for cryptographic identity. The keypair is generated when the agent is first connected and stored securely in the kernel.</p>
+<h3 id="viewing-an-agents-identity" class="anchored"><a class="hanchor" href="#viewing-an-agents-identity" aria-label="link">#</a>Viewing an Agent's Identity</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>show<span class="w"> </span>&lt;name&gt;
+</pre></div>
+</div>
+<p>Output:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent:       coder
+ID:          a7f3b2c1-...
+Public Key:  ed25519:3a7f9b2c4d1e...
+Signing Key: present
+</pre></div>
+</div>
+<p>The public key is safe to share. The signing key (private key) is held only in kernel memory and is never exported.</p>
+<h3 id="revoking-an-identity" class="anchored"><a class="hanchor" href="#revoking-an-identity" aria-label="link">#</a>Revoking an Identity</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>revoke<span class="w"> </span>&lt;name&gt;
+</pre></div>
+</div>
+<p>This permanently revokes the agent's cryptographic identity and all associated permissions. The agent will need to be reconnected to generate a new keypair and receive new permissions.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Identity and permissions revoked for agent &#39;coder&#39;.
+</pre></div>
+</div>
+<p>Revocation is useful when:</p>
+<ul><li>An agent is suspected of compromise</li><li>An agent's role changes and old permissions must be cleared</li><li>Cleaning up a decommissioned agent</li></ul>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-14.html">Audit Log</a> — audit events for all advanced operations</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — capability tokens and permission enforcement</li><li><a class="wikilink" href="ch-16.html">Configuration Reference</a> — relevant config keys</li><li><a class="wikilink" href="ch-15.html">LLM Configuration</a> — agent connection and provider setup</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-17.html"><span class="pn-dir">← Previous</span><span class="pn-title">WASM Tools Development</span></a><a class="pn pn-next" href="ch-19.html"><span class="pn-dir">Next →</span><span class="pn-title">Troubleshooting and FAQ</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#hardware-abstraction-layer-hal" data-target="hardware-abstraction-layer-hal">Hardware Abstraction Layer (HAL)</a></li><li class="toc-h3"><a href="#device-lifecycle" data-target="device-lifecycle">Device Lifecycle</a></li><li class="toc-h3"><a href="#device-id-format" data-target="device-id-format">Device ID Format</a></li><li class="toc-h3"><a href="#hal-cli" data-target="hal-cli">HAL CLI</a></li><li class="toc-h3"><a href="#audit-events" data-target="audit-events">Audit Events</a></li><li class="toc-h3"><a href="#hal-drivers" data-target="hal-drivers">HAL Drivers</a></li><li class="toc-h3"><a href="#device-twins-safety-engine" data-target="device-twins-safety-engine">Device Twins &amp; Safety Engine</a></li><li class="toc-h3"><a href="#consent-store" data-target="consent-store">Consent Store</a></li><li class="toc-h3"><a href="#audio-driver" data-target="audio-driver">Audio Driver</a></li><li class="toc-h3"><a href="#bluetooth-driver" data-target="bluetooth-driver">Bluetooth Driver</a></li><li class="toc-h3"><a href="#display-driver" data-target="display-driver">Display Driver</a></li><li class="toc-h3"><a href="#printer-driver" data-target="printer-driver">Printer Driver</a></li><li class="toc-h3"><a href="#raw-usb-driver" data-target="raw-usb-driver">Raw USB Driver</a></li><li class="toc-h3"><a href="#webcam-driver" data-target="webcam-driver">Webcam Driver</a></li><li class="toc-h3"><a href="#usb-storage-driver" data-target="usb-storage-driver">USB Storage Driver</a></li><li class="toc-h2"><a href="#resource-arbitration" data-target="resource-arbitration">Resource Arbitration</a></li><li class="toc-h3"><a href="#lock-modes" data-target="lock-modes">Lock Modes</a></li><li class="toc-h3"><a href="#resource-id-format" data-target="resource-id-format">Resource ID Format</a></li><li class="toc-h3"><a href="#fifo-waiter-queue" data-target="fifo-waiter-queue">FIFO Waiter Queue</a></li><li class="toc-h3"><a href="#deadlock-detection" data-target="deadlock-detection">Deadlock Detection</a></li><li class="toc-h3"><a href="#ttl-auto-release" data-target="ttl-auto-release">TTL (Auto-Release)</a></li><li class="toc-h3"><a href="#resource-cli" data-target="resource-cli">Resource CLI</a></li><li class="toc-h2"><a href="#snapshots-and-rollback" data-target="snapshots-and-rollback">Snapshots and Rollback</a></li><li class="toc-h3"><a href="#auto-snapshot-triggers" data-target="auto-snapshot-triggers">Auto-Snapshot Triggers</a></li><li class="toc-h3"><a href="#snapshot-expiry" data-target="snapshot-expiry">Snapshot Expiry</a></li><li class="toc-h3"><a href="#listing-snapshots" data-target="listing-snapshots">Listing Snapshots</a></li><li class="toc-h3"><a href="#rolling-back" data-target="rolling-back">Rolling Back</a></li><li class="toc-h2"><a href="#escalation-management" data-target="escalation-management">Escalation Management</a></li><li class="toc-h3"><a href="#when-escalations-are-created" data-target="when-escalations-are-created">When Escalations Are Created</a></li><li class="toc-h3"><a href="#auto-expiry" data-target="auto-expiry">Auto-Expiry</a></li><li class="toc-h3"><a href="#escalation-cli" data-target="escalation-cli">Escalation CLI</a></li><li class="toc-h3"><a href="#resolution" data-target="resolution">Resolution</a></li><li class="toc-h2"><a href="#identity-management" data-target="identity-management">Identity Management</a></li><li class="toc-h3"><a href="#viewing-an-agents-identity" data-target="viewing-an-agents-identity">Viewing an Agent's Identity</a></li><li class="toc-h3"><a href="#revoking-an-identity" data-target="revoking-an-identity">Revoking an Identity</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

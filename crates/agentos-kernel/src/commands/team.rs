@@ -101,8 +101,8 @@ impl Kernel {
              Available workers: {workers}\n\
              Max rounds: {max_rounds}\n\n\
              {role_description}\
-             Use spawn_agent to delegate subtasks to workers. \
-             Use await_agents to collect their results. \
+             Use `spawn-agent` to delegate subtasks to workers. \
+             Use `await-agents` to collect their results. \
              When all subtasks are complete, produce a final consolidated response.",
             team_name = config.name,
             goal = config.goal,
@@ -187,6 +187,11 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            // Coordinators orchestrate across domains and need the full toolset;
+            // exempt them from category scoping (the field's intended use).
+            disable_tool_scoping: true,
+            // `agentos team run` — operator-originated root task.
+            chain_depth: 0,
         };
 
         self.scheduler.enqueue(coordinator_task).await;

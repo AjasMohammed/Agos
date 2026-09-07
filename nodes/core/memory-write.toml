@@ -6,7 +6,7 @@ description = "Store a fact or event into the agent's memory for future recall."
 category = "memory"
 icon = "database"
 color = "#8b5cf6"
-risk_class = "write_scoped"
+risk_class = "write_agent_state"
 
 [[node.inputs]]
 kind = "main"

@@ -1,26 +1,41 @@
+//! SSRF gate for operator-supplied outbound URLs (escalation webhooks, the
+//! webhook/Slack delivery adapters, ntfy server URLs).
+//!
+//! This module used to extract the host by hand — strip the scheme, cut at the
+//! first `/?#:` — which never stripped userinfo, so
+//! `https://evil.example@169.254.169.254/latest/meta-data/` yielded the "host"
+//! `evil.example@169.254.169.254`, matched no private-range prefix, and was
+//! accepted while the request went straight to the cloud metadata endpoint. It
+//! also missed integer/hex/octal IPv4 (`https://2130706433/`), the CGNAT range
+//! and the `.local`/`.internal`/`.lan` suffixes.
+//!
+//! Parsing and the blocklist are now delegated to
+//! [`agentos_channels::webhook::validate_webhook_url`] — the one
+//! `url::Url`-based implementation in the workspace — so there is a single
+//! place where "is this host reachable" is decided.
+
 use agentos_types::AgentOSError;
+use url::Url;
 
 /// Validates that a webhook URL is safe to POST to, preventing SSRF attacks.
 ///
-/// Rules enforced:
-/// - Scheme must be `https` (prevents cleartext credential/payload exposure)
-/// - Host must not be a loopback address (`localhost`, `127.x.x.x`, `::1`)
-/// - Host must not be in RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
-/// - Host must not be a link-local/cloud-metadata address (169.254.x.x)
-/// - Host must not be an IPv6 link-local (fe80::/10), ULA (fc00::/7), or loopback (::1)
-/// - IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) are checked against IPv4 blocklists
+/// Requires `https` (no cleartext payloads) and rejects loopback, RFC 1918,
+/// link-local/cloud-metadata (169.254/16), CGNAT (100.64/10), IPv6
+/// loopback/link-local/ULA, IPv4-mapped IPv6, and private-looking hostnames
+/// (`localhost`, `*.local`, `*.internal`, `*.lan`, anything containing
+/// "metadata").
 ///
-/// Note: DNS rebinding attacks (where a safe hostname later resolves to a private IP)
-/// are not mitigated here. For production deployments, perform a post-resolution IP
-/// check after `tokio::net::lookup_host`.
+/// Note: DNS rebinding attacks (where a safe hostname later resolves to a
+/// private IP) are not mitigated here. For production deployments, perform a
+/// post-resolution IP check after `tokio::net::lookup_host`.
 pub fn validate_webhook_url(url: &str) -> Result<(), AgentOSError> {
-    validate_webhook_url_inner(url).map_err(AgentOSError::SchemaValidation)
+    validate_url(url, true).map_err(AgentOSError::SchemaValidation)
 }
 
 /// Internal check that returns a plain `String` error — used by `escalation.rs`
 /// via a thin wrapper that converts to `AgentOSError`.
 pub(crate) fn validate_webhook_url_str(url: &str) -> Result<(), String> {
-    validate_webhook_url_inner(url)
+    validate_url(url, true)
 }
 
 /// Validates that a server URL is safe against SSRF attacks, allowing HTTP or HTTPS.
@@ -29,242 +44,53 @@ pub(crate) fn validate_webhook_url_str(url: &str) -> Result<(), String> {
 /// adapter server URLs (e.g. self-hosted ntfy instances) where HTTP is legitimate.
 /// All private/loopback IP blocklist rules still apply.
 pub fn validate_server_url(url: &str) -> Result<(), AgentOSError> {
-    validate_server_url_inner(url).map_err(AgentOSError::SchemaValidation)
+    validate_url(url, false).map_err(AgentOSError::SchemaValidation)
 }
 
-fn validate_server_url_inner(url: &str) -> Result<(), String> {
-    let after_scheme = if let Some(rest) = url.strip_prefix("https://") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        rest
-    } else {
-        return Err(format!(
-            "Server URL must use http or https scheme (got: '{}')",
-            url.split("://").next().unwrap_or(url)
-        ));
-    };
+fn validate_url(raw: &str, require_https: bool) -> Result<(), String> {
+    let label = if require_https { "Webhook" } else { "Server" };
 
-    let host = if after_scheme.starts_with('[') {
-        match after_scheme.find(']') {
-            Some(close) => after_scheme[1..close].to_ascii_lowercase(),
-            None => return Err("Server URL has malformed IPv6 literal address".to_string()),
-        }
-    } else {
-        let end = after_scheme
-            .find(['/', '?', '#', ':'])
-            .unwrap_or(after_scheme.len());
-        // If host extraction stopped at ':' and more ':' follow, this is an
-        // unbracketed IPv6 literal (e.g. "fe80::1") — RFC 3986 §3.2.2 requires
-        // brackets. Our extraction only captured the first group ("fe80"), which
-        // would bypass IPv6 SSRF checks below.
-        if end < after_scheme.len() && after_scheme.as_bytes()[end] == b':' {
-            let rest = &after_scheme[end + 1..];
-            if rest.contains(':') {
-                return Err(
-                    "Server URL contains an unbracketed IPv6 address; use [...] notation"
-                        .to_string(),
-                );
-            }
-        }
-        after_scheme[..end].to_ascii_lowercase()
-    };
+    // WHATWG parsing does the work the hand-rolled extractor got wrong:
+    // userinfo is a separate component, integer/hex/octal IPv4 is canonicalised
+    // to an `Ipv4Addr`, and an unbracketed IPv6 literal is rejected outright
+    // (`:` is a forbidden domain code point) instead of being truncated to its
+    // first group.
+    let parsed = Url::parse(raw).map_err(|e| format!("{label} URL is not a valid URL: {e}"))?;
 
-    if host.is_empty() {
-        return Err("Server URL has no host".to_string());
-    }
-    if host == "localhost" || host.starts_with("127.") || host == "::1" {
-        return Err(format!("Server URL targets a loopback address: '{host}'"));
-    }
-    if host == "0.0.0.0" || host == "::" {
-        return Err(format!(
-            "Server URL targets a wildcard/unspecified address: '{host}'"
-        ));
-    }
-    if host.starts_with("169.254.") {
-        return Err(format!(
-            "Server URL targets a link-local/metadata address: '{host}'"
-        ));
-    }
-    if host.starts_with("10.") || host.starts_with("192.168.") {
-        return Err(format!("Server URL targets a private IP range: '{host}'"));
-    }
-    if host.starts_with("172.") {
-        if let Some(second) = host.split('.').nth(1) {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return Err(format!("Server URL targets a private IP range: '{host}'"));
-                }
-            }
-        }
-    }
-    if host.contains("metadata") {
-        return Err(format!(
-            "Server URL appears to target an instance metadata service: '{host}'"
-        ));
-    }
-    if host.contains(':') {
-        if host.starts_with("fe8")
-            || host.starts_with("fe9")
-            || host.starts_with("fea")
-            || host.starts_with("feb")
-        {
+    let scheme = parsed.scheme();
+    if require_https {
+        if scheme != "https" {
             return Err(format!(
-                "Server URL targets an IPv6 link-local address: '{host}'"
+                "Webhook URL must use HTTPS scheme (got: '{scheme}')"
             ));
         }
-        if host.starts_with("fc") || host.starts_with("fd") {
-            return Err(format!(
-                "Server URL targets an IPv6 unique-local (private) address: '{host}'"
-            ));
-        }
-        if let Some(ipv4_part) = host.strip_prefix("::ffff:") {
-            return validate_ipv4_mapped(ipv4_part);
-        }
-    }
-    Ok(())
-}
-
-fn validate_webhook_url_inner(url: &str) -> Result<(), String> {
-    // Require HTTPS to prevent plaintext exposure of the notification payload
-    if !url.starts_with("https://") {
+    } else if scheme != "https" && scheme != "http" {
         return Err(format!(
-            "Webhook URL must use HTTPS scheme (got: '{}')",
-            url.split("://").next().unwrap_or(url)
+            "Server URL must use http or https scheme (got: '{scheme}')"
         ));
     }
 
-    let after_scheme = &url["https://".len()..];
-
-    // Extract the host, handling IPv6 bracket notation: [::1] or [::1]:8443
-    let host = if after_scheme.starts_with('[') {
-        // IPv6 literal — find the closing bracket
-        match after_scheme.find(']') {
-            Some(close) => after_scheme[1..close].to_ascii_lowercase(),
-            None => return Err("Webhook URL has malformed IPv6 literal address".to_string()),
-        }
-    } else {
-        // IPv4 or hostname — terminated by first `/`, `?`, `#`, or `:`
-        let end = after_scheme
-            .find(['/', '?', '#', ':'])
-            .unwrap_or(after_scheme.len());
-        // If host extraction stopped at ':' and more ':' follow, this is an
-        // unbracketed IPv6 literal (e.g. "fe80::1") — RFC 3986 §3.2.2 requires
-        // brackets. Our extraction only captured the first group ("fe80"), which
-        // would bypass IPv6 SSRF checks below.
-        if end < after_scheme.len() && after_scheme.as_bytes()[end] == b':' {
-            let rest = &after_scheme[end + 1..];
-            if rest.contains(':') {
-                return Err(
-                    "Webhook URL contains an unbracketed IPv6 address; use [...] notation"
-                        .to_string(),
-                );
-            }
-        }
-        after_scheme[..end].to_ascii_lowercase()
-    };
-
-    if host.is_empty() {
-        return Err("Webhook URL has no host".to_string());
-    }
-
-    // Block loopback variants
-    if host == "localhost" || host.starts_with("127.") || host == "::1" {
-        return Err(format!("Webhook URL targets a loopback address: '{host}'"));
-    }
-
-    // Block the unspecified/any address (routes to loopback on many OSes)
-    if host == "0.0.0.0" || host == "::" {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("{label} URL has no host"))?;
+    // Kept from the old validator and not covered by the channels blocklist:
+    // internal naming conventions around metadata services.
+    if host.to_ascii_lowercase().contains("metadata") {
         return Err(format!(
-            "Webhook URL targets a wildcard/unspecified address: '{host}'"
+            "{label} URL appears to target an instance metadata service: '{host}'"
         ));
     }
 
-    // Block cloud instance metadata service (AWS, GCP, Azure all use 169.254.169.254)
-    if host.starts_with("169.254.") {
-        return Err(format!(
-            "Webhook URL targets a link-local/metadata address: '{host}'"
-        ));
+    // The shared validator requires https and only ever inspects the host, so
+    // an http server URL is checked through its https twin. If `set_scheme`
+    // ever refuses, the twin stays http and the validator rejects it — the
+    // failure mode is closed.
+    let mut https_form = parsed.clone();
+    if scheme != "https" {
+        let _ = https_form.set_scheme("https");
     }
-
-    // Block RFC 1918 private ranges: 10.0.0.0/8 and 192.168.0.0/16
-    if host.starts_with("10.") || host.starts_with("192.168.") {
-        return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-    }
-
-    // Block 172.16.0.0/12 (172.16.x.x – 172.31.x.x)
-    if host.starts_with("172.") {
-        if let Some(second) = host.split('.').nth(1) {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-                }
-            }
-        }
-    }
-
-    // Block hostnames that contain "metadata" (common internal naming convention)
-    if host.contains("metadata") {
-        return Err(format!(
-            "Webhook URL appears to target an instance metadata service: '{host}'"
-        ));
-    }
-
-    // ── IPv6-specific blocks ─────────────────────────────────────────────────
-    // Only applies when the host is an IPv6 address (contains ':')
-    if host.contains(':') {
-        // Block IPv6 link-local (fe80::/10: fe80:: – febf::)
-        if host.starts_with("fe8")
-            || host.starts_with("fe9")
-            || host.starts_with("fea")
-            || host.starts_with("feb")
-        {
-            return Err(format!(
-                "Webhook URL targets an IPv6 link-local address: '{host}'"
-            ));
-        }
-
-        // Block IPv6 Unique Local Addresses (ULA, fc00::/7: fc:: – fdff::)
-        if host.starts_with("fc") || host.starts_with("fd") {
-            return Err(format!(
-                "Webhook URL targets an IPv6 unique-local (private) address: '{host}'"
-            ));
-        }
-
-        // Block IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
-        // These bypass IPv4 blocklist checks above if not handled separately.
-        if let Some(ipv4_part) = host.strip_prefix("::ffff:") {
-            return validate_ipv4_mapped(ipv4_part);
-        }
-    }
-
-    Ok(())
-}
-
-/// Validates the IPv4 address embedded in an `::ffff:` IPv4-mapped IPv6 address.
-fn validate_ipv4_mapped(ipv4: &str) -> Result<(), String> {
-    if ipv4.starts_with("127.")
-        || ipv4 == "localhost"
-        || ipv4 == "0.0.0.0"
-        || ipv4.starts_with("169.254.")
-        || ipv4.starts_with("10.")
-        || ipv4.starts_with("192.168.")
-    {
-        return Err(format!(
-            "Webhook URL targets a private/loopback address via IPv4-mapped IPv6: '::ffff:{ipv4}'"
-        ));
-    }
-    if ipv4.starts_with("172.") {
-        if let Some(second) = ipv4.split('.').nth(1) {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return Err(format!(
-                        "Webhook URL targets a private address via IPv4-mapped IPv6: '::ffff:{ipv4}'"
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
+    agentos_channels::webhook::validate_webhook_url(https_form.as_str())
+        .map_err(|e| format!("{label} URL rejected: {e}"))
 }
 
 #[cfg(test)]
@@ -385,5 +211,42 @@ mod tests {
     fn allows_host_with_port_server() {
         assert!(validate_server_url("http://example.com:8080/path").is_ok());
         assert!(validate_server_url("https://example.com:443/path").is_ok());
+    }
+
+    // ── SEC-06: cases the hand-rolled host extractor accepted ────────────────
+
+    #[test]
+    fn blocks_userinfo_smuggled_metadata_host() {
+        // The bug: host was read as "evil.example@169.254.169.254", which
+        // matched no private prefix, so the POST reached the metadata service.
+        assert!(validate_webhook_url("https://evil.example@169.254.169.254/").is_err());
+        assert!(
+            validate_webhook_url("https://evil.example@169.254.169.254/latest/meta-data/").is_err()
+        );
+        // Userinfo containing its own '@' must not shift the split either.
+        assert!(validate_webhook_url("https://a@b@127.0.0.1/notify").is_err());
+        assert!(validate_server_url("http://user:pass@10.0.0.1/path").is_err());
+    }
+
+    #[test]
+    fn blocks_integer_and_hex_encoded_ipv4() {
+        // 2130706433 == 0x7f000001 == 127.0.0.1
+        assert!(validate_webhook_url("https://2130706433/").is_err());
+        assert!(validate_webhook_url("https://0x7f000001/").is_err());
+        assert!(validate_server_url("http://2130706433/path").is_err());
+    }
+
+    #[test]
+    fn blocks_cgnat_and_internal_suffixes() {
+        assert!(validate_webhook_url("https://100.64.0.1/notify").is_err());
+        assert!(validate_webhook_url("https://vault.internal/notify").is_err());
+        assert!(validate_webhook_url("https://printer.local/notify").is_err());
+        assert!(validate_webhook_url("https://nas.lan/notify").is_err());
+    }
+
+    #[test]
+    fn blocks_metadata_hostname() {
+        assert!(validate_webhook_url("https://metadata.google.internal/computeMetadata/").is_err());
+        assert!(validate_server_url("http://metadata/latest").is_err());
     }
 }

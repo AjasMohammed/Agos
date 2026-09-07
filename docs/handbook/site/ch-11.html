@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline and Workflows · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a><div class="nav-subs"><a class="nav-sub" href="#what-is-a-pipeline" data-target="what-is-a-pipeline">What is a Pipeline</a><a class="nav-sub" href="#pipeline-yaml-format" data-target="pipeline-yaml-format">Pipeline YAML Format</a><a class="nav-sub" href="#step-types" data-target="step-types">Step Types</a><a class="nav-sub" href="#failure-handling" data-target="failure-handling">Failure Handling</a><a class="nav-sub" href="#wave-based-parallel-execution" data-target="wave-based-parallel-execution">Wave-Based Parallel Execution</a><a class="nav-sub" href="#budget-enforcement" data-target="budget-enforcement">Budget Enforcement</a><a class="nav-sub" href="#variable-sanitization" data-target="variable-sanitization">Variable Sanitization</a><a class="nav-sub" href="#cli-commands" data-target="cli-commands">CLI Commands</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 11 · Pipeline and Workflows</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 11</div><h1 class="ch-title">Pipeline and Workflows</h1><p class="ch-summary">Multi-step YAML pipelines, wave-based parallel execution, step dependencies, failure handling, budget enforcement, variable sanitization</p></div>
+    <article class="prose"><h1 id="pipeline-and-workflows" class="anchored"><a class="hanchor" href="#pipeline-and-workflows" aria-label="link">#</a>Pipeline and Workflows</h1>
+<blockquote><p>Pipelines are multi-step workflows that chain agent tasks and tool invocations into a single, orchestrated execution — with dependency ordering, variable passing, retries, and budget enforcement built in.</p></blockquote>
+<hr>
+<h2 id="what-is-a-pipeline" class="anchored"><a class="hanchor" href="#what-is-a-pipeline" aria-label="link">#</a>What is a Pipeline</h2>
+<p>A pipeline is a YAML-defined workflow composed of sequential or parallel steps. Each step is either:</p>
+<ul><li>An <strong>agent step</strong> — sends a prompt to a named agent and waits for its response.</li><li>A <strong>tool step</strong> — directly invokes a tool with a JSON input object.</li></ul>
+<p>Steps can declare dependencies on other steps (<code>depends_on</code>), pass outputs forward via named variables (<code>output_var</code>), and specify what to do if they fail (<code>on_failure</code>). The pipeline engine topologically sorts steps to respect dependency order before executing them.</p>
+<p>The kernel's <code>PipelineEngine</code> (<code>crates/agentos-pipeline/src/engine.rs</code>) validates the pipeline, resolves variables via <code>{{double-brace}}</code> template syntax, enforces timeouts per step, retries steps up to <code>retry_on_failure</code> times before applying the failure policy, and executes independent steps concurrently using wave-based parallel execution.</p>
+<hr>
+<h2 id="pipeline-yaml-format" class="anchored"><a class="hanchor" href="#pipeline-yaml-format" aria-label="link">#</a>Pipeline YAML Format</h2>
+<p>Pipelines are defined in YAML files and installed via <code>agentos pipeline install</code>. Below is a fully annotated example:</p>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">data-analysis</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1.0&quot;</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Fetch,</span><span class="nv"> </span><span class="s">parse,</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">summarize</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">file&quot;</span>
+<span class="nt">permissions</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;fs.user_data:r&quot;</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;network.outbound:x&quot;</span>
+<span class="nt">max_cost_usd</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.50</span>
+<span class="nt">max_wall_time_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
+<span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">summary</span>
+
+<span class="nt">steps</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fetch</span>
+<span class="w">    </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">researcher</span>
+<span class="w">    </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Download</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">latest</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">https://example.com/data.csv&quot;</span>
+<span class="w">    </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">raw_data</span>
+<span class="w">    </span><span class="nt">timeout_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">    </span><span class="nt">retry_on_failure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">    </span><span class="nt">on_failure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fail</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">parse</span>
+<span class="w">    </span><span class="nt">tool</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">data-parser</span>
+<span class="w">    </span><span class="nt">input</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="w"> </span><span class="s">&quot;data&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="s">&quot;{{raw_data}}&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;format&quot;</span><span class="p p-Indicator">:</span><span class="w"> </span><span class="s">&quot;csv&quot;</span><span class="w"> </span><span class="p p-Indicator">}</span>
+<span class="w">    </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">parsed</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">fetch</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">analyze</span>
+<span class="w">    </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">analyst</span>
+<span class="w">    </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Analyze</span><span class="nv"> </span><span class="s">this</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">produce</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">summary:</span><span class="nv"> </span><span class="s">{{parsed}}&quot;</span>
+<span class="w">    </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">summary</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">parse</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">on_failure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">use_default</span>
+<span class="w">    </span><span class="nt">default_value</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Analysis</span><span class="nv"> </span><span class="s">could</span><span class="nv"> </span><span class="s">not</span><span class="nv"> </span><span class="s">be</span><span class="nv"> </span><span class="s">completed&quot;</span>
+</pre></div>
+</div>
+<h3 id="top-level-fields" class="anchored"><a class="hanchor" href="#top-level-fields" aria-label="link">#</a>Top-Level Fields</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>Unique pipeline name. Used to reference the pipeline in CLI commands.</td></tr><tr><td><code>version</code></td><td>string</td><td>Version string (e.g. <code>&quot;1.0&quot;</code>). Informational; not used for conflict resolution.</td></tr><tr><td><code>description</code></td><td>string (optional)</td><td>Human-readable description shown in <code>pipeline list</code>.</td></tr><tr><td><code>permissions</code></td><td>list (optional)</td><td>Permission strings required by the pipeline's steps. Same format as capability tokens.</td></tr><tr><td><code>max_cost_usd</code></td><td>float (optional)</td><td>Hard cost cap in USD for the entire pipeline run. If the budget is exhausted before a step executes, the pipeline fails with a budget error.</td></tr><tr><td><code>max_wall_time_minutes</code></td><td>integer (optional)</td><td>Hard wall-clock timeout for the entire run. Currently used for documentation; per-step <code>timeout_minutes</code> is enforced at the step level by <code>tokio::time::timeout</code>.</td></tr><tr><td><code>output</code></td><td>string (optional)</td><td>The <code>output_var</code> name whose value becomes the final pipeline output. If omitted, the pipeline has no declared output.</td></tr></tbody></table></div>
+<h3 id="per-step-fields" class="anchored"><a class="hanchor" href="#per-step-fields" aria-label="link">#</a>Per-Step Fields</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td>string</td><td>Unique step identifier within the pipeline. Used in <code>depends_on</code> and logs.</td></tr><tr><td><code>agent</code></td><td>string</td><td>Agent name to dispatch the task to (mutually exclusive with <code>tool</code>).</td></tr><tr><td><code>task</code></td><td>string</td><td>Prompt text sent to the agent. Supports <code>{{variable}}</code> interpolation.</td></tr><tr><td><code>tool</code></td><td>string</td><td>Tool name to invoke directly (mutually exclusive with <code>agent</code>).</td></tr><tr><td><code>input</code></td><td>JSON object</td><td>Input passed to the tool. Supports <code>{{variable}}</code> interpolation in values.</td></tr><tr><td><code>output_var</code></td><td>string (optional)</td><td>Variable name to store this step's output in. Subsequent steps reference it as <code>{{output_var}}</code>.</td></tr><tr><td><code>depends_on</code></td><td>list (optional)</td><td>Step IDs this step must wait for. The engine topologically sorts all steps before execution.</td></tr><tr><td><code>timeout_minutes</code></td><td>integer (optional)</td><td>Per-step timeout enforced by <code>tokio::time::timeout</code>. The step fails if it exceeds this duration.</td></tr><tr><td><code>retry_on_failure</code></td><td>integer (optional)</td><td>Number of additional attempts after the first failure. <code>retry_on_failure: 2</code> means up to 3 total attempts.</td></tr><tr><td><code>on_failure</code></td><td>enum (optional)</td><td>Failure policy after all retries are exhausted. Default: <code>fail</code>.</td></tr><tr><td><code>default_value</code></td><td>string (optional)</td><td>Used when <code>on_failure: use_default</code>. Inserted as the step's output and execution continues.</td></tr></tbody></table></div>
+<hr>
+<h2 id="step-types" class="anchored"><a class="hanchor" href="#step-types" aria-label="link">#</a>Step Types</h2>
+<h3 id="agent-step" class="anchored"><a class="hanchor" href="#agent-step" aria-label="link">#</a>Agent Step</h3>
+<p>Sends a prompt to a named agent and waits for its string response.</p>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">research</span>
+<span class="w">  </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">researcher</span>
+<span class="w">  </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Research</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">current</span><span class="nv"> </span><span class="s">state</span><span class="nv"> </span><span class="s">of</span><span class="nv"> </span><span class="s">quantum</span><span class="nv"> </span><span class="s">computing:</span><span class="nv"> </span><span class="s">{{input}}&quot;</span>
+<span class="w">  </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">research_result</span>
+</pre></div>
+</div>
+<p>The agent must be registered and connected to the kernel. The engine calls <code>PipelineExecutor::run_agent_task(agent_name, rendered_prompt)</code>.</p>
+<h3 id="tool-step" class="anchored"><a class="hanchor" href="#tool-step" aria-label="link">#</a>Tool Step</h3>
+<p>Directly invokes a tool with a JSON input object.</p>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">save</span>
+<span class="w">  </span><span class="nt">tool</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">file-writer</span>
+<span class="w">  </span><span class="nt">input</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/output/report-{{run_id}}.md&quot;</span>
+<span class="w">    </span><span class="nt">content</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{report}}&quot;</span>
+<span class="w">  </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">generate</span><span class="p p-Indicator">]</span>
+</pre></div>
+</div>
+<p>The engine calls <code>PipelineExecutor::run_tool(tool_name, rendered_input)</code>. The tool must be installed in the kernel's tool registry.</p>
+<h3 id="variable-interpolation" class="anchored"><a class="hanchor" href="#variable-interpolation" aria-label="link">#</a>Variable Interpolation</h3>
+<p>The <code>{{var_name}}</code> syntax substitutes any variable in the pipeline context. Variables are populated from:</p>
+<ul><li><strong><code>output_var</code> outputs</strong> — each completed step's output is stored under its declared <code>output_var</code> name.</li><li><strong>Built-in variables</strong> — always available regardless of step outputs:</li></ul>
+<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Value</th></tr></thead><tbody><tr><td><code>{{input}}</code></td><td>The string passed to <code>pipeline run --input</code>.</td></tr><tr><td><code>{{run_id}}</code></td><td>The unique ID of this pipeline run (UUID).</td></tr><tr><td><code>{{date}}</code></td><td>Current date in <code>YYYY-MM-DD</code> format.</td></tr><tr><td><code>{{timestamp}}</code></td><td>Current Unix timestamp (seconds).</td></tr></tbody></table></div>
+<p>If a variable is referenced but not yet populated, the engine substitutes <code>{{UNRESOLVED:var_name}}</code> and logs a warning. Single-brace <code>{var}</code> syntax is not treated as a variable — only <code>{{double_brace}}</code>.</p>
+<hr>
+<h2 id="failure-handling" class="anchored"><a class="hanchor" href="#failure-handling" aria-label="link">#</a>Failure Handling</h2>
+<p>When a step fails (after all retries), the <code>on_failure</code> policy determines what happens next:</p>
+<div class="table-wrap"><table><thead><tr><th>Policy</th><th>YAML value</th><th>Behavior</th></tr></thead><tbody><tr><td><strong>Fail</strong> (default)</td><td><code>fail</code></td><td>The pipeline immediately stops. The run's status is set to <code>Failed</code> and the error is recorded. Subsequent steps are not executed.</td></tr><tr><td><strong>Skip</strong></td><td><code>skip</code></td><td>The step is marked as <code>Skipped</code>. Its <code>output_var</code> is not set (remains unresolved for downstream steps). Execution continues with the next step.</td></tr><tr><td><strong>Use Default</strong></td><td><code>use_default</code></td><td>The <code>default_value</code> string is inserted as the step's output and stored in <code>output_var</code>. Execution continues normally.</td></tr></tbody></table></div>
+<p>Example — graceful degradation:</p>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sentiment</span>
+<span class="w">  </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sentiment-analyzer</span>
+<span class="w">  </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Analyze</span><span class="nv"> </span><span class="s">sentiment:</span><span class="nv"> </span><span class="s">{{text}}&quot;</span>
+<span class="w">  </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sentiment_label</span>
+<span class="w">  </span><span class="nt">on_failure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">use_default</span>
+<span class="w">  </span><span class="nt">default_value</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;unknown&quot;</span>
+
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">report</span>
+<span class="w">  </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">reporter</span>
+<span class="w">  </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Write</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">report.</span><span class="nv"> </span><span class="s">Sentiment:</span><span class="nv"> </span><span class="s">{{sentiment_label}}&quot;</span>
+<span class="w">  </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">sentiment</span><span class="p p-Indicator">]</span>
+</pre></div>
+</div>
+<p>If <code>sentiment</code> fails, <code>{{sentiment_label}}</code> resolves to <code>&quot;unknown&quot;</code> and <code>report</code> still runs.</p>
+<hr>
+<h2 id="wave-based-parallel-execution" class="anchored"><a class="hanchor" href="#wave-based-parallel-execution" aria-label="link">#</a>Wave-Based Parallel Execution</h2>
+<p>The pipeline engine uses a <strong>wave-based</strong> execution model to maximize throughput. Instead of executing steps strictly one-by-one, it builds a dependency graph and identifies "waves" of independent steps that can run concurrently.</p>
+<h3 id="how-it-works" class="anchored"><a class="hanchor" href="#how-it-works" aria-label="link">#</a>How It Works</h3>
+<ol><li><strong>Build dependency graph</strong> — the engine constructs an in-degree map from each step's <code>depends_on</code> list</li><li><strong>Identify wave</strong> — all steps with in-degree 0 (no unresolved dependencies) form the current wave</li><li><strong>Execute wave concurrently</strong> — all steps in the wave run in parallel via <code>futures::future::join_all</code></li><li><strong>Process results</strong> — completed step outputs are stored in the variable context; dependents' in-degrees are decremented</li><li><strong>Repeat</strong> — the next wave is identified and executed until all steps are complete</li></ol>
+<p>Steps within the same wave read from the same context snapshot — they cannot see each other's outputs. Outputs become available to the next wave.</p>
+<h3 id="circular-dependency-detection" class="anchored"><a class="hanchor" href="#circular-dependency-detection" aria-label="link">#</a>Circular Dependency Detection</h3>
+<p>If at any iteration no steps have in-degree 0 but uncompleted steps remain, the engine detects a circular dependency and fails the pipeline run with an error.</p>
+<h3 id="example" class="anchored"><a class="hanchor" href="#example" aria-label="link">#</a>Example</h3>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nt">steps</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fetch-a</span>
+<span class="w">    </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">researcher</span>
+<span class="w">    </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Fetch</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">source</span><span class="nv"> </span><span class="s">A&quot;</span>
+<span class="w">    </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">data_a</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fetch-b</span>
+<span class="w">    </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">researcher</span>
+<span class="w">    </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Fetch</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">source</span><span class="nv"> </span><span class="s">B&quot;</span>
+<span class="w">    </span><span class="nt">output_var</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">data_b</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">merge</span>
+<span class="w">    </span><span class="nt">agent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">analyst</span>
+<span class="w">    </span><span class="nt">task</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Merge</span><span class="nv"> </span><span class="s">{{data_a}}</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">{{data_b}}&quot;</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">fetch-a</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">fetch-b</span><span class="p p-Indicator">]</span>
+</pre></div>
+</div>
+<p>Wave 1 executes <code>fetch-a</code> and <code>fetch-b</code> concurrently. Wave 2 executes <code>merge</code> after both complete.</p>
+<hr>
+<h2 id="budget-enforcement" class="anchored"><a class="hanchor" href="#budget-enforcement" aria-label="link">#</a>Budget Enforcement</h2>
+<p>The pipeline engine checks the agent's budget before each wave. If the budget is exhausted, the pipeline fails immediately with a budget error rather than starting additional steps that cannot complete.</p>
+<p>The <code>PipelineExecutor</code> trait exposes a <code>check_budget()</code> method that the kernel implements by querying the <code>CostTracker</code>:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">PipelineExecutor</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">run_agent_task</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">agent_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">prompt</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">run_tool</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">tool_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">input</span><span class="p">:</span><span class="w"> </span><span class="nc">Value</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">check_budget</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="variable-sanitization" class="anchored"><a class="hanchor" href="#variable-sanitization" aria-label="link">#</a>Variable Sanitization</h2>
+<p>Template variables are sanitized differently depending on context:</p>
+<ul><li><strong>Tool step inputs</strong> (JSON context) — values are escaped via <code>serde_json</code> serialization to handle quotes, backslashes, and control characters safely</li><li><strong>Agent step prompts</strong> (LLM context) — user-derived values (any variable not in the built-in set <code>run_id</code>, <code>date</code>, <code>timestamp</code>) are wrapped in <code>&lt;user_data&gt;</code> tags with tag-boundary escaping to prevent prompt injection</li></ul>
+<p>Built-in variables (<code>{{run_id}}</code>, <code>{{date}}</code>, <code>{{timestamp}}</code>) are kernel-controlled and interpolated without sanitization.</p>
+<hr>
+<h2 id="cli-commands" class="anchored"><a class="hanchor" href="#cli-commands" aria-label="link">#</a>CLI Commands</h2>
+<h3 id="install-a-pipeline" class="anchored"><a class="hanchor" href="#install-a-pipeline" aria-label="link">#</a>Install a Pipeline</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>install<span class="w"> </span>&lt;path&gt;
+</pre></div>
+</div>
+<p>Reads the YAML file at <code>&lt;path&gt;</code>, sends it to the kernel, and registers the pipeline. Paths containing <code>..</code> are rejected to prevent path traversal.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Pipeline &#39;data-analysis&#39; v1.0 installed (3 steps)
+</pre></div>
+</div>
+<h3 id="list-installed-pipelines" class="anchored"><a class="hanchor" href="#list-installed-pipelines" aria-label="link">#</a>List Installed Pipelines</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>list
+</pre></div>
+</div>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME                      VERSION    STEPS    DESCRIPTION
+data-analysis             1.0        3        Fetch, parse, and summarize a data file
+</pre></div>
+</div>
+<h3 id="run-a-pipeline" class="anchored"><a class="hanchor" href="#run-a-pipeline" aria-label="link">#</a>Run a Pipeline</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>run<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--input<span class="w"> </span><span class="s2">&quot;&lt;input&gt;&quot;</span><span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;agent-name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--detach<span class="o">]</span>
+</pre></div>
+</div>
+<ul><li><code>--input</code> — string input passed as <code>{{input}}</code> to all steps.</li><li><code>--agent</code> — agent whose permissions govern pipeline execution (optional).</li><li><code>--detach</code> — run in background and return immediately with the run ID.</li></ul>
+<p>Without <code>--detach</code>, the command blocks until the pipeline completes and prints per-step status:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Pipeline &#39;data-analysis&#39; run: 3f4a9b2c-...
+Status: complete
+  Step fetch:   OK  (1.2s)
+  Step parse:   OK  (0.4s)
+  Step analyze: OK  (3.1s)
+
+Output:
+The dataset shows a 15% increase in Q4...
+</pre></div>
+</div>
+<h3 id="check-run-status" class="anchored"><a class="hanchor" href="#check-run-status" aria-label="link">#</a>Check Run Status</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>status<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--run-id<span class="w"> </span>&lt;id&gt;
+</pre></div>
+</div>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Pipeline: data-analysis
+Run ID: 3f4a9b2c-...
+Status: COMPLETE
+  Step fetch:   OK  (1.2s)
+  Step parse:   OK  (0.4s)
+  Step analyze: OK  (3.1s)
+</pre></div>
+</div>
+<h3 id="view-step-logs" class="anchored"><a class="hanchor" href="#view-step-logs" aria-label="link">#</a>View Step Logs</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>logs<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--run-id<span class="w"> </span>&lt;id&gt;<span class="w"> </span>--step<span class="w"> </span>&lt;step-id&gt;
+</pre></div>
+</div>
+<p>Shows per-attempt output and errors for a specific step:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>--- Attempt 1 [failed] ---
+Connection timed out
+Error: Step &#39;fetch&#39; timed out after 2 minutes
+--- Attempt 2 [complete] ---
+Downloaded 2.4 MB from https://example.com/data.csv
+</pre></div>
+</div>
+<h3 id="remove-a-pipeline" class="anchored"><a class="hanchor" href="#remove-a-pipeline" aria-label="link">#</a>Remove a Pipeline</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>remove<span class="w"> </span>&lt;name&gt;
+</pre></div>
+</div>
+<p>Unregisters the pipeline from the kernel's store. Does not affect runs already in progress or completed.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-12.html">Event System</a> — pipelines emit events on start/completion</li><li><a class="wikilink" href="ch-13.html">Cost Tracking</a> — pipeline runs are subject to per-agent budget limits</li><li><a class="wikilink" href="ch-04.html">CLI Reference</a> — full CLI command reference</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-10.html"><span class="pn-dir">← Previous</span><span class="pn-title">Memory System</span></a><a class="pn pn-next" href="ch-12.html"><span class="pn-dir">Next →</span><span class="pn-title">Event System</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#what-is-a-pipeline" data-target="what-is-a-pipeline">What is a Pipeline</a></li><li class="toc-h2"><a href="#pipeline-yaml-format" data-target="pipeline-yaml-format">Pipeline YAML Format</a></li><li class="toc-h3"><a href="#top-level-fields" data-target="top-level-fields">Top-Level Fields</a></li><li class="toc-h3"><a href="#per-step-fields" data-target="per-step-fields">Per-Step Fields</a></li><li class="toc-h2"><a href="#step-types" data-target="step-types">Step Types</a></li><li class="toc-h3"><a href="#agent-step" data-target="agent-step">Agent Step</a></li><li class="toc-h3"><a href="#tool-step" data-target="tool-step">Tool Step</a></li><li class="toc-h3"><a href="#variable-interpolation" data-target="variable-interpolation">Variable Interpolation</a></li><li class="toc-h2"><a href="#failure-handling" data-target="failure-handling">Failure Handling</a></li><li class="toc-h2"><a href="#wave-based-parallel-execution" data-target="wave-based-parallel-execution">Wave-Based Parallel Execution</a></li><li class="toc-h3"><a href="#how-it-works" data-target="how-it-works">How It Works</a></li><li class="toc-h3"><a href="#circular-dependency-detection" data-target="circular-dependency-detection">Circular Dependency Detection</a></li><li class="toc-h3"><a href="#example" data-target="example">Example</a></li><li class="toc-h2"><a href="#budget-enforcement" data-target="budget-enforcement">Budget Enforcement</a></li><li class="toc-h2"><a href="#variable-sanitization" data-target="variable-sanitization">Variable Sanitization</a></li><li class="toc-h2"><a href="#cli-commands" data-target="cli-commands">CLI Commands</a></li><li class="toc-h3"><a href="#install-a-pipeline" data-target="install-a-pipeline">Install a Pipeline</a></li><li class="toc-h3"><a href="#list-installed-pipelines" data-target="list-installed-pipelines">List Installed Pipelines</a></li><li class="toc-h3"><a href="#run-a-pipeline" data-target="run-a-pipeline">Run a Pipeline</a></li><li class="toc-h3"><a href="#check-run-status" data-target="check-run-status">Check Run Status</a></li><li class="toc-h3"><a href="#view-step-logs" data-target="view-step-logs">View Step Logs</a></li><li class="toc-h3"><a href="#remove-a-pipeline" data-target="remove-a-pipeline">Remove a Pipeline</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

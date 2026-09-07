@@ -11,6 +11,7 @@ version = "1.0.0"
 description = "Install a host OS package via system package manager (mandatory user approval, allowlisted, privileged executor)"
 author = "agentos-core"
 trust_tier = "core"
+category    = "system"
 
 [capabilities_required]
 permissions = [
@@ -25,15 +26,15 @@ outputs = ["content.json"]
 input = "HostPackageInstallIntent"
 output = "HostPackageInstallResult"
 
-[input_schema]
+[payload_schema]
 required = ["package"]
 type = "object"
 
-[input_schema.properties.package]
+[payload_schema.properties.package]
 description = "Package name (must appear in [tools.host_package].allowlist)"
 type = "string"
 
-[input_schema.properties.version]
+[payload_schema.properties.version]
 description = "Version constraint (manager-specific syntax). Omit for latest available."
 type = "string"
 

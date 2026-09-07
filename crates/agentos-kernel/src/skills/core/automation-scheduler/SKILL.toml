@@ -1,0 +1,26 @@
+[skill]
+name = "automation-scheduler"
+version = "0.1.0"
+description = "Sets up and manages deferred and recurring work — cron schedules, one-shot jobs, and timers — and inspects its own schedule history and run logs"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["schedule_requested", "reminder_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["scheduler"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["schedule-recurring", "schedule-once", "set-timer", "list-my-schedules"]
+optional = ["get-schedule-runs", "schedule-control", "cancel-once-job", "cancel-timer", "get-task-logs"]
+
+[permissions]
+required = ["schedule.job:r", "schedule.job:w", "schedule.timer:r", "schedule.timer:w", "schedule.self:r"]
+
+[budget]
+max_cost_per_run = 0.10
+max_tokens_per_run = 15000

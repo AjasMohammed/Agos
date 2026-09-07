@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Configuration · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a><div class="nav-subs"><a class="nav-sub" href="#supported-providers" data-target="supported-providers">Supported Providers</a><a class="nav-sub" href="#provider-configuration" data-target="provider-configuration">Provider Configuration</a><a class="nav-sub" href="#connecting-agents-by-provider" data-target="connecting-agents-by-provider">Connecting Agents by Provider</a><a class="nav-sub" href="#environment-variables" data-target="environment-variables">Environment Variables</a><a class="nav-sub" href="#llmcore-trait" data-target="llmcore-trait">LLMCore Trait</a><a class="nav-sub" href="#model-capabilities" data-target="model-capabilities">Model Capabilities</a><a class="nav-sub" href="#api-key-handling" data-target="api-key-handling">API Key Handling</a><a class="nav-sub" href="#llm-resilience-fallback-and-retry" data-target="llm-resilience-fallback-and-retry">LLM Resilience: Fallback and Retry</a><a class="nav-sub" href="#provider-catalog" data-target="provider-catalog">Provider Catalog</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 15 · LLM Configuration</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 15</div><h1 class="ch-title">LLM Configuration</h1><p class="ch-summary">Four native adapters (Ollama, OpenAI, Anthropic, Gemini) plus the 20-entry provider catalog (DeepSeek, Groq, Mistral, xAI, Cohere, Cerebras, OpenRouter, Together, Fireworks, NVIDIA, Hyperbolic, Azure, and more) — connecting, env vars, FallbackAdapter, RetryPolicy, CircuitBreaker</p></div>
+    <article class="prose"><h1 id="llm-configuration" class="anchored"><a class="hanchor" href="#llm-configuration" aria-label="link">#</a>LLM Configuration</h1>
+<blockquote><p>AgentOS ships four native LLM adapters (Ollama, OpenAI, Anthropic, Gemini) plus a 20-entry OpenAI-compatible provider catalog loaded from <code>config/providers.toml</code>. Each agent is connected to exactly one backend; any catalog entry can be used via <code>--provider &lt;name&gt;</code> at agent connect time.</p></blockquote>
+<hr>
+<h2 id="supported-providers" class="anchored"><a class="hanchor" href="#supported-providers" aria-label="link">#</a>Supported Providers</h2>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Type</th><th>API Style</th><th>Auth</th></tr></thead><tbody><tr><td><code>ollama</code></td><td>Local / self-hosted</td><td>Ollama REST (<code>/api/chat</code>)</td><td>None</td></tr><tr><td><code>openai</code></td><td>Cloud</td><td>OpenAI Chat Completions</td><td>API key via vault</td></tr><tr><td><code>anthropic</code></td><td>Cloud</td><td>Anthropic Messages API</td><td>API key via vault</td></tr><tr><td><code>gemini</code></td><td>Cloud</td><td>Google Generative Language</td><td>API key via vault</td></tr><tr><td><code>custom</code></td><td>Any OpenAI-compatible</td><td>OpenAI Chat Completions</td><td>Optional API key</td></tr><tr><td>_(catalog)_</td><td>20 named providers</td><td>OpenAI Chat Completions</td><td>API key via vault or env var</td></tr></tbody></table></div>
+<hr>
+<h2 id="provider-configuration" class="anchored"><a class="hanchor" href="#provider-configuration" aria-label="link">#</a>Provider Configuration</h2>
+<h3 id="ollama" class="anchored"><a class="hanchor" href="#ollama" aria-label="link">#</a>Ollama</h3>
+<p>Ollama runs locally and requires no API key.</p>
+<div class="table-wrap"><table><thead><tr><th>Config key</th><th>Default</th><th>Override</th></tr></thead><tbody><tr><td><code>[ollama] host</code></td><td><code>http://localhost:11434</code></td><td><code>AGENTOS_OLLAMA_HOST</code> env var or production config</td></tr><tr><td><code>[ollama] default_model</code></td><td><code>llama3.2</code></td><td>Specified per-agent at connect time</td></tr></tbody></table></div>
+<p>Endpoint resolution precedence:</p>
+<ol><li><code>AGENTOS_OLLAMA_HOST</code> environment variable</li><li><code>[ollama] host</code> in the active config file</li></ol>
+<p>Streaming: native NDJSON stream via <code>/api/chat</code>.</p>
+<h3 id="openai" class="anchored"><a class="hanchor" href="#openai" aria-label="link">#</a>OpenAI</h3>
+<p>API key stored in the AgentOS vault under the key <code>openai_api_key</code> (or any name you specify at <code>agentos agent connect</code> time).</p>
+<div class="table-wrap"><table><thead><tr><th>Config key</th><th>Default</th><th>Override</th></tr></thead><tbody><tr><td><code>[llm] openai_base_url</code></td><td><code>https://api.openai.com/v1</code></td><td><code>AGENTOS_OPENAI_BASE_URL</code> env var</td></tr></tbody></table></div>
+<p>Endpoint resolution precedence:</p>
+<ol><li><code>AGENTOS_OPENAI_BASE_URL</code> environment variable</li><li><code>--base-url</code> flag at <code>agentos agent connect</code> time</li><li><code>[llm] openai_base_url</code> in the active config file</li></ol>
+<h3 id="anthropic" class="anchored"><a class="hanchor" href="#anthropic" aria-label="link">#</a>Anthropic</h3>
+<p>API key stored in the vault. The adapter sends it as the <code>x-api-key</code> header.</p>
+<div class="table-wrap"><table><thead><tr><th>Config key</th><th>Default</th><th>Override</th></tr></thead><tbody><tr><td><code>[llm] anthropic_base_url</code></td><td><code>https://api.anthropic.com/v1</code></td><td>Production config or custom <code>--base-url</code></td></tr></tbody></table></div>
+<p>Anthropic uses a top-level <code>system</code> field (not a message role). The adapter separates system-role context entries automatically before sending.</p>
+<h3 id="gemini" class="anchored"><a class="hanchor" href="#gemini" aria-label="link">#</a>Gemini</h3>
+<p>API key stored in the vault. Sent as a query parameter.</p>
+<div class="table-wrap"><table><thead><tr><th>Config key</th><th>Default</th><th>Override</th></tr></thead><tbody><tr><td><code>[llm] gemini_base_url</code></td><td><code>https://generativelanguage.googleapis.com/v1beta</code></td><td>Production config</td></tr></tbody></table></div>
+<p>Gemini uses <code>user</code> / <code>model</code> roles. System prompt entries are passed in the <code>systemInstruction</code> field.</p>
+<h3 id="custom" class="anchored"><a class="hanchor" href="#custom" aria-label="link">#</a>Custom</h3>
+<p>Any OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server, enterprise LLM gateway, etc.).</p>
+<div class="table-wrap"><table><thead><tr><th>Config key</th><th>Default</th><th>Override</th></tr></thead><tbody><tr><td><code>[llm] custom_base_url</code></td><td>_(none in dev)_</td><td><code>AGENTOS_LLM_URL</code> env var or <code>--base-url</code> flag</td></tr></tbody></table></div>
+<p>API key is optional. If not provided, requests are sent without authentication.</p>
+<hr>
+<h2 id="connecting-agents-by-provider" class="anchored"><a class="hanchor" href="#connecting-agents-by-provider" aria-label="link">#</a>Connecting Agents by Provider</h2>
+<p>Use <code>agentos agent connect</code> to register a new agent backed by a specific LLM.</p>
+<h3 id="ollama-local" class="anchored"><a class="hanchor" href="#ollama-local" aria-label="link">#</a>Ollama (local)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2<span class="w"> </span>--name<span class="w"> </span><span class="nb">local</span>
+</pre></div>
+</div>
+<h3 id="openai-2" class="anchored"><a class="hanchor" href="#openai-2" aria-label="link">#</a>OpenAI</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>openai<span class="w"> </span>--model<span class="w"> </span>gpt-4o<span class="w"> </span>--name<span class="w"> </span>researcher
+</pre></div>
+</div>
+<p>API key must already be stored in the vault (value entered interactively):</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>openai_api_key
+<span class="c1"># Enter value for &#39;openai_api_key&#39; (input hidden): ▌</span>
+</pre></div>
+</div>
+<h3 id="anthropic-2" class="anchored"><a class="hanchor" href="#anthropic-2" aria-label="link">#</a>Anthropic</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>anthropic<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span>--name<span class="w"> </span>coder
+</pre></div>
+</div>
+<p>Vault key: <code>anthropic_api_key</code>.</p>
+<h3 id="gemini-2" class="anchored"><a class="hanchor" href="#gemini-2" aria-label="link">#</a>Gemini</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>gemini<span class="w"> </span>--model<span class="w"> </span>gemini-2.5-pro<span class="w"> </span>--name<span class="w"> </span>writer
+</pre></div>
+</div>
+<p>Vault key: <code>gemini_api_key</code>.</p>
+<h3 id="custom-openai-compatible" class="anchored"><a class="hanchor" href="#custom-openai-compatible" aria-label="link">#</a>Custom OpenAI-compatible</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>custom<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>my-model<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>local-gpu<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--base-url<span class="w"> </span>http://192.168.1.100:8080/v1
+</pre></div>
+</div>
+<hr>
+<h2 id="environment-variables" class="anchored"><a class="hanchor" href="#environment-variables" aria-label="link">#</a>Environment Variables</h2>
+<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Provider</th><th>Purpose</th></tr></thead><tbody><tr><td><code>AGENTOS_OLLAMA_HOST</code></td><td>Ollama</td><td>Override the Ollama server URL</td></tr><tr><td><code>AGENTOS_LLM_URL</code></td><td>Custom</td><td>Override the custom provider base URL</td></tr><tr><td><code>AGENTOS_OPENAI_BASE_URL</code></td><td>OpenAI</td><td>Override OpenAI base URL (for proxies/gateways)</td></tr><tr><td><code>RUST_LOG</code></td><td>All</td><td>Set log level (e.g. <code>RUST_LOG=debug</code>)</td></tr></tbody></table></div>
+<p>Environment variables take precedence over values in <code>config/default.toml</code> or <code>config/production.toml</code>.</p>
+<hr>
+<h2 id="llmcore-trait" class="anchored"><a class="hanchor" href="#llmcore-trait" aria-label="link">#</a>LLMCore Trait</h2>
+<p>All adapters implement the <code>LLMCore</code> trait defined in <code>crates/agentos-llm/src/traits.rs</code>. This is the interface the kernel uses to run inference. You do not need to implement it to use AgentOS, but understanding the contract helps when reading logs or debugging.</p>
+<div class="table-wrap"><table><thead><tr><th>Method</th><th>Purpose</th></tr></thead><tbody><tr><td><code>infer(context)</code></td><td>Send the full context window, get a complete response</td></tr><tr><td><code>infer_stream(context, tx)</code></td><td>Stream tokens incrementally via an mpsc channel</td></tr><tr><td><code>health_check()</code></td><td>Ping the backend; returns <code>Healthy</code>, <code>Degraded</code>, or <code>Unhealthy</code></td></tr><tr><td><code>capabilities()</code></td><td>Return <code>ModelCapabilities</code> for this model</td></tr><tr><td><code>provider_name()</code></td><td>String identifier for logging (e.g. <code>&quot;ollama&quot;</code>, <code>&quot;anthropic&quot;</code>)</td></tr><tr><td><code>model_name()</code></td><td>The model string passed at connect time</td></tr></tbody></table></div>
+<p>The <code>infer_stream</code> default implementation falls back to <code>infer</code> and sends the full result as a single token event. Ollama has a native streaming implementation that delivers tokens incrementally.</p>
+<hr>
+<h2 id="model-capabilities" class="anchored"><a class="hanchor" href="#model-capabilities" aria-label="link">#</a>Model Capabilities</h2>
+<p>Each adapter reports its <code>ModelCapabilities</code>, which the kernel uses to decide what features are available for a given agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Context Window</th><th>Images</th><th>Tool Calls</th><th>JSON Mode</th></tr></thead><tbody><tr><td>Ollama</td><td>8,192 tokens</td><td>No</td><td>No</td><td>Yes</td></tr><tr><td>OpenAI</td><td>128,000 tokens</td><td>Yes</td><td>Yes</td><td>Yes</td></tr><tr><td>Anthropic</td><td>200,000 tokens</td><td>Yes</td><td>Yes</td><td>No (uses instructions)</td></tr><tr><td>Gemini</td><td>1,000,000 tokens</td><td>Yes</td><td>Yes</td><td>Yes</td></tr><tr><td>Custom</td><td>32,768 tokens</td><td>No</td><td>No</td><td>No</td></tr></tbody></table></div>
+<blockquote><p>Custom provider defaults are conservative. The actual capabilities depend on the backend model. These values are static defaults in the adapter.</p></blockquote>
+<hr>
+<h2 id="api-key-handling" class="anchored"><a class="hanchor" href="#api-key-handling" aria-label="link">#</a>API Key Handling</h2>
+<p>API keys are stored in the AgentOS vault (AES-256-GCM encrypted) and loaded at agent connection time. They are held in memory as <code>SecretString</code> (from the <code>secrecy</code> crate), which zeroes the memory on drop and prevents the key from appearing in debug output or logs.</p>
+<p>Keys are never written to <code>config/default.toml</code> or <code>config/production.toml</code>. Always use the vault (values are entered interactively with hidden input — never as CLI arguments):</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>anthropic_api_key
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>openai_api_key
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>gemini_api_key
+</pre></div>
+</div>
+<hr>
+<hr>
+<h2 id="llm-resilience-fallback-and-retry" class="anchored"><a class="hanchor" href="#llm-resilience-fallback-and-retry" aria-label="link">#</a>LLM Resilience: Fallback and Retry</h2>
+<h3 id="fallbackadapter" class="anchored"><a class="hanchor" href="#fallbackadapter" aria-label="link">#</a>FallbackAdapter</h3>
+<p>The <code>FallbackAdapter</code> wraps multiple <code>LLMCore</code> providers and tries them in order. If the primary provider fails (any error — network, rate limit, server error), the adapter automatically retries the same request against the next provider in the list.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Primary → fails → Secondary → fails → Tertiary → ...
+                                            ↓ all fail
+                                     returns last error
+</pre></div>
+</div>
+<p><strong>Key behaviours:</strong></p>
+<ul><li><strong>Health check:</strong> <code>health_check()</code> returns <code>Healthy</code> if <em>any</em> provider is healthy. The system is healthy as long as at least one backend is up.</li><li><strong>Capabilities:</strong> Reported from the first (primary) provider.</li><li><strong>Streaming:</strong> Uses an intermediate buffer channel when falling over mid-stream. Partial tokens from a failing provider are discarded before the next provider is tried, so the caller never sees a mixed stream.</li><li><strong>Model name:</strong> Reports the primary provider's model name.</li></ul>
+<p>The FallbackAdapter is constructed programmatically in application code (not via config). Example (Rust):</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">use</span><span class="w"> </span><span class="n">agentos_llm</span><span class="p">::{</span><span class="n">FallbackAdapter</span><span class="p">,</span><span class="w"> </span><span class="n">AnthropicAdapter</span><span class="p">,</span><span class="w"> </span><span class="n">OllamaAdapter</span><span class="p">};</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">primary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Arc</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">AnthropicAdapter</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="o">..</span><span class="p">.));</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">secondary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Arc</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">OllamaAdapter</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="o">..</span><span class="p">.));</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">fallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FallbackAdapter</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="fm">vec!</span><span class="p">[</span><span class="n">primary</span><span class="p">,</span><span class="w"> </span><span class="n">secondary</span><span class="p">])</span><span class="o">?</span><span class="p">;</span>
+</pre></div>
+</div>
+<h3 id="retrypolicy" class="anchored"><a class="hanchor" href="#retrypolicy" aria-label="link">#</a>RetryPolicy</h3>
+<p>The <code>RetryPolicy</code> controls how individual provider adapters handle transient failures (rate limits, timeouts, temporary server errors) before the error propagates to the <code>FallbackAdapter</code>.</p>
+<p><strong>Default retry policy:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>max_retries</code></td><td>3</td><td>Maximum retry attempts after the initial request</td></tr><tr><td><code>base_delay</code></td><td>1s</td><td>Starting delay before the first retry</td></tr><tr><td><code>max_delay</code></td><td>60s</td><td>Upper cap on any single delay</td></tr><tr><td><code>backoff_factor</code></td><td>2.0×</td><td>Exponential multiplier applied per attempt</td></tr></tbody></table></div>
+<p><strong>Delay formula:</strong> <code>delay = min(base_delay × backoff_factor^attempt + jitter, max_delay)</code></p>
+<p>Jitter is ±10% of the calculated delay, derived from the thread ID and clock nanoseconds to decorrelate concurrent callers hitting the same rate limit.</p>
+<p><strong>Retryable HTTP status codes:</strong> <code>408</code>, <code>429</code>, <code>500</code>, <code>502</code>, <code>503</code>, <code>504</code>, <code>529</code></p>
+<p><strong>Non-retryable:</strong> <code>400</code>, <code>401</code>, <code>403</code>, <code>404</code> and other client errors. These return immediately and are NOT counted as circuit breaker failures.</p>
+<p><strong><code>Retry-After</code> header:</strong> If the server returns a <code>Retry-After: &lt;seconds&gt;</code> header, that value is used directly as the delay (capped at <code>max_delay</code>). This ensures correct rate-limit backoff for providers that emit this header (e.g. Anthropic 529 overload responses).</p>
+<h3 id="circuitbreaker" class="anchored"><a class="hanchor" href="#circuitbreaker" aria-label="link">#</a>CircuitBreaker</h3>
+<p>The <code>CircuitBreaker</code> protects a provider from being hammered when it is known to be down.</p>
+<p><strong>Default circuit breaker settings:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>failure_threshold</code></td><td>5</td><td>Consecutive failures before the breaker trips</td></tr><tr><td><code>cooldown</code></td><td>30s</td><td>Time before a half-open probe attempt is allowed</td></tr></tbody></table></div>
+<p><strong>States:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>State</th><th>Condition</th><th>Behaviour</th></tr></thead><tbody><tr><td><strong>Closed</strong></td><td><code>consecutive_failures &lt; threshold</code></td><td>All requests pass through</td></tr><tr><td><strong>Open</strong></td><td><code>consecutive_failures &gt;= threshold</code></td><td>Requests immediately return <code>CircuitBreaker is open</code> error</td></tr><tr><td><strong>Half-open</strong></td><td>Open + <code>cooldown</code> elapsed</td><td>One probe attempt allowed. Success → Closed; Failure → Open</td></tr></tbody></table></div>
+<p>The breaker resets to Closed on any successful response. Client errors (4xx other than 408/429) do not increment the failure counter.</p>
+<hr>
+<h2 id="provider-catalog" class="anchored"><a class="hanchor" href="#provider-catalog" aria-label="link">#</a>Provider Catalog</h2>
+<p>The provider catalog (<code>config/providers.toml</code>) ships 20 OpenAI-compatible providers that any agent can use via <code>--provider &lt;name&gt;</code> at connect time. All are routed through the <code>CustomCore</code> adapter. Add your API key to the vault (or set the listed env var) and connect.</p>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Display Name</th><th>Default Model</th><th>API Key Env</th></tr></thead><tbody><tr><td><code>deepseek</code></td><td>DeepSeek</td><td><code>deepseek-chat</code></td><td><code>DEEPSEEK_API_KEY</code></td></tr><tr><td><code>groq</code></td><td>Groq</td><td><code>llama-3.3-70b-versatile</code></td><td><code>GROQ_API_KEY</code></td></tr><tr><td><code>fireworks</code></td><td>Fireworks AI</td><td><code>accounts/fireworks/models/llama-v3p3-70b-instruct</code></td><td><code>FIREWORKS_API_KEY</code></td></tr><tr><td><code>perplexity</code></td><td>Perplexity</td><td><code>sonar</code></td><td><code>PERPLEXITY_API_KEY</code></td></tr><tr><td><code>openrouter</code></td><td>OpenRouter</td><td><code>auto</code></td><td><code>OPENROUTER_API_KEY</code></td></tr><tr><td><code>together</code></td><td>Together AI</td><td><code>meta-llama/Llama-3.3-70B-Instruct-Turbo</code></td><td><code>TOGETHER_API_KEY</code></td></tr><tr><td><code>lmstudio</code></td><td>LM Studio</td><td><code>local</code></td><td>_(none — local)_</td></tr><tr><td><code>vllm</code></td><td>vLLM</td><td><code>default</code></td><td>_(none — local)_</td></tr><tr><td><code>deepinfra</code></td><td>DeepInfra</td><td><code>meta-llama/Llama-3.3-70B-Instruct</code></td><td><code>DEEPINFRA_API_KEY</code></td></tr><tr><td><code>sambanova</code></td><td>SambaNova</td><td><code>Meta-Llama-3.3-70B-Instruct</code></td><td><code>SAMBANOVA_API_KEY</code></td></tr><tr><td><code>mistral</code></td><td>Mistral AI</td><td><code>mistral-large-latest</code></td><td><code>MISTRAL_API_KEY</code></td></tr><tr><td><code>xai</code></td><td>xAI (Grok)</td><td><code>grok-3</code></td><td><code>XAI_API_KEY</code></td></tr><tr><td><code>cohere</code></td><td>Cohere</td><td><code>command-r-plus</code></td><td><code>COHERE_API_KEY</code></td></tr><tr><td><code>azure</code></td><td>Azure OpenAI</td><td><code>gpt-4o</code></td><td><code>AZURE_OPENAI_API_KEY</code></td></tr><tr><td><code>cerebras</code></td><td>Cerebras</td><td><code>llama3.1-70b</code></td><td><code>CEREBRAS_API_KEY</code></td></tr><tr><td><code>arcee</code></td><td>Arcee AI</td><td><code>auto</code></td><td><code>ARCEE_API_KEY</code></td></tr><tr><td><code>moonshot</code></td><td>Moonshot AI</td><td><code>moonshot-v1-128k</code></td><td><code>MOONSHOT_API_KEY</code></td></tr><tr><td><code>nvidia</code></td><td>NVIDIA NIM</td><td><code>meta/llama-3.3-70b-instruct</code></td><td><code>NVIDIA_API_KEY</code></td></tr><tr><td><code>hyperbolic</code></td><td>Hyperbolic</td><td><code>meta-llama/Llama-3.3-70B-Instruct</code></td><td><code>HYPERBOLIC_API_KEY</code></td></tr><tr><td><code>anyscale</code></td><td>Anyscale</td><td><code>meta-llama/Llama-3-70b-chat-hf</code></td><td><code>ANYSCALE_API_KEY</code></td></tr></tbody></table></div>
+<p><strong>Connecting via a catalog provider:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Store the API key in the vault</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>GROQ_API_KEY
+
+<span class="c1"># Connect using the catalog name</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>groq<span class="w"> </span>--model<span class="w"> </span>llama-3.3-70b-versatile<span class="w"> </span>--name<span class="w"> </span>fast-groq
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>mistral<span class="w"> </span>--model<span class="w"> </span>mistral-large-latest<span class="w"> </span>--name<span class="w"> </span>french-coder
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>xai<span class="w"> </span>--model<span class="w"> </span>grok-3<span class="w"> </span>--name<span class="w"> </span>grok-agent
+</pre></div>
+</div>
+<p><strong>Listing all available providers:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>provider<span class="w"> </span>list<span class="w">         </span><span class="c1"># shows all adapters + catalog entries</span>
+agentos<span class="w"> </span>provider<span class="w"> </span>probe<span class="w"> </span>groq<span class="w">   </span><span class="c1"># probe the endpoint and refresh its model list</span>
+</pre></div>
+</div>
+<p><strong>Adding a custom provider to the catalog:</strong></p>
+<p>Add a <code>[[provider]]</code> block to <code>config/providers.toml</code>:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[[provider]]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my-corp-llm&quot;</span>
+<span class="n">display_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Corp LLM Gateway&quot;</span>
+<span class="n">base_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://llm.internal.corp/v1&quot;</span>
+<span class="n">api_key_env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;CORP_LLM_KEY&quot;</span>
+<span class="n">compatible_with</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;openai&quot;</span>
+<span class="n">default_model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;corp-model-v2&quot;</span>
+<span class="n">models</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;corp-model-v2&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;corp-model-v2-mini&quot;</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>Then <code>agentos agent connect --provider my-corp-llm --model corp-model-v2 --name corp</code>.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-16.html">Configuration Reference</a> — full <code>[ollama]</code> and <code>[llm]</code> config sections</li><li><a class="wikilink" href="ch-09.html">Secrets and Vault</a> — vault storage for API keys</li><li><a class="wikilink" href="ch-14.html">Audit Log</a> — <code>LLMInferenceStarted</code>, <code>LLMInferenceCompleted</code>, <code>AgentConnected</code> events</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-14.html"><span class="pn-dir">← Previous</span><span class="pn-title">Audit Log</span></a><a class="pn pn-next" href="ch-16.html"><span class="pn-dir">Next →</span><span class="pn-title">Configuration Reference</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#supported-providers" data-target="supported-providers">Supported Providers</a></li><li class="toc-h2"><a href="#provider-configuration" data-target="provider-configuration">Provider Configuration</a></li><li class="toc-h3"><a href="#ollama" data-target="ollama">Ollama</a></li><li class="toc-h3"><a href="#openai" data-target="openai">OpenAI</a></li><li class="toc-h3"><a href="#anthropic" data-target="anthropic">Anthropic</a></li><li class="toc-h3"><a href="#gemini" data-target="gemini">Gemini</a></li><li class="toc-h3"><a href="#custom" data-target="custom">Custom</a></li><li class="toc-h2"><a href="#connecting-agents-by-provider" data-target="connecting-agents-by-provider">Connecting Agents by Provider</a></li><li class="toc-h3"><a href="#ollama-local" data-target="ollama-local">Ollama (local)</a></li><li class="toc-h3"><a href="#openai-2" data-target="openai-2">OpenAI</a></li><li class="toc-h3"><a href="#anthropic-2" data-target="anthropic-2">Anthropic</a></li><li class="toc-h3"><a href="#gemini-2" data-target="gemini-2">Gemini</a></li><li class="toc-h3"><a href="#custom-openai-compatible" data-target="custom-openai-compatible">Custom OpenAI-compatible</a></li><li class="toc-h2"><a href="#environment-variables" data-target="environment-variables">Environment Variables</a></li><li class="toc-h2"><a href="#llmcore-trait" data-target="llmcore-trait">LLMCore Trait</a></li><li class="toc-h2"><a href="#model-capabilities" data-target="model-capabilities">Model Capabilities</a></li><li class="toc-h2"><a href="#api-key-handling" data-target="api-key-handling">API Key Handling</a></li><li class="toc-h2"><a href="#llm-resilience-fallback-and-retry" data-target="llm-resilience-fallback-and-retry">LLM Resilience: Fallback and Retry</a></li><li class="toc-h3"><a href="#fallbackadapter" data-target="fallbackadapter">FallbackAdapter</a></li><li class="toc-h3"><a href="#retrypolicy" data-target="retrypolicy">RetryPolicy</a></li><li class="toc-h3"><a href="#circuitbreaker" data-target="circuitbreaker">CircuitBreaker</a></li><li class="toc-h2"><a href="#provider-catalog" data-target="provider-catalog">Provider Catalog</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -1,141 +1,161 @@
-/// Kernel handlers for runtime workspace path management.
-///
-/// `cmd_workspace_add`    — add a path to the live allowlist (no restart required).
-/// `cmd_workspace_remove` — remove a path from the live allowlist.
-/// `cmd_workspace_list`   — list all currently allowed workspace paths.
+//! Kernel-side handlers for user filesystem grant commands.
+//!
+//! Grants record which host directories an agent (or every agent) may
+//! read/write/exec. The CLI/web call these through the bus; the kernel updates
+//! the [`crate::workspace_grant_store::WorkspaceGrantRegistry`] and emits audit
+//! events.
+
 use std::path::PathBuf;
 
 use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
 use agentos_bus::KernelResponse;
-use agentos_tools::workspace::validate_workspace_paths;
-use agentos_types::TraceID;
+use agentos_types::{AgentID, TraceID, WorkspaceGrantMode};
 
-use crate::kernel::Kernel;
+use crate::Kernel;
 
 impl Kernel {
-    /// Add a new path to the workspace allowlist at runtime.
-    ///
-    /// The path must be absolute and must not be a system root (`/`, `/etc`, etc.).
-    /// It is canonicalized before being stored and validated; if canonicalization
-    /// fails (path does not exist yet) the raw absolute path is stored so operators
-    /// can pre-register directories before they are created.
-    ///
-    /// This change is **runtime-only** — it is not persisted to `config/default.toml`.
-    /// To make it permanent, add the path to `tools.workspace.allowed_paths` in your
-    /// config file.
-    pub async fn cmd_workspace_add(&self, path: String) -> KernelResponse {
-        let raw = PathBuf::from(&path);
-
-        // Canonicalize if possible; fall back to the raw path.
-        let canonical = raw.canonicalize().unwrap_or_else(|_| raw.clone());
-
-        // Validate using the same rules as the boot-time check (absolute + not a
-        // forbidden system root). We validate the canonical form so symlinks that
-        // resolve to a forbidden directory are also rejected.
-        if let Err(msg) = validate_workspace_paths(std::slice::from_ref(&canonical)) {
-            return KernelResponse::Error { message: msg };
+    /// Accept either a registered agent display name or a raw `AgentID` UUID.
+    async fn resolve_agent_for_workspace(
+        &self,
+        agent_name: &str,
+    ) -> Result<AgentID, KernelResponse> {
+        let registry = self.agent_registry.read().await;
+        // A UUID still has to name a registered agent. Accepting it unchecked
+        // wrote a grant that `list_for_agent` could never match — silent no-op
+        // folder access that looks live in the list, and that permanently
+        // occupies the (path, agent) slot in the unique index.
+        if let Ok(parsed) = agent_name.parse::<AgentID>() {
+            return registry
+                .get_by_id(&parsed)
+                .map(|a| a.id)
+                .ok_or(KernelResponse::Error {
+                    message: format!("Agent not found: {agent_name}"),
+                });
         }
+        registry
+            .get_by_name(agent_name)
+            .map(|a| a.id)
+            .ok_or(KernelResponse::Error {
+                message: format!("Agent not found: {agent_name}"),
+            })
+    }
 
-        let mut paths = self
-            .workspace_paths
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        // Deduplicate — check both canonical and raw forms in case a previous add
-        // stored the raw path (e.g. the directory didn't exist at add time).
-        if paths.iter().any(|p| p == &canonical || p == &raw) {
-            return KernelResponse::Error {
-                message: format!(
-                    "Workspace path already in allowlist: {}",
-                    canonical.display()
-                ),
-            };
-        }
-
-        paths.push(canonical.clone());
-        drop(paths); // release lock before async audit write
-
-        tracing::info!(path = %canonical.display(), "Workspace path added at runtime");
-
-        self.audit_log(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::KernelConfigChanged,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({
-                "setting": "workspace_paths",
-                "action": "add",
-                "path": canonical.to_string_lossy(),
-            }),
-            severity: AuditSeverity::Info,
-            reversible: true,
-            rollback_ref: None,
-        });
-
-        KernelResponse::Success {
-            data: Some(serde_json::json!({ "path": canonical.to_string_lossy() })),
+    /// `source` / `granted_by` record WHO created the grant — `("bus",
+    /// "local-cli")` for the CLI, `("api", "<key name>")` for the REST surface.
+    /// Handing out host filesystem access is exactly the event where "a remote
+    /// key did this" and "someone typed it at a terminal" must not look alike
+    /// in the audit log.
+    pub(crate) async fn cmd_grant_workspace(
+        &self,
+        path: PathBuf,
+        agent_name: Option<String>,
+        mode: String,
+        source: &str,
+        granted_by: &str,
+    ) -> KernelResponse {
+        let parsed_mode = match WorkspaceGrantMode::parse(&mode) {
+            Ok(m) => m,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("invalid mode '{mode}': {e}"),
+                };
+            }
+        };
+        let agent_id = match agent_name.as_deref() {
+            Some(name) => match self.resolve_agent_for_workspace(name).await {
+                Ok(id) => Some(id),
+                Err(resp) => return resp,
+            },
+            None => None,
+        };
+        match self
+            .workspace_grants
+            .grant(&path, agent_id, parsed_mode, source, granted_by)
+        {
+            Ok(grant) => {
+                self.audit_log(AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::WorkspaceGranted,
+                    agent_id,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "id": grant.id,
+                        "path": grant.path.to_string_lossy(),
+                        "agent_id": grant.agent_id.as_ref().map(|a| a.to_string()),
+                        "mode": grant.mode.to_string(),
+                        "source": grant.source,
+                        "granted_by": grant.granted_by,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: true,
+                    rollback_ref: None,
+                });
+                KernelResponse::WorkspaceGrantCreated(grant)
+            }
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to grant workspace: {e}"),
+            },
         }
     }
 
-    /// Remove a path from the workspace allowlist at runtime.
-    ///
-    /// Matches against both the raw and canonicalized forms of the stored paths.
-    ///
-    /// This change is **runtime-only** — update `config/default.toml` to persist it.
-    pub async fn cmd_workspace_remove(&self, path: String) -> KernelResponse {
-        let target = PathBuf::from(&path);
-        let canonical = target.canonicalize().unwrap_or_else(|_| target.clone());
-
-        let mut paths = self
-            .workspace_paths
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let before = paths.len();
-        // Try exact match first; fall back to canonical equivalence.
-        paths.retain(|p| p != &target && p != &canonical);
-
-        if paths.len() == before {
-            return KernelResponse::Error {
-                message: format!("Path not found in workspace allowlist: {path}"),
-            };
+    pub(crate) async fn cmd_revoke_workspace(
+        &self,
+        path: PathBuf,
+        agent_name: Option<String>,
+        revoked_by: &str,
+    ) -> KernelResponse {
+        let agent_id = match agent_name.as_deref() {
+            Some(name) => match self.resolve_agent_for_workspace(name).await {
+                Ok(id) => Some(id),
+                Err(resp) => return resp,
+            },
+            None => None,
+        };
+        match self.workspace_grants.revoke(&path, agent_id.as_ref()) {
+            Ok(count) => {
+                // A revoke that matched nothing is not a revocation. Auditing it
+                // anyway filled the log with `WorkspaceRevoked {count: 0}` for
+                // paths that had no grant, which reads as access being removed.
+                if count == 0 {
+                    return KernelResponse::WorkspaceGrantRevoked { count };
+                }
+                self.audit_log(AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::WorkspaceRevoked,
+                    agent_id,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "count": count,
+                        "revoked_by": revoked_by,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelResponse::WorkspaceGrantRevoked { count }
+            }
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to revoke workspace: {e}"),
+            },
         }
-        drop(paths);
-
-        tracing::info!(path = %path, "Workspace path removed at runtime");
-
-        self.audit_log(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::KernelConfigChanged,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({
-                "setting": "workspace_paths",
-                "action": "remove",
-                "path": path,
-            }),
-            severity: AuditSeverity::Info,
-            reversible: true,
-            rollback_ref: None,
-        });
-
-        KernelResponse::Success { data: None }
     }
 
-    /// Return all currently allowed workspace paths.
-    pub async fn cmd_workspace_list(&self) -> KernelResponse {
-        let paths = self
-            .workspace_paths
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let list: Vec<String> = paths
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        KernelResponse::WorkspacePaths(list)
+    pub(crate) async fn cmd_list_workspace_grants(
+        &self,
+        agent_name: Option<String>,
+    ) -> KernelResponse {
+        let grants = match agent_name {
+            Some(name) => match self.resolve_agent_for_workspace(&name).await {
+                Ok(id) => self.workspace_grants.list_for_agent(&id),
+                Err(resp) => return resp,
+            },
+            None => self.workspace_grants.list_all_active(),
+        };
+        KernelResponse::WorkspaceGrantList(grants)
     }
 }

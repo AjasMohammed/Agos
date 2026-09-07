@@ -2,10 +2,18 @@ use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Mutex;
-use sysinfo::{Disks, System};
+use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 
 use crate::hal::HalDriver;
 use crate::types::{DiskInfo, SystemSnapshot};
+
+/// `snapshot` reads memory, swap and CPU only. `refresh_all` would also walk
+/// every process and thread in /proc (with environ) on each API call.
+fn system_refresh() -> RefreshKind {
+    RefreshKind::nothing()
+        .with_memory(MemoryRefreshKind::everything())
+        .with_cpu(CpuRefreshKind::everything())
+}
 
 pub struct SystemDriver {
     sys: Mutex<System>,
@@ -20,13 +28,13 @@ impl Default for SystemDriver {
 impl SystemDriver {
     pub fn new() -> Self {
         Self {
-            sys: Mutex::new(System::new_all()),
+            sys: Mutex::new(System::new_with_specifics(system_refresh())),
         }
     }
 
     pub fn snapshot(&self) -> Result<SystemSnapshot, AgentOSError> {
         let mut sys = self.sys.lock().unwrap();
-        sys.refresh_all();
+        sys.refresh_specifics(system_refresh());
         let disks = Disks::new_with_refreshed_list();
 
         let cpu_usage_percent = sys.global_cpu_usage();

@@ -12,11 +12,13 @@ pub mod agent_messages_read;
 pub mod agent_self;
 pub mod archival_insert;
 pub mod archival_search;
+pub mod artifact_write;
 pub mod ask_user;
 pub mod audio;
 pub mod bluetooth;
 pub mod cancel_agent;
 pub mod channel_send;
+pub mod chat_search;
 pub mod context_memory_read;
 pub mod context_memory_update;
 pub mod coordination;
@@ -30,6 +32,7 @@ pub mod event_list_available;
 pub mod event_list_subscriptions;
 pub mod event_subscribe;
 pub mod event_unsubscribe;
+pub mod extract;
 pub mod factory;
 pub mod file_delete;
 pub mod file_diff;
@@ -40,10 +43,14 @@ pub mod file_lock;
 pub mod file_move;
 pub mod file_reader;
 pub mod file_writer;
+pub mod get_schedule_runs;
+pub mod get_task_logs;
 pub mod hardware_info;
+pub mod hardware_twin;
 pub mod host_package;
 pub mod http_client;
 pub mod kmc_tools;
+pub mod list_my_schedules;
 pub mod list_tools;
 pub mod loader;
 pub mod log_reader;
@@ -82,6 +89,8 @@ pub mod search_tools;
 pub mod set_timer;
 pub mod shell_exec;
 pub mod signing;
+pub mod skill_create;
+pub mod skill_prompt;
 pub(crate) mod ssrf;
 pub mod sys_monitor;
 pub mod system_mounts;
@@ -92,6 +101,7 @@ pub mod task_list;
 pub mod task_spawn_async;
 pub mod task_status;
 pub mod think;
+pub mod tool_search_index;
 pub mod traits;
 pub mod usb_storage;
 pub mod user_file_reader;
@@ -117,6 +127,7 @@ pub use agent_messages_read::AgentMessagesReadTool;
 pub use agent_self::AgentSelfTool;
 pub use archival_insert::ArchivalInsert;
 pub use archival_search::ArchivalSearch;
+pub use artifact_write::ArtifactWriteTool;
 pub use ask_user::AskUserTool;
 pub use audio::AudioTool;
 pub use bluetooth::BluetoothTool;
@@ -142,10 +153,14 @@ pub use file_lock::{FileLockRegistry, WriteLockGuard};
 pub use file_move::FileMove;
 pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
+pub use get_schedule_runs::GetScheduleRunsTool;
+pub use get_task_logs::GetTaskLogsTool;
 pub use hardware_info::HardwareInfoTool;
+pub use hardware_twin::{HardwareGetTwinTool, HardwareSetDesiredTool};
 pub use http_client::HttpClientTool;
+pub use list_my_schedules::ListMySchedulesTool;
 pub use list_tools::ListToolsTool;
-pub use loader::{load_all_manifests, load_manifest};
+pub use loader::{load_all_manifests, load_manifest, parse_manifest};
 pub use log_reader::LogReaderTool;
 pub use memory_block_delete::MemoryBlockDeleteTool;
 pub use memory_block_list::MemoryBlockListTool;
@@ -179,6 +194,8 @@ pub use scratch_write::ScratchWriteTool;
 pub use search_tools::SearchToolsTool;
 pub use shell_exec::ShellExec;
 pub use signing::{pubkey_hex_from_seed, sign_manifest, signing_payload, verify_manifest};
+pub use skill_create::{SharedSkillInstaller, SkillCreateTool, SkillInstaller};
+pub use skill_prompt::SkillPromptTool;
 pub use sys_monitor::SysMonitorTool;
 pub use system_mounts::SystemMountsTool;
 pub use system_open_files::SystemOpenFilesTool;
@@ -220,6 +237,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -261,6 +280,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -288,6 +309,22 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    /// Fixed so every context built for one temp dir resolves to the same
+    /// agent home — see `agent_home` below.
+    const TEST_AGENT_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn test_agent_id() -> AgentID {
+        AgentID::from_uuid(TEST_AGENT_ID.parse().unwrap())
+    }
+
+    /// Directory file tools resolve relative paths against, mirroring
+    /// `ToolExecutionContext::agent_files_dir`.
+    fn agent_home(data_dir: &Path) -> std::path::PathBuf {
+        let home = data_dir.join("agents").join(TEST_AGENT_ID);
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
     fn make_context_with_permissions(
         data_dir: &Path,
         permissions: PermissionSet,
@@ -295,7 +332,7 @@ mod tests {
         ToolExecutionContext {
             data_dir: data_dir.to_path_buf(),
             task_id: TaskID::new(),
-            agent_id: AgentID::new(),
+            agent_id: test_agent_id(),
             trace_id: TraceID::new(),
             permissions,
             vault: None,
@@ -305,6 +342,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -322,7 +361,7 @@ mod tests {
         ToolExecutionContext {
             data_dir: data_dir.to_path_buf(),
             task_id: TaskID::new(),
-            agent_id: AgentID::new(),
+            agent_id: test_agent_id(),
             trace_id: TraceID::new(),
             permissions,
             vault: None,
@@ -332,6 +371,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -357,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_reader_basic() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "Hello, AgentOS!").unwrap();
+        std::fs::write(agent_home(dir.path()).join("test.txt"), "Hello, AgentOS!").unwrap();
 
         let tool = FileReader::new();
         let result = tool
@@ -370,6 +411,41 @@ mod tests {
 
         assert_eq!(result["content"], "Hello, AgentOS!");
         assert_eq!(result["size_bytes"], 15);
+    }
+
+    #[tokio::test]
+    async fn test_file_tools_cannot_reach_kernel_state_dir() {
+        // data_dir holds the kernel's own state; the agent home is a subdirectory
+        // of it. Neither a relative nor an absolute path may reach back out.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("audit.db"), "secret").unwrap();
+        agent_home(dir.path());
+
+        let reader = FileReader::new();
+        for path in [
+            serde_json::json!({"path": "audit.db"}),
+            serde_json::json!({"path": dir.path().join("audit.db").to_string_lossy()}),
+        ] {
+            assert!(
+                reader
+                    .execute(path, make_context(dir.path()))
+                    .await
+                    .is_err(),
+                "file-reader reached the kernel state directory"
+            );
+        }
+
+        let listing = FileGlob::new()
+            .execute(
+                serde_json::json!({"path": "", "pattern": "**/*"}),
+                make_context(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !listing.to_string().contains("audit.db"),
+            "file-glob enumerated the kernel state directory: {listing}"
+        );
     }
 
     #[tokio::test]
@@ -414,7 +490,7 @@ mod tests {
         .await
         .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("output.txt")).unwrap();
+        let content = std::fs::read_to_string(agent_home(dir.path()).join("output.txt")).unwrap();
         assert_eq!(content, "Hello!");
     }
 
@@ -430,7 +506,8 @@ mod tests {
         .await
         .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("subdir/nested/file.txt")).unwrap();
+        let content =
+            std::fs::read_to_string(agent_home(dir.path()).join("subdir/nested/file.txt")).unwrap();
         assert_eq!(content, "Deep write!");
     }
 
@@ -905,7 +982,7 @@ mod tests {
     async fn test_file_reader_pagination() {
         let dir = TempDir::new().unwrap();
         let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
-        std::fs::write(dir.path().join("big.txt"), lines.join("\n")).unwrap();
+        std::fs::write(agent_home(dir.path()).join("big.txt"), lines.join("\n")).unwrap();
 
         let tool = FileReader::new();
         let mut perms = PermissionSet::new();
@@ -934,7 +1011,7 @@ mod tests {
             .map(|i| format!("L{}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
+        std::fs::write(agent_home(dir.path()).join("f.txt"), &content).unwrap();
 
         let tool = FileReader::new();
         let mut perms = PermissionSet::new();
@@ -953,7 +1030,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_reader_no_more_when_within_limit() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("small.txt"), "a\nb\nc").unwrap();
+        std::fs::write(agent_home(dir.path()).join("small.txt"), "a\nb\nc").unwrap();
 
         let tool = FileReader::new();
         let mut perms = PermissionSet::new();
@@ -972,9 +1049,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_reader_directory_list() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
-        std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
-        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(agent_home(dir.path()).join("alpha.txt"), "a").unwrap();
+        std::fs::write(agent_home(dir.path()).join("beta.txt"), "b").unwrap();
+        std::fs::create_dir(agent_home(dir.path()).join("subdir")).unwrap();
 
         let tool = FileReader::new();
         let mut perms = PermissionSet::new();
@@ -1003,10 +1080,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_reader_blocked_when_locked() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("locked.txt"), "secret").unwrap();
+        std::fs::write(agent_home(dir.path()).join("locked.txt"), "secret").unwrap();
 
         let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
-        let locked_path = dir.path().canonicalize().unwrap().join("locked.txt");
+        let locked_path = agent_home(dir.path())
+            .canonicalize()
+            .unwrap()
+            .join("locked.txt");
         registry
             .try_acquire(&locked_path, AgentID::new(), TaskID::new())
             .unwrap();
@@ -1041,7 +1121,7 @@ mod tests {
 
         assert_eq!(result["mode"], "create_only");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("new.txt")).unwrap(),
             "hello"
         );
     }
@@ -1049,7 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_writer_create_only_fails_if_exists() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("exists.txt"), "old").unwrap();
+        std::fs::write(agent_home(dir.path()).join("exists.txt"), "old").unwrap();
 
         let tool = FileWriter::new();
         let mut perms = PermissionSet::new();
@@ -1067,7 +1147,7 @@ mod tests {
         assert!(matches!(err, AgentOSError::ToolExecutionFailed { .. }));
         // Original content must be untouched.
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("exists.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("exists.txt")).unwrap(),
             "old"
         );
     }
@@ -1100,7 +1180,10 @@ mod tests {
         let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
 
         // Pre-acquire the lock as a different agent.
-        let locked_path = dir.path().canonicalize().unwrap().join("data.txt");
+        let locked_path = agent_home(dir.path())
+            .canonicalize()
+            .unwrap()
+            .join("data.txt");
         registry
             .try_acquire(&locked_path, AgentID::new(), TaskID::new())
             .unwrap();
@@ -1145,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_editor_basic_edit() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hello.txt"), "Hello, world!").unwrap();
+        std::fs::write(agent_home(dir.path()).join("hello.txt"), "Hello, world!").unwrap();
 
         let tool = crate::file_editor::FileEditor::new();
         let mut perms = PermissionSet::new();
@@ -1166,7 +1249,7 @@ mod tests {
         assert_eq!(result["success"], true);
         assert_eq!(result["edits_applied"], 1);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("hello.txt")).unwrap(),
             "Hello, AgentOS!"
         );
     }
@@ -1174,7 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_editor_multi_edit() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "foo bar baz").unwrap();
+        std::fs::write(agent_home(dir.path()).join("f.txt"), "foo bar baz").unwrap();
 
         let tool = crate::file_editor::FileEditor::new();
         let mut perms = PermissionSet::new();
@@ -1197,7 +1280,7 @@ mod tests {
 
         assert_eq!(result["edits_applied"], 2);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("f.txt")).unwrap(),
             "FOO bar BAZ"
         );
     }
@@ -1234,7 +1317,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_editor_old_text_ambiguous() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "cat cat cat").unwrap();
+        std::fs::write(agent_home(dir.path()).join("f.txt"), "cat cat cat").unwrap();
 
         let tool = crate::file_editor::FileEditor::new();
         let mut perms = PermissionSet::new();
@@ -1302,10 +1385,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_editor_write_lock_blocked() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("locked.txt"), "data").unwrap();
+        std::fs::write(agent_home(dir.path()).join("locked.txt"), "data").unwrap();
 
         let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
-        let locked_path = dir.path().canonicalize().unwrap().join("locked.txt");
+        let locked_path = agent_home(dir.path())
+            .canonicalize()
+            .unwrap()
+            .join("locked.txt");
         registry
             .try_acquire(&locked_path, AgentID::new(), TaskID::new())
             .unwrap();
@@ -1332,7 +1418,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Write a file just over 10 MiB (10 * 1024 * 1024 + 1 bytes).
         let big = "x".repeat(10 * 1024 * 1024 + 1);
-        std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+        std::fs::write(agent_home(dir.path()).join("big.txt"), &big).unwrap();
 
         let tool = crate::file_editor::FileEditor::new();
         let mut perms = PermissionSet::new();
@@ -1359,9 +1445,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_glob_basic() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
-        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
-        std::fs::write(dir.path().join("c.rs"), "c").unwrap();
+        std::fs::write(agent_home(dir.path()).join("a.txt"), "a").unwrap();
+        std::fs::write(agent_home(dir.path()).join("b.txt"), "b").unwrap();
+        std::fs::write(agent_home(dir.path()).join("c.rs"), "c").unwrap();
 
         let tool = crate::file_glob::FileGlob::new();
         let mut perms = PermissionSet::new();
@@ -1387,9 +1473,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_glob_recursive() {
         let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        std::fs::write(dir.path().join("top.rs"), "").unwrap();
-        std::fs::write(dir.path().join("sub").join("nested.rs"), "").unwrap();
+        std::fs::create_dir(agent_home(dir.path()).join("sub")).unwrap();
+        std::fs::write(agent_home(dir.path()).join("top.rs"), "").unwrap();
+        std::fs::write(agent_home(dir.path()).join("sub").join("nested.rs"), "").unwrap();
 
         let tool = crate::file_glob::FileGlob::new();
         let mut perms = PermissionSet::new();
@@ -1480,7 +1566,7 @@ mod tests {
     async fn test_file_grep_content_mode() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
-            dir.path().join("code.rs"),
+            agent_home(dir.path()).join("code.rs"),
             "fn main() {\n    println!(\"hello\");\n}\n",
         )
         .unwrap();
@@ -1510,8 +1596,8 @@ mod tests {
     #[tokio::test]
     async fn test_file_grep_files_with_matches_mode() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "needle in a haystack").unwrap();
-        std::fs::write(dir.path().join("b.txt"), "nothing here").unwrap();
+        std::fs::write(agent_home(dir.path()).join("a.txt"), "needle in a haystack").unwrap();
+        std::fs::write(agent_home(dir.path()).join("b.txt"), "nothing here").unwrap();
 
         let tool = crate::file_grep::FileGrep::new();
         let mut perms = PermissionSet::new();
@@ -1534,7 +1620,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_grep_count_mode() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "yes\nyes\nno\nyes").unwrap();
+        std::fs::write(agent_home(dir.path()).join("f.txt"), "yes\nyes\nno\nyes").unwrap();
 
         let tool = crate::file_grep::FileGrep::new();
         let mut perms = PermissionSet::new();
@@ -1556,7 +1642,11 @@ mod tests {
     #[tokio::test]
     async fn test_file_grep_case_insensitive() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "Hello World\nhello world").unwrap();
+        std::fs::write(
+            agent_home(dir.path()).join("f.txt"),
+            "Hello World\nhello world",
+        )
+        .unwrap();
 
         let tool = crate::file_grep::FileGrep::new();
         let mut perms = PermissionSet::new();
@@ -1577,7 +1667,11 @@ mod tests {
     #[tokio::test]
     async fn test_file_grep_context_lines() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "before\nTARGET\nafter").unwrap();
+        std::fs::write(
+            agent_home(dir.path()).join("f.txt"),
+            "before\nTARGET\nafter",
+        )
+        .unwrap();
 
         let tool = crate::file_grep::FileGrep::new();
         let mut perms = PermissionSet::new();
@@ -1616,8 +1710,8 @@ mod tests {
     #[tokio::test]
     async fn test_file_grep_glob_filter() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "fn hello() {}").unwrap();
-        std::fs::write(dir.path().join("b.txt"), "fn hello() {}").unwrap();
+        std::fs::write(agent_home(dir.path()).join("a.rs"), "fn hello() {}").unwrap();
+        std::fs::write(agent_home(dir.path()).join("b.txt"), "fn hello() {}").unwrap();
 
         let tool = crate::file_grep::FileGrep::new();
         let mut perms = PermissionSet::new();
@@ -1663,7 +1757,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_delete_basic() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("todelete.txt"), "bye").unwrap();
+        std::fs::write(agent_home(dir.path()).join("todelete.txt"), "bye").unwrap();
 
         let tool = crate::file_delete::FileDelete::new();
         let mut perms = PermissionSet::new();
@@ -1676,7 +1770,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["success"], true);
-        assert!(!dir.path().join("todelete.txt").exists());
+        assert!(!agent_home(dir.path()).join("todelete.txt").exists());
     }
 
     #[tokio::test]
@@ -1738,10 +1832,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_delete_write_lock_blocked() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("locked.txt"), "x").unwrap();
+        std::fs::write(agent_home(dir.path()).join("locked.txt"), "x").unwrap();
 
         let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
-        let locked_path = dir.path().canonicalize().unwrap().join("locked.txt");
+        let locked_path = agent_home(dir.path())
+            .canonicalize()
+            .unwrap()
+            .join("locked.txt");
         registry
             .try_acquire(&locked_path, AgentID::new(), TaskID::new())
             .unwrap();
@@ -1762,7 +1859,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_move_basic() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("old.txt"), "content").unwrap();
+        std::fs::write(agent_home(dir.path()).join("old.txt"), "content").unwrap();
 
         let tool = crate::file_move::FileMove::new();
         let mut perms = PermissionSet::new();
@@ -1775,9 +1872,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["success"], true);
-        assert!(!dir.path().join("old.txt").exists());
+        assert!(!agent_home(dir.path()).join("old.txt").exists());
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("new.txt")).unwrap(),
             "content"
         );
     }
@@ -1785,7 +1882,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_move_creates_parent_dirs() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("src.txt"), "data").unwrap();
+        std::fs::write(agent_home(dir.path()).join("src.txt"), "data").unwrap();
 
         let tool = crate::file_move::FileMove::new();
         let mut perms = PermissionSet::new();
@@ -1800,7 +1897,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("subdir/nested/dst.txt")).unwrap(),
+            std::fs::read_to_string(agent_home(dir.path()).join("subdir/nested/dst.txt")).unwrap(),
             "data"
         );
     }
@@ -1892,10 +1989,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_move_write_lock_on_source_blocked() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("locked.txt"), "x").unwrap();
+        std::fs::write(agent_home(dir.path()).join("locked.txt"), "x").unwrap();
 
         let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
-        let locked_path = dir.path().canonicalize().unwrap().join("locked.txt");
+        let locked_path = agent_home(dir.path())
+            .canonicalize()
+            .unwrap()
+            .join("locked.txt");
         registry
             .try_acquire(&locked_path, AgentID::new(), TaskID::new())
             .unwrap();
@@ -1986,10 +2086,12 @@ mod tests {
                 description: "Read files".into(),
                 version: "1.1.0".into(),
                 permissions: vec!["fs.user_data:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
+                search_hints: Vec::new(),
                 tags: vec!["read".into()],
                 risk_class: "readonly_scoped".into(),
                 usage_hints: None,
@@ -1999,17 +2101,28 @@ mod tests {
                 description: "HTTP requests".into(),
                 version: "1.0.0".into(),
                 permissions: vec!["network.outbound:x".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
+                search_hints: Vec::new(),
                 tags: vec!["network".into()],
                 risk_class: "readonly_external".into(),
                 usage_hints: None,
             },
         ];
         let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
-        let ctx = make_context(dir.path());
+        // The catalogue only lists tools the agent can actually call, so the
+        // context has to hold both summaries' declared permissions.
+        let mut permissions = PermissionSet::new();
+        permissions.grant("fs.user_data".to_string(), true, false, false, None);
+        permissions.grant_op(
+            "network.outbound".to_string(),
+            agentos_types::PermissionOp::Execute,
+            None,
+        );
+        let ctx = make_context_with_permissions(dir.path(), permissions);
         let result = tool
             .execute(serde_json::json!({"section": "tools"}), ctx)
             .await
@@ -2029,12 +2142,14 @@ mod tests {
             description: "Read files from data directory".into(),
             version: "1.1.0".into(),
             permissions: vec!["fs.user_data:r".into()],
-            input_schema: Some(
+            payload_schema: Some(
                 serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "core".into(),
+            search_hints: Vec::new(),
             tags: vec!["read".into()],
             risk_class: "readonly_scoped".into(),
             usage_hints: None,
@@ -2051,7 +2166,7 @@ mod tests {
         assert_eq!(result["section"], "tool-detail");
         assert_eq!(result["name"], "file-reader");
         assert_eq!(result["version"], "1.1.0");
-        assert!(result["input_schema"].is_object());
+        assert!(result["payload_schema"].is_object());
     }
 
     #[tokio::test]
@@ -2227,10 +2342,12 @@ mod tests {
                 description: "A test".into(),
                 version: "0.1.0".into(),
                 permissions: vec![],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
+                search_hints: Vec::new(),
                 tags: vec!["read".into()],
                 risk_class: "readonly_scoped".into(),
                 usage_hints: None,

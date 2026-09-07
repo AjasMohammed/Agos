@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name = "storage-zone-create"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Request access to a filesystem directory as a managed storage zone"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "write_scoped"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = [
@@ -20,15 +21,15 @@ outputs = ["content.json"]
 input = "StorageZoneCreateIntent"
 output = "StorageZoneCreateResult"
 
-[input_schema]
+[payload_schema]
 required = ["path"]
 type = "object"
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 description = "Absolute path to the directory to grant access to"
 type = "string"
 
-[input_schema.properties.access]
+[payload_schema.properties.access]
 description = "Access level: 'ro' (read-only) or 'rw' (read-write, default)"
 type = "string"
 default = "rw"

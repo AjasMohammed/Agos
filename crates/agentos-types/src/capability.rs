@@ -100,6 +100,129 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
              // on hostnames like "fdic.gov" that start with "fd".
 ];
 
+/// Extract the bare host from a `net:` target, stripping scheme, userinfo,
+/// port and path. Lowercased, brackets removed.
+///
+/// This is the SSRF hardening boundary: without dropping the `user@` userinfo
+/// component, `http://x@169.254.169.254/` would be range-checked as the host
+/// `x@169.254.169.254` (matching nothing) while the HTTP client connects to the
+/// real host after the `@`.
+fn extract_ssrf_host(target: &str) -> String {
+    let lc = target.to_lowercase();
+    // Strip any scheme:// (not just http/https, so ftp:// etc. can't smuggle a host).
+    let after_scheme = match lc.find("://") {
+        Some(pos) => &lc[pos + 3..],
+        None => lc.as_str(),
+    };
+    // Authority ends at the first '/', '?' or '#'.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop userinfo: everything up to and including the LAST '@'.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, hp)) => hp,
+        None => authority,
+    };
+    // Bracketed IPv6: take the content between '[' and ']'.
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_string();
+    }
+    // host:port — strip the port only when the left side is not itself IPv6
+    // (bare IPv6 has multiple ':' and is invalid without brackets, so keep it whole).
+    match host_port.rsplit_once(':') {
+        Some((left, right))
+            if !left.contains(':')
+                && !right.is_empty()
+                && right.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            left.to_string()
+        }
+        _ => host_port.to_string(),
+    }
+}
+
+/// True if `host` (already lowercased, no brackets/port) is a private, loopback,
+/// link-local, or otherwise non-routable target that must not be reachable.
+fn host_is_private(host: &str) -> bool {
+    // Authoritative IP checks first (canonical text, integer-encoded IPv4, IPv6).
+    if let Some(ip) = parse_host_ip(host) {
+        return ip_is_blocked(ip);
+    }
+    // Hostname / dotted-form string-prefix fallbacks (e.g. "localhost").
+    for prefix in PRIVATE_NETWORK_PREFIXES {
+        if host.starts_with(prefix) {
+            return true;
+        }
+    }
+    // IPv6 ULA (fd00::/8): "fd" + hex/':' (avoids matching hostnames like "fdic.gov").
+    if let Some(rest) = host.strip_prefix("fd") {
+        if let Some(c) = rest.chars().next() {
+            if c.is_ascii_hexdigit() || c == ':' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse `host` as an IP, accepting canonical text and integer-encoded IPv4
+/// (decimal `2130706433`, hex `0x7f000001`, leading-zero octal) that an HTTP
+/// client may still resolve into loopback/private space.
+fn parse_host_ip(host: &str) -> Option<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr};
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    let n = if let Some(hex) = host.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if host.len() > 1 && host.starts_with('0') && host.bytes().all(|b| b.is_ascii_digit()) {
+        u32::from_str_radix(&host[1..], 8).ok()?
+    } else if !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit()) {
+        host.parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+    Some(IpAddr::V4(Ipv4Addr::from(n)))
+}
+
+/// Range-check an IP against private/loopback/link-local/reserved space.
+fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local() // 169.254/16, incl. cloud metadata 169.254.169.254
+                || v4.is_unspecified() // 0.0.0.0
+                || v4.is_broadcast()
+                || o[0] == 0 // 0.0.0.0/8
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_blocked(IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg0 & 0xfe00) == 0xfc00 // ULA fc00::/7
+        }
+    }
+}
+
+/// True if `resource` contains a `..` path segment. Such a resource can
+/// prefix-match a grant while escaping its scope (e.g.
+/// `fs:/home/user/../../etc/passwd` starts with the grant `fs:/home/user/`),
+/// so the enforcement layer fails closed rather than trusting callers to
+/// canonicalize first.
+fn resource_has_traversal(resource: &str) -> bool {
+    resource.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 impl PermissionSet {
     pub fn new() -> Self {
         Self {
@@ -137,44 +260,18 @@ impl PermissionSet {
             }
         }
 
-        // SSRF protection: block private network ranges for network resources
-        if resource.starts_with("net:") || resource.starts_with("network:") {
+        // SSRF protection: block private/loopback/link-local ranges for network
+        // resources. Host extraction strips scheme, userinfo, port and path so
+        // `user@host` and scheme/port noise cannot smuggle a blocked target past
+        // the range check.
+        if is_net {
             let target = resource
                 .strip_prefix("net:")
                 .or_else(|| resource.strip_prefix("network:"))
                 .unwrap_or("");
-            // Lowercase first so protocol-case bypasses like "HTTP://127.0.0.1/" are caught
-            let target_lc = target.to_lowercase();
-            let host_raw = target_lc
-                .strip_prefix("https://")
-                .or_else(|| target_lc.strip_prefix("http://"))
-                .unwrap_or(target_lc.as_str());
-            // Normalize bracketed IPv6 (e.g. "[::1]:8080/path" → "::1")
-            // or strip path from bare hostnames (e.g. "127.0.0.1:8080/path" → "127.0.0.1")
-            let host = if host_raw.starts_with('[') {
-                host_raw
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-            } else {
-                host_raw.split('/').next().unwrap_or(host_raw)
-            };
-            // Normalize to lowercase to block case-variation bypasses
-            // (e.g. "LOCALHOST", "LocalHost", "HTTP://10.0.0.1/")
-            let host_lower = host.to_lowercase();
-            for prefix in PRIVATE_NETWORK_PREFIXES {
-                if host_lower.starts_with(prefix) {
-                    return true;
-                }
-            }
-            // IPv6 ULA (fd00::/8): "fd" followed by a hex digit or colon.
-            // Checked separately to avoid false-positives on hostnames like "fdic.gov".
-            if host_lower.starts_with("fd") && host_lower.len() > 2 {
-                let next = host_lower.chars().nth(2).unwrap_or(' ');
-                if next.is_ascii_hexdigit() || next == ':' {
-                    return true;
-                }
+            let host = extract_ssrf_host(target);
+            if host_is_private(&host) {
+                return true;
             }
         }
 
@@ -188,6 +285,13 @@ impl PermissionSet {
     /// Deny entries are checked first and take absolute precedence.
     /// Expired permission entries are treated as if they do not exist.
     pub fn check(&self, resource: &str, operation: PermissionOp) -> bool {
+        // Fail closed on unnormalized path traversal: a resource with a `..`
+        // segment can prefix-match a grant while escaping it. Reject before any
+        // grant match so the enforcement layer is self-contained.
+        if resource_has_traversal(resource) {
+            return false;
+        }
+
         // Deny entries take precedence
         if self.is_denied(resource) {
             return false;
@@ -225,6 +329,87 @@ impl PermissionSet {
                     PermissionOp::Observe => e.observe,
                 }
         })
+    }
+
+    /// Returns `true` if every capability this set grants is also granted by
+    /// `parent` — i.e. `self` is a *downward-only subset* of `parent`. Used to
+    /// enforce that a delegated/child scope can never exceed its manager's.
+    ///
+    /// This deliberately reuses [`PermissionSet::check`] for the per-resource
+    /// test, so the subset check and live enforcement share one code path
+    /// (wildcards, path-prefix boundaries, deny precedence, and expiry all
+    /// behave identically). Deny entries on `self` only *further* restrict, so
+    /// they never widen the subset and are not considered here.
+    pub fn is_subset_of(&self, parent: &PermissionSet) -> bool {
+        let now = chrono::Utc::now();
+        self.entries.iter().all(|entry| {
+            // Expired grants confer nothing, so they can't violate the subset.
+            if entry.expires_at.is_some_and(|exp| now >= exp) {
+                return true;
+            }
+            [
+                (entry.read, PermissionOp::Read),
+                (entry.write, PermissionOp::Write),
+                (entry.execute, PermissionOp::Execute),
+                (entry.query, PermissionOp::Query),
+                (entry.observe, PermissionOp::Observe),
+            ]
+            .into_iter()
+            .all(|(granted, op)| !granted || parent.check(&entry.resource, op))
+        })
+    }
+
+    /// Return a new set containing only the capabilities that both `self` and
+    /// `ceiling` grant — i.e. `self` clamped so it can never exceed `ceiling`.
+    ///
+    /// Reuses [`PermissionSet::check`] for the per-op test, so wildcard,
+    /// path-prefix, deny, and expiry semantics match live enforcement. The
+    /// result is always a subset of `ceiling` (`result.is_subset_of(ceiling)`
+    /// holds), which is what makes this safe to use as a downward-only clamp on
+    /// a delegated/child scope. Deny entries from both inputs are unioned —
+    /// denials only further restrict, so keeping them is defense-in-depth.
+    pub fn intersect_with(&self, ceiling: &PermissionSet) -> PermissionSet {
+        let mut out = PermissionSet::new();
+        // Candidate resources = every resource named by either side. When two
+        // prefix grants overlap, the narrower one is the intersection and it
+        // always appears here — so a broad `self` grant clamped by a narrower
+        // `ceiling` grant correctly yields the narrower prefix (and vice-versa).
+        // `check()` already excludes expired and denied grants on both sides.
+        let mut seen = std::collections::HashSet::new();
+        for resource in self
+            .entries
+            .iter()
+            .map(|e| &e.resource)
+            .chain(ceiling.entries.iter().map(|e| &e.resource))
+        {
+            if !seen.insert(resource.clone()) {
+                continue;
+            }
+            let grant = |op: PermissionOp| self.check(resource, op) && ceiling.check(resource, op);
+            let read = grant(PermissionOp::Read);
+            let write = grant(PermissionOp::Write);
+            let execute = grant(PermissionOp::Execute);
+            let query = grant(PermissionOp::Query);
+            let observe = grant(PermissionOp::Observe);
+            if read || write || execute || query || observe {
+                out.entries.push(PermissionEntry {
+                    resource: resource.clone(),
+                    read,
+                    write,
+                    execute,
+                    query,
+                    observe,
+                    expires_at: None,
+                });
+            }
+        }
+        out.deny_entries = self.deny_entries.clone();
+        for d in &ceiling.deny_entries {
+            if !out.deny_entries.contains(d) {
+                out.deny_entries.push(d.clone());
+            }
+        }
+        out
     }
 
     pub fn grant(
@@ -329,6 +514,14 @@ impl PermissionSet {
                 PermissionOp::Observe => entry.observe = false,
             }
         }
+        self.drop_empty_entries();
+    }
+
+    /// An entry with every bit cleared grants nothing; keeping it around only
+    /// produces `resource [---]` ghosts in `perm show` / the panel.
+    fn drop_empty_entries(&mut self) {
+        self.entries
+            .retain(|e| e.read || e.write || e.execute || e.query || e.observe);
     }
 
     /// Revoke read, write, and/or execute bits for a resource.
@@ -347,6 +540,7 @@ impl PermissionSet {
                 entry.execute = false;
             }
         }
+        self.drop_empty_entries();
     }
 
     /// Return true if this set has no grant entries (deny entries are ignored).
@@ -535,6 +729,56 @@ mod tests {
     }
 
     #[test]
+    fn test_ssrf_userinfo_bypass_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // The `user@host` userinfo component must not smuggle a blocked host
+        // past the range check — the real target is the part after the '@'.
+        assert!(!perms.check(
+            "net:http://x@169.254.169.254/latest/meta-data/",
+            PermissionOp::Read
+        ));
+        assert!(!perms.check("net:http://user:pass@127.0.0.1/", PermissionOp::Read));
+        assert!(!perms.check("net:http://evil.com@10.0.0.1/", PermissionOp::Read));
+        // A legitimate public host with userinfo is still allowed.
+        assert!(perms.check("net:https://token@api.anthropic.com/v1", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_integer_encoded_ip_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // Decimal (2130706433 == 127.0.0.1) and hex (0x7f000001) integer IPv4.
+        assert!(!perms.check("net:http://2130706433/", PermissionOp::Read));
+        assert!(!perms.check("net:http://0x7f000001/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_non_http_scheme_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // A non-http scheme must not let the host escape the range check.
+        assert!(!perms.check("net:ftp://127.0.0.1/", PermissionOp::Read));
+        assert!(!perms.check("net:gopher://10.0.0.1:70/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/home/user/".into(), true, true, false, None);
+
+        // A `..` segment must fail closed even though it prefix-matches the grant.
+        assert!(!perms.check("fs:/home/user/../../etc/passwd", PermissionOp::Read));
+        assert!(!perms.check("fs:/home/user/docs/../../../etc/shadow", PermissionOp::Read));
+        // A filename that merely contains ".." is fine.
+        assert!(perms.check("fs:/home/user/..hidden", PermissionOp::Read));
+        assert!(perms.check("fs:/home/user/a..b.txt", PermissionOp::Read));
+    }
+
+    #[test]
     fn test_prefix_no_partial_segment_match() {
         let mut perms = PermissionSet::new();
         // Grant WITHOUT trailing slash
@@ -712,5 +956,88 @@ mod tests {
 
         assert!(perms.check("memory.semantic", PermissionOp::Read));
         assert!(perms.check("memory.semantic", PermissionOp::Query));
+    }
+
+    #[test]
+    fn is_subset_of_accepts_equal_and_narrower_scopes() {
+        let mut manager = PermissionSet::new();
+        manager.grant("fs:/home/user/".into(), true, true, false, None);
+        manager.grant("net:".into(), true, false, false, None);
+
+        // Identical scope is a subset of itself.
+        assert!(manager.is_subset_of(&manager));
+
+        // A narrower child (fewer resources, fewer bits, path under the grant).
+        let mut child = PermissionSet::new();
+        child.grant("fs:/home/user/docs/".into(), true, false, false, None);
+        assert!(child.is_subset_of(&manager));
+
+        // Empty scope is a subset of anything.
+        assert!(PermissionSet::new().is_subset_of(&manager));
+    }
+
+    #[test]
+    fn is_subset_of_rejects_escalation() {
+        let mut manager = PermissionSet::new();
+        manager.grant("fs:/home/user/".into(), true, false, false, None); // read only
+
+        // Child wants write where the manager only has read → not a subset.
+        let mut writer = PermissionSet::new();
+        writer.grant("fs:/home/user/".into(), true, true, false, None);
+        assert!(!writer.is_subset_of(&manager));
+
+        // Child wants a resource the manager never holds → not a subset.
+        let mut outsider = PermissionSet::new();
+        outsider.grant("fs:/etc/".into(), true, false, false, None);
+        assert!(!outsider.is_subset_of(&manager));
+
+        // A manager denial inside its own granted prefix narrows what it can
+        // delegate: the child requesting the denied path is not a subset.
+        let mut denying_mgr = PermissionSet::new();
+        denying_mgr.grant("fs:/home/user/".into(), true, true, false, None);
+        denying_mgr.deny("fs:/home/user/.ssh/".into());
+        let mut ssh_child = PermissionSet::new();
+        ssh_child.grant("fs:/home/user/.ssh/".into(), true, false, false, None);
+        assert!(!ssh_child.is_subset_of(&denying_mgr));
+    }
+
+    #[test]
+    fn intersect_with_clamps_to_ceiling_and_is_a_subset() {
+        // Requested wants read+write on two resources.
+        let mut requested = PermissionSet::new();
+        requested.grant("fs:/home/user/".into(), true, true, false, None);
+        requested.grant("net:".into(), true, true, false, None);
+
+        // Ceiling only allows read under a narrower fs path, nothing on net.
+        let mut ceiling = PermissionSet::new();
+        ceiling.grant("fs:/home/user/docs/".into(), true, false, false, None);
+
+        let clamped = requested.intersect_with(&ceiling);
+
+        // The result can never exceed the ceiling.
+        assert!(clamped.is_subset_of(&ceiling));
+        // Only the read under the allowed sub-path survives; write is dropped.
+        assert!(clamped.check("fs:/home/user/docs/file", PermissionOp::Read));
+        assert!(!clamped.check("fs:/home/user/docs/file", PermissionOp::Write));
+        // The net grant is entirely outside the ceiling → gone.
+        assert!(!clamped.check("net:http://example.com", PermissionOp::Read));
+    }
+
+    #[test]
+    fn intersect_with_empty_ceiling_yields_empty() {
+        let mut requested = PermissionSet::new();
+        requested.grant("fs:/anywhere/".into(), true, true, true, None);
+        let clamped = requested.intersect_with(&PermissionSet::new());
+        assert!(clamped.entries.is_empty());
+    }
+
+    #[test]
+    fn is_subset_of_wildcard_parent_accepts_anything() {
+        let mut root = PermissionSet::new();
+        root.grant("*".into(), true, true, true, None);
+
+        let mut child = PermissionSet::new();
+        child.grant("fs:/anywhere/".into(), true, true, true, None);
+        assert!(child.is_subset_of(&root));
     }
 }

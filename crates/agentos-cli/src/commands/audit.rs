@@ -95,7 +95,16 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
 
-                    if valid {
+                    let gaps = val.get("gaps").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    if valid && gaps > 0 {
+                        println!(
+                            "Audit chain VALID ({} entries verified across {} segments; {} gap(s) from rotation/cleanup — deletions inside a gap are not detectable)",
+                            checked,
+                            gaps + 1,
+                            gaps
+                        );
+                    } else if valid {
                         println!("Audit chain VALID ({} entries verified)", checked);
                     } else {
                         let seq = val

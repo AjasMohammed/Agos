@@ -56,15 +56,15 @@ impl Kernel {
             };
         }
 
-        // Also revoke capability permissions
-        self.capability_engine.revoke_agent(&agent_id);
-
         KernelResponse::Success {
             data: Some(serde_json::json!({
                 "agent_id": agent_id.to_string(),
                 "agent_name": agent_name,
                 "identity_revoked": true,
-                "permissions_revoked": true,
+                // Identity revocation is not capability revocation: this rotates the
+                // agent's Ed25519 key, it does not invalidate its capability tokens.
+                // `agentos agent remove` is the command that does that.
+                "permissions_revoked": false,
             })),
         }
     }

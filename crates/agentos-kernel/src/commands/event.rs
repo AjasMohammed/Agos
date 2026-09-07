@@ -4,7 +4,7 @@ use agentos_bus::KernelResponse;
 use agentos_types::*;
 
 impl Kernel {
-    pub(crate) async fn cmd_event_subscribe(
+    pub async fn cmd_event_subscribe(
         &self,
         agent_name: String,
         event_filter: String,
@@ -38,8 +38,11 @@ impl Kernel {
         };
 
         // Parse throttle policy
+        // Fail closed: unspecified throttle = bounded default (see the
+        // event-subscribe kernel action for rationale); "none" opts out.
         let throttle_policy = match throttle.as_deref() {
-            None | Some("none") => ThrottlePolicy::None,
+            None | Some("") => crate::event_bus::default_role_subscription_throttle(),
+            Some("none") => ThrottlePolicy::None,
             Some(s) => match parse_throttle(s) {
                 Some(p) => p,
                 None => {
@@ -109,7 +112,7 @@ impl Kernel {
         KernelResponse::EventSubscriptionId(sub_id.to_string())
     }
 
-    pub(crate) async fn cmd_event_unsubscribe(&self, subscription_id: String) -> KernelResponse {
+    pub async fn cmd_event_unsubscribe(&self, subscription_id: String) -> KernelResponse {
         let id = match subscription_id.parse::<SubscriptionID>() {
             Ok(id) => id,
             Err(_) => {

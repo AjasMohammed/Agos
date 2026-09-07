@@ -1,4 +1,5 @@
-tags = ["read", "meta"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name = "env-list"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "List installed packages in a managed workspace"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "readonly_scoped"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = [
@@ -20,11 +21,11 @@ outputs = ["content.json"]
 input = "EnvListIntent"
 output = "EnvListResult"
 
-[input_schema]
+[payload_schema]
 required = ["workspace"]
 type = "object"
 
-[input_schema.properties.workspace]
+[payload_schema.properties.workspace]
 description = "Name of the workspace to list packages for"
 type = "string"
 

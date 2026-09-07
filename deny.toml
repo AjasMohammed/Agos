@@ -1,0 +1,54 @@
+# deny.toml — cargo-deny supply-chain policy for AgentOS.
+#
+# Enforced in CI (`cargo deny check`) as a mandatory gate on PRs and the release
+# path. Covers advisories, license compliance, dependency bans, and source trust.
+#
+# Release plan: obsidian-vault/plans/production-release-v1/08-security-signoff-and-supply-chain.md
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Kept in LOCKSTEP with `.github/workflows/ci.yml` and `audit.toml`. All four hit
+# the same path: rumqttc 0.25.1 transitively pins rustls-webpki 0.102.8, unfixable
+# until rumqttc 0.26+ ships. The mqtt feature is opt-in and the affected code
+# paths (CRL revocation, name constraints) are not exercised. Re-evaluate on
+# rumqttc 0.26+. If you change this list, change audit.toml + ci.yml too.
+ignore = [
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
+
+[licenses]
+# Seeded from the licenses typically present across the workspace dependency
+# tree. This gate is FAIL-CLOSED: `cargo deny check licenses` will flag any
+# dependency whose license is not listed here, at which point it must be
+# reviewed and either added (with rationale) or the dependency replaced.
+# Do NOT add a license here without confirming a real dependency requires it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# Per-crate license exceptions go here, each with a written rationale:
+# exceptions = [{ allow = ["..."], name = "some-crate" }]
+
+[bans]
+# Start permissive on duplicate versions (the tree has some); tighten to "deny"
+# post-v1 once deduplicated. Wildcard version requirements are never allowed.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

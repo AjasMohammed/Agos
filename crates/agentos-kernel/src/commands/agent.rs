@@ -2,7 +2,8 @@ use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_llm::{
-    AnthropicCore, CustomCore, GeminiCore, HealthStatus, LLMCore, OllamaCore, OpenAICore,
+    AnthropicCore, ClaudeCodeCore, CustomCore, FallbackAdapter, GeminiCore, HealthStatus, LLMCore,
+    OllamaCore, OpenAICore,
 };
 use agentos_types::*;
 use secrecy::SecretString;
@@ -20,16 +21,107 @@ fn is_valid_agent_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+/// Parse a provider string from config (`llm.fallback_models[].provider`) into
+/// an `LLMProvider`, mirroring the CLI's `--provider` parsing: known names map
+/// to their variants; `custom:<name>` and any other bare name map to
+/// `Custom(<name>)` (resolved against the provider catalog at build time). An
+/// empty name (`custom:`) is normalized to `Custom("custom")` rather than an
+/// empty string, since this parser is operator-typed config.
+fn parse_provider_name(s: &str) -> LLMProvider {
+    match s.to_lowercase().as_str() {
+        "ollama" => LLMProvider::Ollama,
+        "openai" => LLMProvider::OpenAI,
+        "anthropic" => LLMProvider::Anthropic,
+        "gemini" => LLMProvider::Gemini,
+        p if p.starts_with("custom:") => {
+            let name = p.strip_prefix("custom:").unwrap_or("").trim();
+            let name = if name.is_empty() { "custom" } else { name };
+            LLMProvider::Custom(name.to_string())
+        }
+        "custom" => LLMProvider::Custom("custom".to_string()),
+        other => LLMProvider::Custom(other.to_string()),
+    }
+}
+
 impl Kernel {
-    /// Build an `LLMCore` adapter for the given provider/model/base_url combination.
+    /// Build the `LLMCore` for an agent: the primary adapter for
+    /// `provider`/`model`/`base_url`, optionally wrapped in a [`FallbackAdapter`]
+    /// when `llm.fallback_models` is configured (failover covers both the
+    /// blocking and streaming inference paths). Shared by `cmd_connect_agent`,
+    /// `cmd_ping_llm`, and auto-reactivation so all paths build identical
+    /// adapters. The returned base URL is always the *primary's* resolved URL
+    /// (persisted on `AgentProfile.base_url`).
+    pub(crate) async fn build_llm_adapter(
+        &self,
+        agent_name: &str,
+        provider: &LLMProvider,
+        model: &str,
+        base_url: Option<String>,
+    ) -> Result<(Arc<dyn LLMCore>, Option<String>), String> {
+        let (primary, resolved_url) = self
+            .build_single_llm_adapter(agent_name, provider, model, base_url)
+            .await?;
+
+        if self.config.llm.fallback_models.is_empty() {
+            return Ok((primary, resolved_url));
+        }
+
+        let mut chain: Vec<Arc<dyn LLMCore>> = vec![primary];
+        for fb in &self.config.llm.fallback_models {
+            let fb_provider = parse_provider_name(&fb.provider);
+            // Skip a fallback that resolves to the same primary endpoint —
+            // failing over to the endpoint that just failed is pointless. Only
+            // dedup when the fallback has no explicit `base_url`; an explicit
+            // URL marks a deliberately distinct target (e.g. a mirror/region)
+            // and is always kept.
+            if &fb_provider == provider && fb.model == model && fb.base_url.is_none() {
+                continue;
+            }
+            match self
+                .build_single_llm_adapter(agent_name, &fb_provider, &fb.model, fb.base_url.clone())
+                .await
+            {
+                Ok((adapter, _)) => chain.push(adapter),
+                Err(e) => tracing::warn!(
+                    agent_name = %agent_name,
+                    provider = %fb.provider,
+                    model = %fb.model,
+                    error = %e,
+                    "Skipping fallback model that failed to build"
+                ),
+            }
+        }
+
+        if chain.len() == 1 {
+            // Every fallback was skipped or failed to build — return the bare
+            // primary rather than a single-element FallbackAdapter.
+            return Ok((chain.pop().expect("chain has one element"), resolved_url));
+        }
+
+        match FallbackAdapter::new(chain) {
+            Ok(fa) => {
+                tracing::info!(
+                    agent_name = %agent_name,
+                    fallbacks = self.config.llm.fallback_models.len(),
+                    "Built agent LLM with provider fallback chain"
+                );
+                Ok((Arc::new(fa), resolved_url))
+            }
+            // `FallbackAdapter::new` only errors on an empty vec, already
+            // excluded above; surface a clear error rather than panic.
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Build a single `LLMCore` adapter for the given provider/model/base_url
+    /// combination (no fallback wrapping).
     ///
     /// Resolves vault-stored API keys (preferring `<agent>_<provider>_api_key` then
     /// the global `<provider>_api_key`), honors env-var fallbacks, and applies
     /// config defaults. Returns the adapter plus the effective base URL that
     /// should be stored on `AgentProfile.base_url` (so `agent set-url` can mutate
-    /// it later). Shared by `cmd_connect_agent` and `cmd_ping_llm` so both
-    /// paths construct identical adapters.
-    pub(crate) async fn build_llm_adapter(
+    /// it later).
+    pub(crate) async fn build_single_llm_adapter(
         &self,
         agent_name: &str,
         provider: &LLMProvider,
@@ -153,6 +245,19 @@ impl Kernel {
                 ))
             }
             LLMProvider::Custom(custom_name) => {
+                // Claude Code subprocess backend: runs the local `claude` CLI on
+                // the user's subscription (no API key). Intercept before the
+                // catalog/HTTP path since it is not an OpenAI-compatible endpoint.
+                if custom_name == "claude-code" || custom_name == "claude-cli" {
+                    let mut core = ClaudeCodeCore::new(model.to_string())
+                        .with_image_resolver(image_resolver.clone());
+                    if let Some(lookup) = &self.claude_session_lookup {
+                        core = core.with_resume_store(
+                            lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                        );
+                    }
+                    return Ok((Arc::new(core), None));
+                }
                 // Check the provider catalog first for known providers.
                 let catalog_entry_opt = self
                     .provider_catalog
@@ -163,11 +268,18 @@ impl Kernel {
                 if let Some(catalog_entry) = catalog_entry_opt {
                     // Catalog-based provider: use catalog's base_url and API key env var.
                     let sec = if !catalog_entry.api_key_env.is_empty() {
-                        match self
+                        // Same chain as the built-in providers: the per-agent key
+                        // first, then the shared `<provider>_api_key` so one stored
+                        // key serves every agent on this provider, then the env var.
+                        let key_result = match self
                             .vault
                             .get(&format!("{}_{}_api_key", agent_name, custom_name))
                             .await
                         {
+                            ok @ Ok(_) => ok,
+                            Err(_) => self.vault.get(&format!("{}_api_key", custom_name)).await,
+                        };
+                        match key_result {
                             Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
                             Err(_) => std::env::var(&catalog_entry.api_key_env)
                                 .ok()
@@ -226,6 +338,142 @@ impl Kernel {
                 }
             }
         }
+    }
+
+    /// Stand up a per-agent Claude MCP tool gateway: build a
+    /// [`KernelMcpExecutor`] bound to this agent's real capability context,
+    /// start the localhost MCP HTTP server, and return the path to the
+    /// generated MCP config file (passed to `ClaudeCodeCore::with_mcp_config`).
+    async fn start_claude_mcp_gateway_for_agent(
+        &self,
+        agent_id: AgentID,
+        permissions: PermissionSet,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use crate::claude_mcp_gateway::{start_claude_mcp_gateway, KernelMcpExecutor};
+
+        // Shared per-agent tool-call buffer: the executor appends each subprocess
+        // tool call, the chat loop drains it per turn so calls show in the chat UI.
+        let collector: crate::claude_mcp_gateway::GatewayToolCallCollector =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        self.claude_gateway_tool_calls
+            .write()
+            .await
+            .insert(agent_id, Arc::clone(&collector));
+
+        let workspace_paths = self.workspace_paths_for_agent(&agent_id);
+        let executor = Arc::new(KernelMcpExecutor::new(
+            Arc::clone(&self.tool_runner),
+            Arc::clone(&self.agent_registry),
+            Arc::clone(&self.capability_registry),
+            Arc::clone(&self.capability_dispatcher),
+            Arc::clone(&self.hal),
+            self.zone_table.clone(),
+            self.data_dir.clone(),
+            self.cancellation_token.clone(),
+            Arc::clone(&self.hook_registry),
+            agent_id,
+            permissions,
+            workspace_paths,
+            collector,
+            Arc::clone(&self.notification_router),
+            Arc::clone(&self.escalation_manager),
+            self.self_weak_slot(),
+        )) as Arc<dyn agentos_mcp::McpToolExecutor>;
+
+        // The collector was inserted before the spawn; if the gateway fails to
+        // start, roll it back so the agent is not left looking gateway-backed
+        // (which would disable its background review for the whole process).
+        let gateway = match start_claude_mcp_gateway(
+            executor,
+            &self.data_dir,
+            agent_id,
+            self.cancellation_token.child_token(),
+        )
+        .await
+        {
+            Ok(g) => g,
+            Err(e) => {
+                self.claude_gateway_tool_calls
+                    .write()
+                    .await
+                    .remove(&agent_id);
+                return Err(e);
+            }
+        };
+        Ok(gateway.config_path)
+    }
+
+    /// For `claude-code`/`claude-cli` agents, stand up the per-agent MCP tool
+    /// gateway and return a `ClaudeCodeCore` bound to it, so the `claude`
+    /// subprocess can call AgentOS tools natively (through `ToolRunner` with the
+    /// agent's real permission set — capability enforcement preserved). For any
+    /// other provider it returns `base_adapter` unchanged; if the gateway fails
+    /// to start it falls back to `base_adapter` (non-fatal — the agent still
+    /// works via the markdown tool envelope).
+    ///
+    /// Shared by the interactive connect path AND boot-time auto-reactivation so
+    /// a restarted claude-code agent keeps its native tool plane. Without this on
+    /// the restart path the agent silently loses every AgentOS tool.
+    pub(crate) async fn build_claude_code_adapter(
+        &self,
+        agent_id: AgentID,
+        agent_model: &str,
+        provider: &LLMProvider,
+        permissions: PermissionSet,
+        base_adapter: Arc<dyn LLMCore>,
+    ) -> Arc<dyn LLMCore> {
+        let is_claude_cli = matches!(
+            provider,
+            LLMProvider::Custom(name) if name == "claude-code" || name == "claude-cli"
+        );
+        if !is_claude_cli {
+            return base_adapter;
+        }
+        match self
+            .start_claude_mcp_gateway_for_agent(agent_id, permissions)
+            .await
+        {
+            Ok(config_path) => {
+                let image_resolver = self
+                    .image_resolver
+                    .read()
+                    .expect("image_resolver lock poisoned")
+                    .clone();
+                let mut core = ClaudeCodeCore::new(agent_model.to_string())
+                    .with_image_resolver(image_resolver)
+                    .with_mcp_config(config_path);
+                if let Some(lookup) = &self.claude_session_lookup {
+                    core = core.with_resume_store(
+                        lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                    );
+                }
+                Arc::new(core) as Arc<dyn LLMCore>
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Failed to start Claude MCP tool gateway; using plain claude-code adapter"
+                );
+                base_adapter
+            }
+        }
+    }
+
+    /// Resolve the budget to bind to an agent at registration. An org-node budget
+    /// (Phase 2) wins over the global `[agent_budget]` config (Phase 1); a lookup
+    /// failure degrades to the config budget rather than blocking the connect.
+    pub(crate) async fn resolve_agent_budget(&self, agent_name: &str) -> AgentBudget {
+        if let Some(org_store) = &self.org_store {
+            match org_store.budget_for_agent(agent_name).await {
+                Ok(Some(budget)) => return budget,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(agent_name = %agent_name, error = %e, "org budget lookup failed; using config budget");
+                }
+            }
+        }
+        self.config.agent_budget.resolve(agent_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -499,6 +747,9 @@ impl Kernel {
                 roles
             };
 
+            // Backfill defaults added after this agent was first registered.
+            backfill_late_default_grants(&mut persisted_permissions);
+
             // Grant per-role event observe permissions so the agent can re-subscribe
             // (via the `event-subscribe` tool) to the same categories its role is
             // seeded with. Idempotent: grant_op is an upsert.
@@ -568,6 +819,22 @@ impl Kernel {
         let agent_id = profile.id;
         let agent_name = profile.name.clone();
         let agent_model = profile.model.clone();
+
+        // For the `claude-code`/`claude-cli` subprocess backend, stand up a
+        // per-agent localhost MCP tool gateway and rebuild the adapter with its
+        // config so the `claude` subprocess can call AgentOS tools natively. Done
+        // here (not in `build_llm_adapter`) because the gateway needs the agent's
+        // real `agent_id` and `PermissionSet`, which only exist after
+        // registration. Shared with the boot-time restart path.
+        let llm_adapter = self
+            .build_claude_code_adapter(
+                agent_id,
+                &agent_model,
+                &profile.provider,
+                profile.permissions.clone(),
+                llm_adapter,
+            )
+            .await;
 
         {
             let mut active = self.active_llms.write().await;
@@ -640,43 +907,23 @@ impl Kernel {
             }
         }
 
-        // Register agent with cost tracker (default budget)
+        // Register agent with cost tracker. An org-node budget (Phase 2) takes
+        // precedence over the global `[agent_budget]` config (Phase 1), which in
+        // turn falls back to AgentBudget::default() when unconfigured.
+        let budget = self.resolve_agent_budget(&agent_name).await;
+        tracing::debug!(
+            agent_name = %agent_name,
+            max_tokens_per_day = budget.max_tokens_per_day,
+            max_cost_usd_per_day = budget.max_cost_usd_per_day,
+            on_hard_limit = ?budget.on_hard_limit,
+            "Binding cost budget to agent"
+        );
         self.cost_tracker
-            .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+            .register_agent(agent_id, agent_name.clone(), budget)
             .await;
 
-        // On reconnect, clear any subscriptions from a prior session or auto-reactivation
-        // so that we don't accumulate duplicates (EventBus::subscribe is pure-append).
-        if is_reconnect {
-            let existing = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
-            for sub in &existing {
-                self.event_bus.unsubscribe(&sub.id).await;
-            }
-        }
-
         // Apply role-based default event subscriptions before AgentAdded is emitted.
-        let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
-        for role in &profile.roles {
-            for spec in default_subscriptions_for_role(role) {
-                if !default_specs.contains(&spec) {
-                    default_specs.push(spec);
-                }
-            }
-        }
-        for (event_type_filter, priority) in default_specs {
-            self.event_bus
-                .subscribe(EventSubscription {
-                    id: SubscriptionID::new(),
-                    agent_id,
-                    event_type_filter,
-                    filter: None,
-                    priority,
-                    throttle: ThrottlePolicy::None,
-                    enabled: true,
-                    created_at: chrono::Utc::now(),
-                })
-                .await;
-        }
+        self.seed_role_subscriptions(agent_id, &profile.roles).await;
 
         let connect_event = if is_reconnect {
             agentos_audit::AuditEventType::AgentReconnected
@@ -696,25 +943,24 @@ impl Kernel {
             rollback_ref: None,
         });
 
-        // Only emit AgentAdded for genuinely new agents, not reconnects.
-        // Reconnect restores an existing profile; every subscribed peer receiving a
-        // "new agent" prompt for someone they already knew causes spurious tasks
-        // (same N×(N-1) storm as auto-reactivation). The audit entry above is the
-        // sole signal for reconnect; AgentAdded drives the "introduce yourself" flow.
-        if !is_reconnect {
-            self.emit_event(
-                EventType::AgentAdded,
-                EventSource::AgentLifecycle,
-                EventSeverity::Info,
-                serde_json::json!({
-                    "agent_id": agent_id.to_string(),
-                    "agent_name": agent_name,
-                    "model": agent_model,
-                }),
-                0,
-            )
-            .await;
-        }
+        // AgentAdded is only for genuinely new agents, not reconnects. Reconnect
+        // restores an existing profile; every subscribed peer receiving a "new
+        // agent" prompt for someone they already knew causes spurious tasks (same
+        // N×(N-1) storm as auto-reactivation). The audit entry above is the sole
+        // signal for reconnect; AgentAdded drives the "introduce yourself" flow.
+        //
+        // The emit is deferred until the onboarding task below gets its first LLM
+        // answer (see `announce_agent_added`): a passing health check does not
+        // prove the backend works — `claude --version` succeeds while logged out
+        // and `GET /models` succeeds for a misspelled model — so peers must not be
+        // woken for an agent whose very first inference fails.
+        let pending_announce = (!is_reconnect).then(|| {
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "model": agent_model,
+            })
+        });
 
         // Queue an onboarding or test-evaluation task for the agent.
         // New agents always get an onboarding prompt so they orient themselves in the
@@ -826,7 +1072,16 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         thinking_level: ThinkingLevel::Off,
                         spawner_agent_id: None,
                         tool_categories: None,
+                        disable_tool_scoping: false,
+                        // Onboarding task fired on agent connect — no parent.
+                        chain_depth: 0,
                     };
+                    if let Some(payload) = pending_announce.clone() {
+                        self.pending_agent_announce
+                            .write()
+                            .await
+                            .insert(onboarding_task_id, payload);
+                    }
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
                 }
@@ -845,6 +1100,39 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             data["onboarding_task_id"] = serde_json::json!(tid.to_string());
         }
         KernelResponse::Success { data: Some(data) }
+    }
+
+    /// Resolve the deferred `AgentAdded` announcement for a new agent's onboarding
+    /// task. `succeeded` is true when the agent's backend answered an inference —
+    /// the only real proof its connection works — and false when the task reached a
+    /// terminal state without ever getting an answer. At most one caller wins the
+    /// payload (`remove` under the write lock), so this cannot emit twice. No-op for
+    /// every other task.
+    pub(crate) async fn announce_agent_added(&self, task_id: &TaskID, succeeded: bool) {
+        // Called on every inference of every task; the map is empty almost always,
+        // so take the cheap read lock before the exclusive one.
+        if self.pending_agent_announce.read().await.is_empty() {
+            return;
+        }
+        let Some(payload) = self.pending_agent_announce.write().await.remove(task_id) else {
+            return;
+        };
+        if !succeeded {
+            tracing::warn!(
+                task_id = %task_id,
+                agent_name = %payload.get("agent_name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                "Onboarding task ended without a single LLM answer — suppressing AgentAdded so peers are not triggered"
+            );
+            return;
+        }
+        self.emit_event(
+            EventType::AgentAdded,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            payload,
+            0,
+        )
+        .await;
     }
 
     pub(crate) async fn cmd_list_agents(&self) -> KernelResponse {
@@ -922,6 +1210,13 @@ Once you have explored, briefly summarise what you found and confirm you are rea
 
         // Evict the LLM adapter so the connection to the provider is released.
         self.active_llms.write().await.remove(&agent_id);
+        // Drop the gateway buffer with it. A stale entry makes the agent look
+        // gateway-backed forever, which silently disables the background review
+        // even after it reconnects on a plain provider.
+        self.claude_gateway_tool_calls
+            .write()
+            .await
+            .remove(&agent_id);
 
         // NOTE: The agent's pubkey is intentionally NOT deregistered from the message bus
         // on disconnect. The agent is marked Offline rather than removed, so its registered
@@ -969,6 +1264,52 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         KernelResponse::Success { data: None }
     }
 
+    /// Seed the role-default event subscriptions an agent is still missing.
+    ///
+    /// Idempotent by `(event_type_filter, priority)` rather than
+    /// wipe-and-reseed. The old reconnect path unsubscribed *everything* the
+    /// agent had before re-seeding, which silently deleted any subscription the
+    /// agent had created for itself via `event-subscribe` — so an agent could
+    /// never hold a durable subscription to anything beyond its role defaults.
+    /// Duplicate accumulation across repeated connects (the reason the wipe
+    /// existed, since `EventBus::subscribe` is pure-append) is handled by the
+    /// existence check below.
+    pub(crate) async fn seed_role_subscriptions(&self, agent_id: AgentID, roles: &[String]) {
+        let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
+        for role in roles {
+            for spec in default_subscriptions_for_role(role) {
+                if !default_specs.contains(&spec) {
+                    default_specs.push(spec);
+                }
+            }
+        }
+        if default_specs.is_empty() {
+            return;
+        }
+
+        let existing = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
+        for (event_type_filter, priority) in default_specs {
+            if existing
+                .iter()
+                .any(|s| s.event_type_filter == event_type_filter && s.priority == priority)
+            {
+                continue;
+            }
+            self.event_bus
+                .subscribe(EventSubscription {
+                    id: SubscriptionID::new(),
+                    agent_id,
+                    event_type_filter,
+                    filter: None,
+                    priority,
+                    throttle: crate::event_bus::default_role_subscription_throttle(),
+                    enabled: true,
+                    created_at: chrono::Utc::now(),
+                })
+                .await;
+        }
+    }
+
     /// Permanently remove an agent from the ecosystem.
     ///
     /// Unlike `cmd_disconnect_agent` which only marks the agent Offline (preserving the
@@ -982,7 +1323,8 @@ Once you have explored, briefly summarise what you found and confirm you are rea
     ///   - checkpoints, schedules created by the agent
     ///
     /// Intentionally preserved:
-    ///   - vault secrets (so API keys keyed by `<name>_<provider>_api_key` survive
+    ///   - vault secrets other than the agent's own `agent_identity:<id>` signing
+    ///     key (so API keys keyed by `<name>_<provider>_api_key` survive
     ///     re-onboarding) — use `secret revoke` to remove these explicitly.
     ///   - audit log (append-only by design).
     pub(crate) async fn cmd_remove_agent(&self, agent_id: AgentID) -> KernelResponse {
@@ -999,12 +1341,26 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
 
         // Evict live runtime state (mirrors disconnect, but applies whether online or offline).
+        self.claude_gateway_tool_calls
+            .write()
+            .await
+            .remove(&agent_id);
         self.active_llms.write().await.remove(&agent_id);
         self.per_agent_rate_limiter.lock().await.remove(&agent_name);
         self.cost_tracker.unregister_agent(&agent_id).await;
         let agent_subs = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
         for sub in &agent_subs {
             self.event_bus.unsubscribe(&sub.id).await;
+        }
+        // The Ed25519 identity lives in the vault as `agent_identity:<id>`;
+        // without this every removed agent leaves an orphan secret behind.
+        // Pairs with revoking live capability tokens, as `identity revoke` does.
+        self.capability_engine.revoke_agent(&agent_id);
+        if let Err(e) = self.identity_manager.revoke_identity(&agent_id).await {
+            // An agent that never signed anything has no identity — not a fault.
+            if !e.to_string().contains("not found") {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: identity revoke failed");
+            }
         }
 
         // Wipe persisted slices. Each call returns a count for the audit summary; failures
@@ -1225,11 +1581,18 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                     .cloned();
                 let sec = if let Some(ref ce) = catalog_entry_opt {
                     if !ce.api_key_env.is_empty() {
-                        match self
+                        // Per-agent key, then the shared `<provider>_api_key`, then env
+                        // — must match `build_single_llm_adapter` or changing an agent's
+                        // base URL would drop a key the connect path accepted.
+                        let key_result = match self
                             .vault
                             .get(&format!("{}_{}_api_key", name, custom_name))
                             .await
                         {
+                            ok @ Ok(_) => ok,
+                            Err(_) => self.vault.get(&format!("{}_api_key", custom_name)).await,
+                        };
+                        match key_result {
                             Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
                             Err(_) => std::env::var(&ce.api_key_env)
                                 .ok()
@@ -1248,16 +1611,23 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         },
                     }
                 };
-                Ok(Arc::new(
-                    CustomCore::new(sec, model.clone(), url.clone())
-                        .with_vision_models(
-                            catalog_entry_opt
-                                .as_ref()
-                                .map(|c| c.vision_models.clone())
-                                .unwrap_or_default(),
-                        )
-                        .with_image_resolver(image_resolver.clone()),
-                ))
+                let core = CustomCore::new(sec, model.clone(), url.clone())
+                    .with_vision_models(
+                        catalog_entry_opt
+                            .as_ref()
+                            .map(|c| c.vision_models.clone())
+                            .unwrap_or_default(),
+                    )
+                    .with_image_resolver(image_resolver.clone());
+                // Without this the rebuilt adapter silently loses every catalog
+                // override the connect path applies (context window, timeouts,
+                // native tool calling, auth header, chat path) — changing an
+                // agent's base URL would quietly downgrade it.
+                let core = match &catalog_entry_opt {
+                    Some(ce) => core.with_catalog_overrides(ce),
+                    None => core,
+                };
+                Ok(Arc::new(core))
             }
         };
 
@@ -1548,6 +1918,21 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 }
             };
 
+            // Rebuild the per-agent Claude MCP tool gateway on restart, exactly
+            // like the interactive connect path. Without this a restarted
+            // claude-code agent gets a gateway-less adapter and silently loses
+            // every AgentOS tool (and, before `--strict-mcp-config`, fell back to
+            // the host operator's personal MCP servers). No-op for other providers.
+            let llm_adapter = self
+                .build_claude_code_adapter(
+                    agent_id,
+                    &agent_model,
+                    &agent.provider,
+                    agent.permissions.clone(),
+                    llm_adapter,
+                )
+                .await;
+
             // Recover missing Ed25519 identity — edge case where key gen failed at first
             // connect. The boot pre-population loop skips agents without a pubkey, so
             // the bus won't have this agent's key unless we generate and register it now.
@@ -1601,7 +1986,29 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             // Persist Online status before inserting the adapter so no window exists
             // where the agent appears Online but has no adapter in `active_llms`.
             // If the agent was removed between snapshot and now, skip all further setup.
-            let reactivated_ok = self.agent_registry.write().await.reactivate(&agent_id);
+            let reactivated_ok = {
+                let mut registry = self.agent_registry.write().await;
+                let ok = registry.reactivate(&agent_id);
+                if ok {
+                    // Same backfill the connect path runs. A persisted agent
+                    // comes back through THIS path on a kernel restart, never
+                    // through `ConnectAgent`, so without it a default added
+                    // after the agent was first registered never reaches it.
+                    // The agent's OWN grants, never the effective set —
+                    // writing back `compute_effective_permissions` would
+                    // flatten every role grant into direct ones.
+                    if let Some(mut perms) =
+                        registry.get_by_id(&agent_id).map(|a| a.permissions.clone())
+                    {
+                        let before = perms.entries().len();
+                        backfill_late_default_grants(&mut perms);
+                        if perms.entries().len() != before {
+                            let _ = registry.update_agent_permissions(&agent_id, perms);
+                        }
+                    }
+                }
+                ok
+            };
             if !reactivated_ok {
                 tracing::warn!(
                     agent_name = %agent_name,
@@ -1622,32 +2029,12 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 );
             }
 
+            let budget = self.resolve_agent_budget(&agent_name).await;
             self.cost_tracker
-                .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+                .register_agent(agent_id, agent_name.clone(), budget)
                 .await;
 
-            let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
-            for role in &agent.roles {
-                for spec in crate::event_bus::default_subscriptions_for_role(role) {
-                    if !default_specs.contains(&spec) {
-                        default_specs.push(spec);
-                    }
-                }
-            }
-            for (event_type_filter, priority) in default_specs {
-                self.event_bus
-                    .subscribe(EventSubscription {
-                        id: SubscriptionID::new(),
-                        agent_id,
-                        event_type_filter,
-                        filter: None,
-                        priority,
-                        throttle: ThrottlePolicy::None,
-                        enabled: true,
-                        created_at: chrono::Utc::now(),
-                    })
-                    .await;
-            }
+            self.seed_role_subscriptions(agent_id, &agent.roles).await;
 
             self.audit_log(agentos_audit::AuditEntry {
                 timestamp: chrono::Utc::now(),
@@ -1685,6 +2072,91 @@ Once you have explored, briefly summarise what you found and confirm you are rea
 
         (reactivated, skipped)
     }
+}
+
+/// Permissions that joined the default set *after* agents were already being
+/// registered, and the tools that need them.
+///
+/// Every one of these backs a tool the system already ships in its own default
+/// inventory (`CHAT_DEFAULT_TOOL_NAMES`), so an agent was being offered the
+/// tool while holding no permission to call it:
+///   `fs.artifacts`     → artifact-write
+///   `schedule.*`       → schedule-once/-recurring/-control, list-my-schedules,
+///                        get-schedule-runs, get-task-logs, list-timers, set-timer
+///
+/// Both stay behind a second gate: every write-side tool they unlock is
+/// `write_scoped`, so `ApprovalHook` still prompts under the default
+/// `ask_edit`.
+///
+/// Deliberately absent — HAL, `proc.*`, `container.*`, `env.*`, `storage.*`,
+/// `channel.send`, `process.exec`, and the host-introspection reads
+/// (`network.sockets`, `system.mounts`, `system.open_files`,
+/// `system.services`, `network.logs`). The introspection tools are
+/// `readonly_scoped`/`readonly_external`, which `ApprovalMode` auto-allows in
+/// every mode including `ask_edit` — the permission grant is their ONLY gate,
+/// and they return host-wide process/socket/mount tables and raw `journalctl`
+/// output. Every agent also holds `network.outbound:x`, so a default grant
+/// would put host recon one hop from exfiltration. Operators grant these per
+/// agent: `agentos perm grant <agent> system.services:r`.
+const LATE_DEFAULT_GRANTS: &[(&str, bool, bool, bool)] = &[
+    // (resource, read, write, execute)
+    ("fs.artifacts", true, true, false),
+    ("schedule.job", true, true, false),
+    ("schedule.timer", true, true, false),
+    ("schedule.self", true, false, false),
+];
+
+/// `CHAT_DEFAULT_TOOL_NAMES` entries that intentionally require an explicit
+/// operator grant, so `default_chat_tools_are_all_visible_by_default` does not
+/// force every shipped tool into [`LATE_DEFAULT_GRANTS`].
+///
+/// Shipping a tool in the default inventory is a discovery decision; granting
+/// its permission is a security one. These are the tools where the answer to
+/// the second differs from the first — see the `LATE_DEFAULT_GRANTS` docs.
+/// Not listed here: `shell-exec`. It declares `process.exec:x` AND
+/// `fs.user_data:rw`, and the any-of visibility rule passes it on the latter,
+/// so it stays visible while `process.exec` is withheld — a manifest cannot
+/// express "needs both". `describe-tool` reports the missing grant, which is
+/// the better outcome for a tool the model must know exists.
+/// (Test-only: consumed by the two guard tests below, which are what give this
+/// list teeth.)
+#[cfg(test)]
+const OPT_IN_CHAT_TOOLS: &[&str] = &[
+    // Host introspection: auto-approves once permitted, returns host-wide
+    // tables and raw service logs.
+    "network-monitor",
+    "network-sockets",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
+];
+
+/// Add any [`LATE_DEFAULT_GRANTS`] entry the agent has never held.
+///
+/// `default_permissions_for_agent` only runs for a NEW agent, so without this
+/// every agent registered before a default was added keeps failing the
+/// permission check for a tool it is still being offered.
+///
+/// An operator's revoke of one of these is durable: `cmd_revoke_permission`
+/// writes a `deny_entries` record when it clears the last bit, which `check()`
+/// honours ahead of every grant and which this skips.
+pub(crate) fn backfill_late_default_grants(perms: &mut PermissionSet) {
+    for (resource, read, write, execute) in LATE_DEFAULT_GRANTS {
+        // Already held, or explicitly denied by an operator who revoked it
+        // (`cmd_revoke_permission` records a deny for exactly these resources,
+        // because `revoke` deletes the entry and would otherwise be
+        // indistinguishable from "never granted").
+        if perms.entries().iter().any(|e| e.resource == *resource) || perms.is_denied(resource) {
+            continue;
+        }
+        perms.grant(resource.to_string(), *read, *write, *execute, None);
+    }
+}
+
+/// Is `resource` one of the [`LATE_DEFAULT_GRANTS`] resources — i.e. one the
+/// backfill would re-add if it were revoked without a deny record?
+pub(crate) fn is_late_default_grant(resource: &str) -> bool {
+    LATE_DEFAULT_GRANTS.iter().any(|(r, ..)| *r == resource)
 }
 
 fn default_permissions_for_agent(name: &str) -> PermissionSet {
@@ -1770,5 +2242,167 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Scratchpad — read+write (scratch-read, scratch-write, scratch-list)
     perms.grant("scratchpad".to_string(), true, true, false, None);
 
+    for (resource, read, write, execute) in LATE_DEFAULT_GRANTS {
+        perms.grant(resource.to_string(), *read, *write, *execute, None);
+    }
+
     perms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        backfill_late_default_grants, default_permissions_for_agent, parse_provider_name,
+        OPT_IN_CHAT_TOOLS,
+    };
+    use agentos_types::{LLMProvider, PermissionOp, PermissionSet, ToolManifest};
+
+    /// Every shipped `tools/core/*.toml`, parsed.
+    fn core_manifests() -> Vec<ToolManifest> {
+        std::fs::read_dir("../../tools/core")
+            .expect("tools/core is readable")
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                (path.extension()?.to_str()? == "toml").then_some(path)
+            })
+            .filter_map(|path| toml::from_str(&std::fs::read_to_string(path).ok()?).ok())
+            .collect()
+    }
+
+    /// Every manifest permission string must parse as `resource:BITS`.
+    ///
+    /// A string that does not parse fails closed in `permission_str_granted`,
+    /// so the tool silently vanishes from every discovery surface while its
+    /// call-time check would have allowed it. This is the invariant, not the
+    /// grant — a tool may legitimately require a permission nobody holds.
+    #[test]
+    fn every_core_manifest_permission_string_parses() {
+        let mut bad: Vec<String> = Vec::new();
+        for m in core_manifests() {
+            for p in &m.capabilities_required.permissions {
+                if agentos_capability::parse_permission_str(p).is_err() {
+                    bad.push(format!("{}: {p:?}", m.manifest.name));
+                }
+            }
+        }
+        bad.sort();
+        assert!(bad.is_empty(), "unparseable manifest permissions: {bad:#?}");
+    }
+
+    /// Every tool the system ships in its own default chat inventory must be
+    /// VISIBLE to a default agent, unless it is a documented opt-in.
+    ///
+    /// Visible, not callable: `any_permission_granted` is the discovery rule,
+    /// and a multi-permission manifest can pass it while still needing a grant
+    /// it lacks for a specific action. The tool list handed to the model is
+    /// filtered by exactly this rule, so a `CHAT_DEFAULT_TOOL_NAMES` entry
+    /// whose manifest declares only permissions nobody grants is not merely
+    /// denied at call time — it is invisible, and the prompt text steering the
+    /// model toward it points at nothing. `artifact-write` shipped that way.
+    ///
+    /// A new entry failing this has two honest fixes: grant its permission in
+    /// `LATE_DEFAULT_GRANTS`, or — if the grant is not one every agent should
+    /// hold — list it in `OPT_IN_CHAT_TOOLS`.
+    #[test]
+    fn default_chat_tools_are_all_visible_by_default() {
+        let perms = default_permissions_for_agent("probe");
+        let mut unusable: Vec<String> = Vec::new();
+        for m in core_manifests() {
+            let name = m.manifest.name.as_str();
+            if !agentos_tools::factory::is_chat_default_tool(name)
+                || OPT_IN_CHAT_TOOLS.contains(&name)
+            {
+                continue;
+            }
+            if !agentos_capability::any_permission_granted(
+                &perms,
+                &m.capabilities_required.permissions,
+            ) {
+                unusable.push(format!(
+                    "{name} needs {:?}",
+                    m.capabilities_required.permissions
+                ));
+            }
+        }
+        unusable.sort();
+        assert!(
+            unusable.is_empty(),
+            "default chat tools with no default permission grant: {unusable:#?}"
+        );
+    }
+
+    /// The opt-in list is a deliberate exemption, not a dumping ground: every
+    /// entry must actually be invisible by default, or it belongs in neither
+    /// list.
+    #[test]
+    fn opt_in_chat_tools_are_genuinely_not_granted_by_default() {
+        let perms = default_permissions_for_agent("probe");
+        for m in core_manifests() {
+            let name = m.manifest.name.as_str();
+            if !OPT_IN_CHAT_TOOLS.contains(&name) {
+                continue;
+            }
+            assert!(
+                !agentos_capability::any_permission_granted(
+                    &perms,
+                    &m.capabilities_required.permissions,
+                ),
+                "{name} is in OPT_IN_CHAT_TOOLS but IS granted by default — drop the exemption"
+            );
+        }
+    }
+
+    /// A revoked default must not come back on the next connect.
+    #[test]
+    fn backfill_skips_a_denied_default() {
+        let mut perms = PermissionSet::new();
+        perms.deny("fs.artifacts".to_string());
+        backfill_late_default_grants(&mut perms);
+        assert!(!perms.check("fs.artifacts", PermissionOp::Write));
+
+        let mut fresh = PermissionSet::new();
+        backfill_late_default_grants(&mut fresh);
+        assert!(fresh.check("fs.artifacts", PermissionOp::Write));
+    }
+
+    /// `artifact-write` requires `fs.artifacts:w`; without it every agent's
+    /// first publish dies on `PermissionDenied` until an operator grants it.
+    #[test]
+    fn default_permissions_include_artifacts_write() {
+        let perms = default_permissions_for_agent("scribe");
+        assert!(perms.check("fs.artifacts", PermissionOp::Write));
+        assert!(perms.check("fs.artifacts", PermissionOp::Read));
+    }
+
+    #[test]
+    fn parse_provider_name_known_variants() {
+        assert_eq!(parse_provider_name("ollama"), LLMProvider::Ollama);
+        assert_eq!(parse_provider_name("OpenAI"), LLMProvider::OpenAI);
+        assert_eq!(parse_provider_name("anthropic"), LLMProvider::Anthropic);
+        assert_eq!(parse_provider_name("gemini"), LLMProvider::Gemini);
+    }
+
+    #[test]
+    fn parse_provider_name_custom_and_catalog() {
+        // Bare catalog name → Custom(name); resolved against the catalog at build.
+        assert_eq!(
+            parse_provider_name("nvidia"),
+            LLMProvider::Custom("nvidia".to_string())
+        );
+        // `custom:<name>` form.
+        assert_eq!(
+            parse_provider_name("custom:groq"),
+            LLMProvider::Custom("groq".to_string())
+        );
+        // Bare `custom`.
+        assert_eq!(
+            parse_provider_name("custom"),
+            LLMProvider::Custom("custom".to_string())
+        );
+        // Empty name after the colon normalizes to "custom" rather than "".
+        assert_eq!(
+            parse_provider_name("custom:"),
+            LLMProvider::Custom("custom".to_string())
+        );
+    }
 }

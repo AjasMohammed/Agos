@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ApiErrorBody {
     pub code: String,
     pub message: String,
@@ -35,6 +35,9 @@ pub enum ApiError {
 
     #[error("Rate limited: {0}")]
     RateLimited(String),
+
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 impl ApiError {
@@ -48,6 +51,7 @@ impl ApiError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -61,6 +65,7 @@ impl ApiError {
             Self::Internal(_) => "INTERNAL_ERROR",
             Self::NotImplemented(_) => "NOT_IMPLEMENTED",
             Self::RateLimited(_) => "RATE_LIMITED",
+            Self::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
         }
     }
 }

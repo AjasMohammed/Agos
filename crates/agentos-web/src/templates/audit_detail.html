@@ -91,7 +91,7 @@
             {% if entry.details == "null" or entry.details == "{}" %}
             <p class="muted" style="font-size: 0.85rem; margin: 0;">No details recorded for this event.</p>
             {% else %}
-            <pre class="audit-detail-json" id="details-{{ loop.index }}">{{ entry.details|pretty_json }}</pre>
+            <div class="audit-detail-json data-panel" id="details-{{ loop.index }}">{{ entry.details|structured_data_html }}</div>
             {% endif %}
         </article>
 

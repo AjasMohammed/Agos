@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "episodic-list"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "List recent episodic memory entries for the current task in chronological order"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["what happened recently", "list past episodes", "recent task history"]
 
 [capabilities_required]
 permissions = []
@@ -17,10 +19,10 @@ outputs = ["content.text"]
 input  = "EpisodicListIntent"
 output = "EpisodicListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 default = 20
 minimum = 1

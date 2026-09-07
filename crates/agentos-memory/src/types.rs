@@ -63,6 +63,43 @@ pub struct EpisodicEntry {
     pub trace_id: TraceID,
 }
 
+/// Lifecycle status of a memory entry. Decay demotes entries through
+/// `Active → Stale → Archived`; transitions are reversible and entries are
+/// never hard-deleted by the lifecycle engine itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryStatus {
+    #[default]
+    Active,
+    Stale,
+    Archived,
+}
+
+impl MemoryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryStatus::Active => "active",
+            MemoryStatus::Stale => "stale",
+            MemoryStatus::Archived => "archived",
+        }
+    }
+
+    /// Unknown strings map to `Active` so a corrupt status can never hide an
+    /// entry from retrieval (fail-open to visible).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "stale" => MemoryStatus::Stale,
+            "archived" => MemoryStatus::Archived,
+            _ => MemoryStatus::Active,
+        }
+    }
+}
+
+/// Default confidence assigned to newly created memories.
+pub fn default_confidence() -> f32 {
+    0.6
+}
+
 /// Represents the top-level parent wrapper for a piece of semantic knowledge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -73,6 +110,18 @@ pub struct MemoryEntry {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub tags: Vec<String>,
+    /// When this entry was last injected into an agent context (None = never).
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// Times this entry was injected into an agent context.
+    #[serde(default)]
+    pub use_count: u32,
+    /// Lifecycle confidence (0..1), reinforced on use and decayed over time.
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+    /// Lifecycle status; non-active entries are excluded from default search.
+    #[serde(default)]
+    pub status: MemoryStatus,
 }
 
 /// For the underlying chunks attached to a `MemoryEntry`.
@@ -147,6 +196,18 @@ pub struct Procedure {
     pub created_at: DateTime<Utc>,
     /// When this procedure was last modified.
     pub updated_at: DateTime<Utc>,
+    /// When this procedure was last injected into an agent context (None = never).
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// Times this procedure was injected into an agent context.
+    #[serde(default)]
+    pub use_count: u32,
+    /// Lifecycle confidence (0..1), reinforced on use and decayed over time.
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+    /// Lifecycle status; non-active entries are excluded from default search.
+    #[serde(default)]
+    pub status: MemoryStatus,
 }
 
 /// Result of a hybrid procedural search with score breakdown.

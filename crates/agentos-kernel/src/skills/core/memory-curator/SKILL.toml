@@ -1,0 +1,26 @@
+[skill]
+name = "memory-curator"
+version = "0.1.0"
+description = "Persists and recalls knowledge across episodic, semantic, and procedural memory tiers plus long-term archival; keeps the agent's memory clean and retrievable"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["task_completed", "memory_write_requested", "recall_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["memory-curator"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["memory-search", "memory-write", "memory-read", "memory-stats"]
+optional = ["archival-insert", "archival-search", "episodic-list", "procedure-search"]
+
+[permissions]
+required = ["memory.semantic:r", "memory.semantic:w", "memory.episodic:r", "memory.episodic:w", "memory.procedural:r"]
+
+[budget]
+max_cost_per_run = 0.15
+max_tokens_per_run = 20000

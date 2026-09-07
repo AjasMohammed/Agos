@@ -1,12 +1,14 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "system-services"
 version     = "1.0.0"
-risk_class  = "readonly_external"
 description = "List and inspect systemd services/units and their logs via D-Bus and journalctl on the host."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
+search_hints = ["is nginx running", "list systemd services", "service status"]
 
 [manifest.usage_hints]
 use_for = ["Checking status of systemd services", "Listing failed units", "Reading service-specific logs"]
@@ -23,33 +25,33 @@ outputs = ["content.structured"]
 input  = "SystemServicesIntent"
 output = "SystemServicesResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["action"]
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "status", "logs"]
 description = "Action to perform"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type = "string"
 description = "Unit name (required for 'status' and 'logs', e.g. 'nginx.service')"
 
-[input_schema.properties.state_filter]
+[payload_schema.properties.state_filter]
 type = "string"
 enum = ["active", "failed", "inactive", "all"]
 default = "all"
 description = "Filter units by active state (for 'list')"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 minimum = 1
 maximum = 500
 default = 100
 description = "Max number of units to return (for 'list')"
 
-[input_schema.properties.log_lines]
+[payload_schema.properties.log_lines]
 type = "integer"
 minimum = 1
 maximum = 500

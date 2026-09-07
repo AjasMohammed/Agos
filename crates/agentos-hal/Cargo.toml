@@ -20,14 +20,8 @@ regex.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 futures.workspace = true
-zbus = { workspace = true, optional = true }
 ipp = { version = "6", optional = true }
 base64.workspace = true
-bluer = { version = "0.17", optional = true, features = ["full"] }
-wayland-client = { version = "0.31", optional = true }
-wayland-protocols-wlr = { version = "0.3", optional = true }
-nusb = { version = "0.2", optional = true, features = ["tokio"] }
-v4l = { version = "0.14", optional = true }
 rumqttc = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 tokio-util = { workspace = true }
@@ -35,16 +29,26 @@ zeroize.workspace = true
 rusqlite.workspace = true
 toml.workspace = true
 
+# Linux-only driver backends: declared in a target section so enabling the
+# peripheral features on other platforms compiles (the driver modules are
+# cfg(target_os = "linux")-gated and simply absent off-Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { workspace = true }
+bluer = { version = "0.17", optional = true, features = ["full"] }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols-wlr = { version = "0.3", optional = true }
+nusb = { version = "0.2", optional = true, features = ["tokio"] }
+v4l = { version = "0.14", optional = true }
 
 [features]
 default = []
+# zbus is unconditional on Linux (services driver), so the zbus-backed
+# features need no dep toggle of their own.
 audio = []
-usb-storage = ["dep:zbus"]
+usb-storage = []
 printer = ["dep:ipp"]
 bluetooth = ["dep:bluer"]
-display = ["dep:zbus", "dep:wayland-client", "dep:wayland-protocols-wlr"]
+display = ["dep:wayland-client", "dep:wayland-protocols-wlr"]
 raw-usb = ["dep:nusb"]
 webcam = ["dep:v4l"]
 mqtt = ["dep:rumqttc"]

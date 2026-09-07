@@ -67,7 +67,7 @@ agentos agent connect --provider <PROVIDER> --model <MODEL> --name <NAME> [--rol
 | `--provider` | `String` | Yes | LLM provider (see table below) |
 | `--model` | `String` | Yes | Model name for the provider |
 | `--name` | `String` | Yes | Unique agent display name |
-| `--base_url` | `String` | No | Base URL for custom providers |
+| `--base-url` | `String` | No | Base URL for custom providers |
 | `--role` | `String` (repeatable) | No | Roles to assign (default: `general`) |
 
 ### Supported Providers
@@ -78,7 +78,7 @@ agentos agent connect --provider <PROVIDER> --model <MODEL> --name <NAME> [--rol
 | OpenAI | `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1` |
 | Gemini | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta` |
-| Custom | `custom:<name>` | — | Must set `--base_url` |
+| Custom | `custom:<name>` | — | Must set `--base-url` |
 
 ### Examples
 
@@ -97,7 +97,7 @@ agentos agent connect --provider gemini --model gemini-pro --name "researcher"
 
 # Connect a custom provider
 agentos agent connect --provider custom:local-llm --model my-model --name "custom-agent" \
-  --base_url "http://localhost:8080/v1"
+  --base-url "http://localhost:8080/v1"
 
 # Connect with multiple roles
 agentos agent connect --provider ollama --model llama3.2 --name "ops" \
@@ -281,7 +281,7 @@ Every agent receives an Ed25519 cryptographic identity on connection. The privat
 ### Viewing an Agent's Identity
 
 ```bash
-agentos identity show --agent <NAME>
+agentos identity show <NAME>
 ```
 
 Displays the agent's identity information:
@@ -296,13 +296,13 @@ Has Signing Key: true
 ### Revoking an Agent's Identity
 
 ```bash
-agentos identity revoke --agent <NAME>
+agentos identity revoke <NAME>
 ```
 
 Removes the agent's signing key from the vault and revokes associated permissions. After revocation, the agent can no longer sign messages.
 
 ```bash
-agentos identity revoke --agent "code-reviewer"
+agentos identity revoke "code-reviewer"
 # Output: Identity and permissions revoked for agent 'code-reviewer'.
 ```
 
@@ -350,7 +350,7 @@ An agent spawns a sub-agent by calling the `spawn-agent` tool with a target agen
 3. Generates a scoped `CapabilityToken` for the child via `scope_for_child()` — the child inherits an intersection of the parent's permissions
 4. Queues the child task for execution
 
-**Depth limit:** The kernel enforces a maximum spawn depth (configurable, default 4). Attempts to spawn beyond this depth are rejected with an error. This prevents unbounded recursive spawning.
+**Depth limit:** The kernel enforces a maximum spawn depth of 5 (the hardcoded `MAX_SPAWN_DEPTH` constant). Attempts to spawn beyond this depth are rejected with an error. This prevents unbounded recursive spawning.
 
 ### Context Handoff
 
@@ -444,10 +444,12 @@ Each member has:
 ### Running a Team
 
 ```bash
-agentos team run <path-to-team.toml>
+agentos team run --config <path-to-team.toml>
 ```
 
 The kernel creates a coordinator task with `is_team_coordinator = true`. The coordinator agent receives the team goal and member descriptions in its prompt, then uses `spawn-agent` and `await-agents` to orchestrate the workers.
+
+To inspect active team runs, use `agentos team list`, which lists coordinator tasks (filtered on the `is_team_coordinator` flag).
 
 ### Task Identification
 
@@ -483,8 +485,8 @@ These files are updated on every agent registration, status change, role assignm
 | View Messages | `agentos agent messages <agent> --last N` | Shows message history with types |
 | Create Group | `agentos agent group create <name> --members "a,b,c"` | Named group for broadcast |
 | Broadcast | `agentos agent broadcast --from ... <group> "..."` | Delivers to all group members except sender |
-| Show Identity | `agentos identity show --agent <name>` | Displays public key and signing status |
-| Revoke Identity | `agentos identity revoke --agent <name>` | Permanently removes signing key |
+| Show Identity | `agentos identity show <name>` | Displays public key and signing status |
+| Revoke Identity | `agentos identity revoke <name>` | Permanently removes signing key |
 | Spawn Sub-Agent | `spawn-agent` tool | Creates child task with context handoff |
 | Await Sub-Agents | `await-agents` tool | Blocks until children complete, injects results |
-| Run Team | `agentos team run <team.toml>` | Coordinator dispatches work to workers |
+| Run Team | `agentos team run --config <team.toml>` | Coordinator dispatches work to workers |

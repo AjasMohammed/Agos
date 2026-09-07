@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "memory-block-read"
@@ -17,11 +18,11 @@ outputs = ["content.text"]
 input  = "MemoryBlockReadIntent"
 output = "MemoryBlockReadResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["label"]
 
-[input_schema.properties.label]
+[payload_schema.properties.label]
 type = "string"
 description = "Memory block label"
 

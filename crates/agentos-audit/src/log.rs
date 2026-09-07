@@ -34,6 +34,16 @@ pub enum AuditEventType {
     TokenIssued,
     TokenExpired,
 
+    // REST API / control-plane auth (React control panel)
+    /// An operator authenticated successfully at `POST /api/v1/auth/login`.
+    ApiLoginSucceeded,
+    /// A login attempt failed (bad credential). Rate-limited; never logs the credential.
+    ApiLoginFailed,
+    /// An API key was minted (via login or `POST /api/v1/keys`). Records the key id, never the secret.
+    ApiKeyIssued,
+    /// An API key was revoked (via `DELETE /api/v1/keys/{id}`).
+    ApiKeyRevoked,
+
     // Tool events
     ToolInstalled,
     ToolRemoved,
@@ -100,6 +110,13 @@ pub enum AuditEventType {
 
     // Risk classification
     RiskEscalation,
+    /// A human-approval escalation was created (ApprovalHook or agent).
+    EscalationCreated,
+    /// A human resolved an escalation (approve/deny), or a sweep auto-resolved it.
+    EscalationResolved,
+    /// A pending escalation expired and its `auto_action` was applied
+    /// (auto-approve or auto-deny) with no human decision.
+    EscalationExpired,
     ActionForbidden,
 
     // Privileged host operations (host-package-install)
@@ -134,6 +151,13 @@ pub enum AuditEventType {
     CheckpointWritten,
     CheckpointRestored,
     CheckpointPruned,
+
+    // Atomic task checkout (single-owner dispatch claim)
+    TaskCheckedOut,
+    TaskCheckoutReclaimed,
+
+    // Periodic agent heartbeat wakeup
+    AgentHeartbeatFired,
 
     // Cost attribution (Spec §4)
     CostAttribution,
@@ -228,11 +252,29 @@ pub enum AuditEventType {
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.
     ContextMemoryUpdated,
 
+    // Memory lifecycle (reinforcement / decay)
+    /// Emitted at task completion when injected procedures receive outcome
+    /// feedback (success/failure counts + confidence recompute).
+    MemoryReinforced,
+    /// Emitted when the post-task background review fork persists learnings
+    /// (a procedure, a context-memory patch, and/or semantic facts).
+    BackgroundReviewApplied,
+
     // MCP (Model Context Protocol)
     /// Emitted when an MCP tool call is executed (client mode).
     McpToolCall,
     /// Emitted when a potential injection attempt is detected in MCP output.
     McpInjectionDetected,
+
+    // Plugin / connector lifecycle (operator-driven)
+    /// Emitted when an operator installs a plugin manifest under `plugins/user`.
+    PluginInstalled,
+    /// Emitted when an operator removes a user-installed plugin.
+    PluginRemoved,
+    /// Emitted when an operator registers a connector manifest.
+    ConnectorRegistered,
+    /// Emitted when an operator removes a connector manifest.
+    ConnectorRemoved,
 
     // OAuth credential lifecycle
     /// Emitted when an OAuth credential is stored or updated in the vault.
@@ -315,6 +357,148 @@ pub enum AuditEventType {
     BuildExecuted,
     /// Emitted when a build command fails.
     BuildFailed,
+
+    // User-preference adaptation proposals
+    /// Emitted when the post-task user-adaptation hook inserts a new
+    /// preference proposal into the review queue.
+    ProposalCreated,
+    /// Emitted when an operator accepts a pending preference proposal
+    /// (followed by `ContextMemoryUpdated` for the actual write).
+    ProposalAccepted,
+    /// Emitted when an operator rejects a pending preference proposal.
+    ProposalRejected,
+    /// Emitted when a pending preference proposal is auto-expired by the
+    /// TimeoutChecker sweep after exceeding the TTL.
+    ProposalExpired,
+
+    // Proactive personalization — structured user profile
+    /// Emitted when an accepted proposal (or explicit edit) inserts a new
+    /// structured profile entry into `user_profile.db`.
+    ProfileEntryAdded,
+    /// Emitted when an existing profile entry is updated (value/confidence/
+    /// category/pin/status) or refreshed via promotion of a re-accepted pref.
+    ProfileEntryUpdated,
+    /// Emitted when a profile entry is forgotten (hard-deleted).
+    ProfileEntryRemoved,
+
+    // User filesystem grants
+    /// Emitted when an operator grants a host directory to one agent or
+    /// globally. Payload: `path`, `agent_id` (or `null` for global), `mode`
+    /// ("rwx" string), `source` ("cli"|"web"|"bus"|"config"), `granted_by`.
+    WorkspaceGranted,
+    /// Emitted when an operator revokes a previously-granted host directory.
+    WorkspaceRevoked,
+
+    // Proactive personalization — feedback loop (Phase 5)
+    /// A personalization signal raised an interest weight, profile pin_rank,
+    /// or restated-preference confidence.
+    PersonalizationReinforced,
+    /// A personalization signal lowered an interest weight (e.g. dismissal),
+    /// or the decay pass reduced a profile pin_rank.
+    PersonalizationDecayed,
+    /// A stale profile entry was archived out of the L0 pinned block.
+    PersonalizationArchived,
+
+    // Proactive personalization — recommendation engine (Phase 4)
+    /// Emitted when a proactive tip is generated and persisted to
+    /// `recommendations.db` before delivery. Payload: id, topics, confidence.
+    RecommendationGenerated,
+    /// Emitted when a generated tip is successfully delivered via the
+    /// notification router. Payload: id, delivery_channel.
+    RecommendationDelivered,
+    /// Emitted when a cycle is skipped before persisting anything (rate-limit,
+    /// dedup, confidence floor, no signal). Payload: reason, dedup_hash (opt).
+    RecommendationSkipped,
+
+    // Proactive personalization — governance (Phase 6)
+    /// Emitted when the operator runs `agentos personalization export`.
+    /// Payload includes counts per store and the export size (bytes).
+    PersonalizationDataExported,
+    /// Emitted when the operator runs `agentos personalization forget`.
+    /// Payload includes per-store cleared counts and a `partial` flag when
+    /// one or more stores could not be fully cleared.
+    PersonalizationDataForgotten,
+}
+
+impl AuditEventType {
+    /// Event classes that must survive count-based rotation.
+    ///
+    /// `prune_old_entries` evicts oldest-first and is otherwise blind to event
+    /// class, so a high-volume neighbour can flush the security trail wholesale.
+    /// The 2026-07 event storm did exactly that: 495,655 lifecycle/notification
+    /// rows displaced a month of history, and only the accident of the storm
+    /// being *older* than the surviving records kept them alive.
+    ///
+    /// Keep this list narrow. Every entry is exempt from rotation, so anything
+    /// listed here is retained until the operator prunes it explicitly. It is
+    /// deliberately not derived from `AuditSeverity::Security`: that column is
+    /// under-applied (denials and injection detections are logged at `Info`),
+    /// and a write-time signal could not protect rows already on disk, whereas
+    /// this predicate is evaluated at rotation time.
+    pub const SECURITY_RELEVANT: &'static [AuditEventType] = &[
+        // Permission and capability enforcement
+        AuditEventType::ActionForbidden,
+        AuditEventType::PermissionDenied,
+        AuditEventType::PermissionGranted,
+        AuditEventType::PermissionRevoked,
+        AuditEventType::CapabilityDenied,
+        AuditEventType::CapabilityGranted,
+        AuditEventType::WorkspaceGranted,
+        AuditEventType::WorkspaceRevoked,
+        // Secret and credential lifecycle
+        AuditEventType::SecretAccessed,
+        AuditEventType::SecretCreated,
+        AuditEventType::SecretRevoked,
+        AuditEventType::SecretRotated,
+        AuditEventType::OAuthCredentialStored,
+        AuditEventType::OAuthCredentialDeleted,
+        // Executable-surface changes made by the operator
+        AuditEventType::PluginInstalled,
+        AuditEventType::PluginRemoved,
+        AuditEventType::ConnectorRegistered,
+        AuditEventType::ConnectorRemoved,
+        // Authentication and key material
+        AuditEventType::ApiKeyIssued,
+        AuditEventType::ApiKeyRevoked,
+        AuditEventType::ApiLoginFailed,
+        AuditEventType::TokenIssued,
+        AuditEventType::ProxyTokensRevoked,
+        AuditEventType::PubkeyRegistered,
+        AuditEventType::PubkeyRegistrationDenied,
+        // Attack detection and tamper evidence
+        AuditEventType::AuditChainTampered,
+        AuditEventType::SafetyRuleViolation,
+        AuditEventType::McpInjectionDetected,
+        AuditEventType::ToolIntentLeakedFromText,
+        AuditEventType::NetworkDestinationBlocked,
+        // Human-in-the-loop risk decisions
+        AuditEventType::RiskEscalation,
+        AuditEventType::EscalationCreated,
+        AuditEventType::EscalationResolved,
+        // Hardware and device access control
+        AuditEventType::DeviceAccessDenied,
+        AuditEventType::DeviceAccessEscalated,
+        AuditEventType::DeviceQuarantined,
+        AuditEventType::HardwareDeviceDenied,
+        AuditEventType::HardwareDeviceRevoked,
+        AuditEventType::HostPackageInstallDenied,
+    ];
+
+    /// True when this event is exempt from count-based rotation.
+    pub fn is_security_relevant(&self) -> bool {
+        Self::SECURITY_RELEVANT.contains(self)
+    }
+
+    /// The on-disk `audit_log.event_type` spelling for this variant.
+    ///
+    /// Mirrors the write path in `log_event`, which stores the serde name with
+    /// its surrounding quotes trimmed.
+    fn storage_name(&self) -> Result<String, AgentOSError> {
+        let s = serde_json::to_string(self).map_err(|e| {
+            AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e))
+        })?;
+        Ok(s.trim_matches('"').to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +531,10 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainVerification {
     pub entries_checked: u64,
+    /// Id discontinuities inside the verified window. Rotation exempts
+    /// security-relevant rows, so gaps are expected on any installation with
+    /// `max_audit_entries` set; each one starts a fresh chain segment.
+    pub gaps: u64,
     pub valid: bool,
     pub first_invalid_seq: Option<i64>,
     pub error: Option<String>,
@@ -377,6 +565,18 @@ impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
         let conn = Connection::open(path)
             .map_err(|e| AgentOSError::VaultError(format!("AuditLog DB open failed: {}", e)))?;
+
+        // W11: the audit log records secret names, agent IDs, capability
+        // actions, and arbitrary `details` payloads. Restrict it to owner
+        // read/write (matching the vault) so it is not world-readable under a
+        // default umask. The hash chain protects integrity, not confidentiality.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| AgentOSError::VaultError(format!("Failed to set audit DB permissions: {}", e)),
+            )?;
+        }
 
         conn.execute_batch(
             "
@@ -638,6 +838,8 @@ impl AuditLog {
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         let mut entries_checked: u64 = 0;
+        let mut gaps: u64 = 0;
+        let mut last_seq: Option<i64> = None;
         let mut expected_prev_hash: Option<String> = None;
 
         // If starting from a non-genesis position, get the nearest preceding entry's hash.
@@ -682,11 +884,23 @@ impl AuditLog {
 
             entries_checked += 1;
 
+            // Rows deleted mid-chain (rotation keeps security-relevant rows,
+            // operator cleanups delete by agent) take their hashes with them,
+            // so linkage across a gap cannot be checked — only counted. A
+            // deletion that lands exactly on a gap is therefore invisible;
+            // detecting it needs rotation to record what it removed.
+            if last_seq.is_some_and(|prev| seq != prev + 1) {
+                gaps += 1;
+                expected_prev_hash = None;
+            }
+            last_seq = Some(seq);
+
             // Check prev_hash linkage
             if let Some(ref expected) = expected_prev_hash {
                 if prev_hash != *expected {
                     return Ok(ChainVerification {
                         entries_checked,
+                        gaps,
                         valid: false,
                         first_invalid_seq: Some(seq),
                         error: Some(format!(
@@ -716,6 +930,7 @@ impl AuditLog {
             if recomputed != stored_hash {
                 return Ok(ChainVerification {
                     entries_checked,
+                    gaps,
                     valid: false,
                     first_invalid_seq: Some(seq),
                     error: Some(format!(
@@ -730,6 +945,7 @@ impl AuditLog {
 
         Ok(ChainVerification {
             entries_checked,
+            gaps,
             valid: true,
             first_invalid_seq: None,
             error: None,
@@ -1007,14 +1223,42 @@ impl AuditLog {
         }
 
         let to_delete = current_count - max_entries;
+
+        // Security-relevant rows are not rotation-eligible: rotation is
+        // oldest-first and otherwise blind to event class, so a high-volume
+        // neighbour would otherwise flush the security trail. Passed as a JSON
+        // array bound parameter rather than interpolated into the statement.
+        let protected = AuditEventType::SECURITY_RELEVANT
+            .iter()
+            .map(|e| e.storage_name())
+            .collect::<Result<Vec<_>, _>>()?;
+        let protected_json = serde_json::to_string(&protected).map_err(|e| {
+            AgentOSError::Serialization(format!("protected event list serialize failed: {}", e))
+        })?;
+
         let deleted = conn
             .execute(
                 "DELETE FROM audit_log WHERE id IN (
-                     SELECT id FROM audit_log ORDER BY id ASC LIMIT ?1
+                     SELECT id FROM audit_log
+                     WHERE event_type NOT IN (SELECT value FROM json_each(?2))
+                     ORDER BY id ASC LIMIT ?1
                  )",
-                rusqlite::params![to_delete],
+                rusqlite::params![to_delete, protected_json],
             )
             .map_err(|e| AgentOSError::VaultError(format!("prune delete failed: {}", e)))?;
+
+        // Exempting rows makes `max_entries` a soft bound. At the observed ratio
+        // (87 of 500,001) that is immaterial, but if protected rows ever come to
+        // dominate, the cap stops holding — say so rather than growing silently.
+        if (deleted as u64) < to_delete {
+            tracing::warn!(
+                requested = to_delete,
+                deleted,
+                current_count,
+                max_entries,
+                "Audit rotation could not reach its target: remaining rows are                  security-relevant and exempt from eviction"
+            );
+        }
 
         Ok(deleted as u64)
     }
@@ -1202,6 +1446,120 @@ mod tests {
         let results = log.query_recent(10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event_type, AuditEventType::TaskCreated);
+    }
+
+    /// Build a minimal entry of the given type/severity for rotation tests.
+    fn entry_of(event_type: AuditEventType, severity: AuditSeverity) -> AuditEntry {
+        AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({}),
+            severity,
+            reversible: false,
+            rollback_ref: None,
+        }
+    }
+
+    #[test]
+    fn rotation_never_evicts_security_events() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+
+        // Security records first, so oldest-first rotation would take them
+        // before anything else — exactly the storm scenario.
+        for _ in 0..5 {
+            log.append(entry_of(
+                AuditEventType::SecretAccessed,
+                AuditSeverity::Security,
+            ))
+            .unwrap();
+        }
+        // A denial logged at Info: severity alone would not protect this, which
+        // is why rotation keys on event class rather than on the severity column.
+        log.append(entry_of(
+            AuditEventType::CapabilityDenied,
+            AuditSeverity::Info,
+        ))
+        .unwrap();
+        for _ in 0..100 {
+            log.append(entry_of(AuditEventType::EventEmitted, AuditSeverity::Info))
+                .unwrap();
+        }
+
+        let pruned = log.prune_old_entries(20).unwrap();
+        assert_eq!(pruned, 86, "should evict only non-security rows");
+
+        let remaining = log.query_recent(1000).unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|e| e.event_type == AuditEventType::SecretAccessed)
+                .count(),
+            5,
+            "every secret-access record must survive rotation"
+        );
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|e| e.event_type == AuditEventType::CapabilityDenied)
+                .count(),
+            1,
+            "an Info-severity denial must still be protected by event class"
+        );
+    }
+
+    #[test]
+    fn rotation_stops_short_when_protected_rows_exceed_cap() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+
+        for _ in 0..10 {
+            log.append(entry_of(
+                AuditEventType::SecretAccessed,
+                AuditSeverity::Security,
+            ))
+            .unwrap();
+        }
+        for _ in 0..5 {
+            log.append(entry_of(AuditEventType::EventEmitted, AuditSeverity::Info))
+                .unwrap();
+        }
+
+        // Cap of 2 wants 13 evicted, but only the 5 noise rows are eligible.
+        // The cap becomes a soft bound rather than deleting the audit trail.
+        let pruned = log.prune_old_entries(2).unwrap();
+        assert_eq!(pruned, 5);
+        assert_eq!(log.query_recent(1000).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn security_classification_matches_storage_spelling() {
+        // storage_name() must mirror the write path, or the rotation predicate
+        // silently matches nothing and every protected row becomes evictable.
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        log.append(entry_of(
+            AuditEventType::ToolIntentLeakedFromText,
+            AuditSeverity::Info,
+        ))
+        .unwrap();
+
+        let stored: String = log
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT event_type FROM audit_log LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            stored,
+            AuditEventType::ToolIntentLeakedFromText
+                .storage_name()
+                .unwrap()
+        );
     }
 
     #[test]

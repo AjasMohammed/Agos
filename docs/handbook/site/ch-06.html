@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task System · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-06.html"><span class="ch-num">06</span> Task System</a><div class="nav-subs"><a class="nav-sub" href="#what-is-a-task" data-target="what-is-a-task">What Is a Task?</a><a class="nav-sub" href="#task-lifecycle" data-target="task-lifecycle">Task Lifecycle</a><a class="nav-sub" href="#creating-tasks" data-target="creating-tasks">Creating Tasks</a><a class="nav-sub" href="#task-routing" data-target="task-routing">Task Routing</a><a class="nav-sub" href="#task-execution-flow" data-target="task-execution-flow">Task Execution Flow</a><a class="nav-sub" href="#tool-call-loop" data-target="tool-call-loop">Tool Call Loop</a><a class="nav-sub" href="#risk-classification" data-target="risk-classification">Risk Classification</a><a class="nav-sub" href="#listing-tasks" data-target="listing-tasks">Listing Tasks</a><a class="nav-sub" href="#task-logs" data-target="task-logs">Task Logs</a><a class="nav-sub" href="#cancelling-tasks" data-target="cancelling-tasks">Cancelling Tasks</a><a class="nav-sub" href="#checkpointing-resume" data-target="checkpointing-resume">Checkpointing &amp; Resume</a><a class="nav-sub" href="#background-tasks" data-target="background-tasks">Background Tasks</a><a class="nav-sub" href="#scheduled-tasks" data-target="scheduled-tasks">Scheduled Tasks</a><a class="nav-sub" href="#autonomous-mode" data-target="autonomous-mode">Autonomous Mode</a><a class="nav-sub" href="#task-timeouts" data-target="task-timeouts">Task Timeouts</a><a class="nav-sub" href="#concurrent-task-limits" data-target="concurrent-task-limits">Concurrent Task Limits</a><a class="nav-sub" href="#task-budgets" data-target="task-budgets">Task Budgets</a><a class="nav-sub" href="#task-dependencies" data-target="task-dependencies">Task Dependencies</a><a class="nav-sub" href="#sub-agent-tasks" data-target="sub-agent-tasks">Sub-Agent Tasks</a><a class="nav-sub" href="#summary" data-target="summary">Summary</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 06 · Task System</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 06</div><h1 class="ch-title">Task System</h1><p class="ch-summary">Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator), checkpointing &amp; resume</p></div>
+    <article class="prose"><h1 id="task-system" class="anchored"><a class="hanchor" href="#task-system" aria-label="link">#</a>Task System</h1>
+<blockquote><p>A task is a prompt sent to an agent for execution. The kernel manages task lifecycle, routing, tool calls, risk classification, escalation, budgets, and scheduling.</p></blockquote>
+<hr>
+<h2 id="what-is-a-task" class="anchored"><a class="hanchor" href="#what-is-a-task" aria-label="link">#</a>What Is a Task?</h2>
+<p>A task represents a unit of work assigned to an agent. Each task has:</p>
+<ul><li><strong>TaskID</strong> — a unique UUID identifier</li><li><strong>Original prompt</strong> — the user's instruction text</li><li><strong>State</strong> — current lifecycle state (see below)</li><li><strong>Agent</strong> — the assigned agent (explicit or auto-routed)</li><li><strong>Capability token</strong> — HMAC-SHA256 signed token authorizing specific permissions</li><li><strong>Priority</strong> — 0–255, higher values are more urgent</li><li><strong>Timeout</strong> — maximum execution duration (default: 1 hour, configurable; 24 hours in autonomous mode)</li><li><strong>Autonomous</strong> — when <code>true</code>, all iteration and timeout limits are replaced by the <code>[kernel.autonomous_mode]</code> ceiling</li><li><strong>History</strong> — accumulated tool calls and results (<code>Vec&lt;IntentMessage&gt;</code>)</li><li><strong>Parent task</strong> — optional link to a parent task for delegation chains</li><li><strong>Parent task ID</strong> — <code>Some(id)</code> when this task was spawned by another task via <code>spawn-agent</code></li><li><strong>Spawn depth</strong> — how many spawn hops from a root task (root = 0, child = 1, grandchild = 2, …)</li><li><strong>Is team coordinator</strong> — <code>true</code> when this task is the coordinator of an agent team (<code>agentos team run</code>)</li></ul>
+<p>Tasks are defined by the <code>AgentTask</code> struct in <code>crates/agentos-types/src/task.rs</code>.</p>
+<hr>
+<h2 id="task-lifecycle" class="anchored"><a class="hanchor" href="#task-lifecycle" aria-label="link">#</a>Task Lifecycle</h2>
+<div class="mermaid-wrap"><pre class="mermaid">stateDiagram-v2
+    [*] --&gt; Queued
+    Queued --&gt; Running : dequeued by executor
+    Queued --&gt; Cancelled : user cancels
+    Running --&gt; Waiting : escalation (high-risk action)
+    Running --&gt; Complete : final answer produced
+    Running --&gt; Failed : error or timeout
+    Running --&gt; Cancelled : user cancels
+    Running --&gt; Suspended : budget exhausted
+    Suspended --&gt; Running : budget restored
+    Suspended --&gt; Cancelled : user cancels
+    Waiting --&gt; Running : escalation approved
+    Waiting --&gt; Failed : escalation denied or expired
+    Waiting --&gt; Cancelled : user cancels
+    Complete --&gt; [*]
+    Failed --&gt; [*]
+    Cancelled --&gt; [*]</pre><details class="mermaid-src"><summary>diagram source</summary><pre><code>stateDiagram-v2
+    [*] --&gt; Queued
+    Queued --&gt; Running : dequeued by executor
+    Queued --&gt; Cancelled : user cancels
+    Running --&gt; Waiting : escalation (high-risk action)
+    Running --&gt; Complete : final answer produced
+    Running --&gt; Failed : error or timeout
+    Running --&gt; Cancelled : user cancels
+    Running --&gt; Suspended : budget exhausted
+    Suspended --&gt; Running : budget restored
+    Suspended --&gt; Cancelled : user cancels
+    Waiting --&gt; Running : escalation approved
+    Waiting --&gt; Failed : escalation denied or expired
+    Waiting --&gt; Cancelled : user cancels
+    Complete --&gt; [*]
+    Failed --&gt; [*]
+    Cancelled --&gt; [*]</code></pre></details></div>
+<div class="table-wrap"><table><thead><tr><th>State</th><th>Description</th></tr></thead><tbody><tr><td><code>Queued</code></td><td>Task is in the priority queue waiting for an available executor slot</td></tr><tr><td><code>Running</code></td><td>Agent is actively executing — LLM inference and tool calls in progress</td></tr><tr><td><code>Waiting</code></td><td>Task paused pending human approval of a high-risk action (escalation)</td></tr><tr><td><code>Complete</code></td><td>Task finished successfully with a final answer</td></tr><tr><td><code>Failed</code></td><td>Task terminated due to error, timeout, or denied escalation</td></tr><tr><td><code>Suspended</code></td><td>Task paused by the kernel due to budget exhaustion; can be resumed when budget is restored</td></tr><tr><td><code>Cancelled</code></td><td>Task cancelled by user before completion</td></tr></tbody></table></div>
+<p>State transitions are enforced by <code>TaskState::can_transition_to()</code> — invalid transitions are rejected.</p>
+<hr>
+<h2 id="creating-tasks" class="anchored"><a class="hanchor" href="#creating-tasks" aria-label="link">#</a>Creating Tasks</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;NAME&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--autonomous<span class="o">]</span><span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>String</code></td><td>No</td><td>Agent name to execute the task. If omitted, the router selects one automatically</td></tr><tr><td><code>--autonomous</code></td><td>flag</td><td>No</td><td>Run without iteration or timeout limits. Use for long-running workflows</td></tr><tr><td><code>--no-checkpoint</code></td><td>flag</td><td>No</td><td>Disable checkpoint writes for this task (ephemeral execution)</td></tr><tr><td>`--thinking &lt;off\</td><td>low\</td><td>medium\</td><td>high\</td><td>max&gt;`</td><td>enum</td><td>No</td><td>Extended-thinking budget (default: <code>off</code>; Anthropic models only)</td></tr><tr><td><code>-i</code>, <code>--interactive</code></td><td>flag</td><td>No</td><td>Prompt inline at the terminal for human approval instead of returning to the shell (requires a TTY)</td></tr><tr><td><code>prompt</code></td><td>positional</td><td>Yes</td><td>The task prompt</td></tr></tbody></table></div>
+<p><strong>Examples:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Route automatically to the best available agent</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="s2">&quot;Summarize the contents of /data/report.csv&quot;</span>
+
+<span class="c1"># Assign to a specific agent</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span><span class="w"> </span><span class="s2">&quot;Review the authentication module for security issues&quot;</span>
+
+<span class="c1"># Run an autonomous long-running task with no iteration/timeout ceiling</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">&quot;Refactor the entire auth module, write tests, and ensure all tests pass&quot;</span>
+</pre></div>
+</div>
+<p>When a task is created:</p>
+<ol><li>The kernel wraps the prompt in an <code>AgentTask</code> with a fresh <code>TaskID</code></li><li>If <code>--agent</code> is specified, the task is assigned directly; otherwise the router selects an agent</li><li>The task enters the <code>Queued</code> state in the scheduler's priority queue</li><li>The task executor loop picks it up when a slot is available</li></ol>
+<hr>
+<h2 id="task-routing" class="anchored"><a class="hanchor" href="#task-routing" aria-label="link">#</a>Task Routing</h2>
+<p>When no <code>--agent</code> is specified, the kernel's <code>TaskRouter</code> selects an agent using the configured strategy. Only agents with <code>Online</code> or <code>Idle</code> status are considered. The strategy is set via the <code>[routing] strategy</code> key in <code>config/default.toml</code> — it is <strong>not</strong> a <code>--strategy</code> CLI flag on <code>task run</code>.</p>
+<h3 id="routing-strategies" class="anchored"><a class="hanchor" href="#routing-strategies" aria-label="link">#</a>Routing Strategies</h3>
+<div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Config value</th><th>Selection Logic</th></tr></thead><tbody><tr><td><strong>Capability-first</strong></td><td><code>capability-first</code></td><td>Pick the most capable model. Priority: Anthropic &gt; OpenAI &gt; Gemini &gt; Custom &gt; Ollama</td></tr><tr><td><strong>Cost-first</strong></td><td><code>cost-first</code></td><td>Pick the cheapest model. Priority: Ollama &gt; Custom &gt; Gemini &gt; OpenAI &gt; Anthropic</td></tr><tr><td><strong>Latency-first</strong></td><td><code>latency-first</code></td><td>Pick the fastest model. Priority: Ollama &gt; Custom &gt; Gemini &gt; OpenAI &gt; Anthropic</td></tr><tr><td><strong>Round-robin</strong></td><td><code>round-robin</code></td><td>Distribute tasks evenly across agents using an atomic counter</td></tr></tbody></table></div>
+<p>The default strategy is <strong>capability-first</strong>.</p>
+<h3 id="routing-rules" class="anchored"><a class="hanchor" href="#routing-rules" aria-label="link">#</a>Routing Rules</h3>
+<p>Routing rules are evaluated before the strategy fallback. Each rule has a regex pattern matched against the task prompt, a preferred agent, and an optional fallback agent.</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Example routing rule configuration</span>
+<span class="k">[[routing.rules]]</span>
+<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;security|audit|vulnerability&quot;</span>
+<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;security-agent&quot;</span>
+<span class="n">fallback_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span>
+
+<span class="k">[[routing.rules]]</span>
+<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;deploy|staging|production&quot;</span>
+<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;ops&quot;</span>
+</pre></div>
+</div>
+<p>Rules are evaluated in order. The first matching rule wins. If the preferred agent is offline, the fallback agent is tried. If no rules match, the strategy is applied.</p>
+<hr>
+<h2 id="task-execution-flow" class="anchored"><a class="hanchor" href="#task-execution-flow" aria-label="link">#</a>Task Execution Flow</h2>
+<p>The task executor loop runs continuously, polling every 100ms for queued tasks. When a slot is available (below <code>max_concurrent_tasks</code>), it dequeues the highest-priority task.</p>
+<h3 id="execution-steps" class="anchored"><a class="hanchor" href="#execution-steps" aria-label="link">#</a>Execution Steps</h3>
+<ol><li><strong>Transition to Running</strong> — set state, record <code>started_at</code> timestamp, emit <code>TaskStarted</code> event</li><li><strong>Context setup</strong> — create context window with system prompt, tool descriptions, agent directory, and adaptive retrieval plan</li><li><strong>Injection scan</strong> — scan the user prompt for injection patterns; high-confidence threats create an escalation</li><li><strong>LLM inference loop</strong> (max iterations set by complexity tier via <code>[kernel.task_limits]</code>, or <code>[kernel.autonomous_mode]</code> when <code>autonomous=true</code>):<ol><li>Compile context window with history, knowledge blocks, and budget state</li><li>Check context utilization (warn at 80%, critical at 95%)</li><li>Pre-inference budget check (skip if hard limit exceeded)</li><li>Call LLM provider (<code>infer()</code>) — get response with token counts</li><li>Record cost attribution audit event</li><li>Post-inference budget enforcement (warnings, pauses, model downgrade)</li><li>Parse tool calls from LLM output</li><li>For each tool call:<ul><li>Validate capability token and JSON schema</li><li>Check permissions (read/write/execute)</li><li>Run coherence checks (intent loops, write-without-read, scope escalation)</li><li>Classify risk level</li><li>If <code>HardApproval</code>: create escalation, transition to <code>Waiting</code></li><li>Execute tool (sandboxed if configured)</li><li>Scan tool output for injection patterns</li><li>Push result back into context</li></ul></li></ol><ol><li>If no tool calls in the iteration → extract final answer</li></ol></li></ol><ol><li><strong>Completion</strong> — record result to episodic memory, emit <code>TaskCompleted</code> event, wake dependency waiters</li></ol>
+<hr>
+<h2 id="tool-call-loop" class="anchored"><a class="hanchor" href="#tool-call-loop" aria-label="link">#</a>Tool Call Loop</h2>
+<p>When the LLM produces a tool call in its output, the kernel processes it through multiple validation layers:</p>
+<h3 id="layer-a-structural-validation" class="anchored"><a class="hanchor" href="#layer-a-structural-validation" aria-label="link">#</a>Layer A — Structural Validation</h3>
+<ol><li><strong>Capability token</strong> — verify the HMAC signature and that the token grants the required permission</li><li><strong>JSON schema</strong> — validate the tool call arguments against the tool's input schema</li><li><strong>Permission check</strong> — confirm the agent has read/write/execute access for the target resource</li></ol>
+<h3 id="layer-b-semantic-coherence" class="anchored"><a class="hanchor" href="#layer-b-semantic-coherence" aria-label="link">#</a>Layer B — Semantic Coherence</h3>
+<ol><li><strong>Intent loop detection</strong> — 3+ consecutive identical tool calls (same tool + same payload) are rejected. 2 consecutive identical calls are flagged as suspicious.</li><li><strong>Write-without-read</strong> — writing to a resource that was never read in the same task is flagged as suspicious (confidence: 0.5)</li><li><strong>Scope escalation</strong> — using an intent type not in the agent's allowed set is flagged as suspicious (confidence: 0.8)</li></ol>
+<p>Suspicious actions are logged as warnings but allowed to proceed. Rejected actions return an error to the LLM.</p>
+<hr>
+<h2 id="risk-classification" class="anchored"><a class="hanchor" href="#risk-classification" aria-label="link">#</a>Risk Classification</h2>
+<p>Every tool call is classified by the <code>RiskClassifier</code> before execution. The classification determines whether the action proceeds automatically or requires human approval.</p>
+<div class="table-wrap"><table><thead><tr><th>Level</th><th>Name</th><th>Behavior</th><th>Examples</th></tr></thead><tbody><tr><td>0</td><td><strong>Autonomous</strong></td><td>Execute immediately</td><td>Read, Query, Observe, Escalate</td></tr><tr><td>1</td><td><strong>Notify</strong></td><td>Log and execute</td><td>Low-risk writes (temp dirs, scratchpad), Message, Broadcast, Subscribe</td></tr><tr><td>2</td><td><strong>SoftApproval</strong></td><td>Log warning, execute</td><td>File writes to <code>/home/</code>, <code>user_data</code>, <code>documents</code>; <code>email.draft</code>, <code>calendar</code>, <code>config</code></td></tr><tr><td>3</td><td><strong>HardApproval</strong></td><td>Create escalation, pause task</td><td>Delegate, <code>email.send</code>, <code>deploy</code>, <code>publish</code>, <code>delete</code>, <code>payment</code>, <code>agent.spawn</code></td></tr><tr><td>4</td><td><strong>Forbidden</strong></td><td>Reject immediately</td><td>Writes to <code>/etc/</code>, <code>/sys/</code>, <code>/proc/</code>; <code>capability.self-escalate</code>, <code>secret.read-raw</code></td></tr></tbody></table></div>
+<h3 id="escalation-triggered-pausing" class="anchored"><a class="hanchor" href="#escalation-triggered-pausing" aria-label="link">#</a>Escalation-Triggered Pausing</h3>
+<p>When a tool call is classified as <code>HardApproval</code> (Level 3):</p>
+<ol><li>The kernel creates a <code>PendingEscalation</code> with details of the action</li><li>The task transitions from <code>Running</code> to <code>Waiting</code></li><li>The escalation has a 5-minute expiration window</li><li>A human operator must resolve via <code>agentos escalation resolve</code></li><li>On approval: task resumes from <code>Waiting</code> to <code>Running</code></li><li>On denial or expiration: task transitions to <code>Failed</code></li></ol>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List pending escalations</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>list
+
+<span class="c1"># Approve an escalation</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Approved&quot;</span>
+
+<span class="c1"># Deny an escalation</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Denied&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="listing-tasks" class="anchored"><a class="hanchor" href="#listing-tasks" aria-label="link">#</a>Listing Tasks</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>list
+</pre></div>
+</div>
+<p>Displays all tasks in a table:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>TASK ID                              STATE       AGENT           PROMPT
+a1b2c3d4-e5f6-7890-abcd-ef1234567890 Running     code-reviewer   Review the authentication module...
+f0e1d2c3-b4a5-6789-0abc-def123456789 Complete    local-dev       Summarize the contents of /data/...
+</pre></div>
+</div>
+<p>The <code>TaskSummary</code> includes: <code>id</code>, <code>state</code>, <code>agent_id</code>, <code>prompt_preview</code> (first 100 characters), <code>created_at</code>, <code>tool_calls</code> count, <code>tokens_used</code>, <code>is_team_coordinator</code>, <code>parent_task_id</code>, and <code>spawn_depth</code>.</p>
+<hr>
+<h2 id="task-logs" class="anchored"><a class="hanchor" href="#task-logs" aria-label="link">#</a>Task Logs</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>logs<span class="w"> </span>&lt;TASK_ID&gt;
+</pre></div>
+</div>
+<p>Shows the execution log for a specific task, including tool calls, LLM responses, and state transitions.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>logs<span class="w"> </span>a1b2c3d4-e5f6-7890-abcd-ef1234567890
+</pre></div>
+</div>
+<hr>
+<h2 id="cancelling-tasks" class="anchored"><a class="hanchor" href="#cancelling-tasks" aria-label="link">#</a>Cancelling Tasks</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>cancel<span class="w"> </span>&lt;TASK_ID&gt;
+</pre></div>
+</div>
+<p>Transitions the task to <code>Cancelled</code> state. Only tasks in <code>Queued</code>, <code>Running</code>, or <code>Waiting</code> states can be cancelled.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>cancel<span class="w"> </span>a1b2c3d4-e5f6-7890-abcd-ef1234567890
+</pre></div>
+</div>
+<hr>
+<h2 id="checkpointing-resume" class="anchored"><a class="hanchor" href="#checkpointing-resume" aria-label="link">#</a>Checkpointing &amp; Resume</h2>
+<p>The kernel writes a durable checkpoint after each tool-call iteration so a task can be recovered if the kernel restarts mid-execution. Checkpoints are deleted on normal completion. Pass <code>--no-checkpoint</code> to <code>task run</code> for ephemeral execution that skips checkpoint writes. You can also inspect the per-iteration tool-call trace of any task for debugging and audit purposes (see <a class="wikilink" href="ch-14.html">Audit Log</a>).</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Resume a checkpointed task from its latest checkpoint</span>
+agentos<span class="w"> </span>task<span class="w"> </span>resume<span class="w"> </span>&lt;id&gt;
+
+<span class="c1"># List all tasks that have a recoverable checkpoint</span>
+agentos<span class="w"> </span>task<span class="w"> </span>checkpoints
+
+<span class="c1"># Show the per-iteration tool-call trace for a task (optionally as JSON or a single iteration)</span>
+agentos<span class="w"> </span>task<span class="w"> </span>trace<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--json<span class="o">]</span><span class="w"> </span><span class="o">[</span>--iter<span class="w"> </span>N<span class="o">]</span>
+
+<span class="c1"># List recent task execution traces</span>
+agentos<span class="w"> </span>task<span class="w"> </span>traces<span class="w"> </span><span class="o">[</span>--limit<span class="w"> </span>N<span class="o">]</span><span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;id&gt;<span class="o">]</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="background-tasks" class="anchored"><a class="hanchor" href="#background-tasks" aria-label="link">#</a>Background Tasks</h2>
+<p>Background tasks run detached from the CLI session. Use the <code>bg</code> command group to manage them.</p>
+<h3 id="running-a-background-task" class="anchored"><a class="hanchor" href="#running-a-background-task" aria-label="link">#</a>Running a Background Task</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span><span class="w"> </span><span class="o">[</span>--detach<span class="o">]</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td>—</td><td>Unique name for the background task</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>—</td><td>Agent to execute the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td>—</td><td>Task prompt</td></tr><tr><td><code>--detach</code></td><td>flag</td><td><code>false</code></td><td>Return immediately without waiting for output</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run a background task and detach</span>
+agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;nightly-audit&quot;</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Run full security audit&quot;</span><span class="w"> </span>--detach
+
+<span class="c1"># Run and stay attached (see output)</span>
+agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;data-export&quot;</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;local-dev&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Export user data to CSV&quot;</span>
+</pre></div>
+</div>
+<h3 id="listing-background-tasks" class="anchored"><a class="hanchor" href="#listing-background-tasks" aria-label="link">#</a>Listing Background Tasks</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>list
+</pre></div>
+</div>
+<p>Shows all background tasks with their name, agent, state, start time, and completion time.</p>
+<h3 id="viewing-background-task-logs" class="anchored"><a class="hanchor" href="#viewing-background-task-logs" aria-label="link">#</a>Viewing Background Task Logs</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span><span class="o">[</span>--follow<span class="o">]</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>positional</td><td>—</td><td>Background task name</td></tr><tr><td><code>--follow</code></td><td>flag</td><td><code>false</code></td><td>Stream logs in real-time (like <code>tail -f</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span><span class="s2">&quot;nightly-audit&quot;</span><span class="w"> </span>--follow
+</pre></div>
+</div>
+<h3 id="killing-a-background-task" class="anchored"><a class="hanchor" href="#killing-a-background-task" aria-label="link">#</a>Killing a Background Task</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span><span class="nb">kill</span><span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Terminates a running background task by name.</p>
+<hr>
+<h2 id="scheduled-tasks" class="anchored"><a class="hanchor" href="#scheduled-tasks" aria-label="link">#</a>Scheduled Tasks</h2>
+<p>Scheduled tasks run on a cron schedule. The kernel evaluates cron expressions and spawns tasks at the specified times.</p>
+<h3 id="creating-a-scheduled-task" class="anchored"><a class="hanchor" href="#creating-a-scheduled-task" aria-label="link">#</a>Creating a Scheduled Task</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;&lt;EXPRESSION&gt;&quot;</span><span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--task<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span><span class="w"> </span>--permissions<span class="w"> </span><span class="s2">&quot;&lt;PERM1,PERM2,...&gt;&quot;</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td>Yes</td><td>Unique schedule name</td></tr><tr><td><code>--cron</code></td><td><code>String</code></td><td>Yes</td><td>Cron expression (5-field standard format)</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Yes</td><td>Agent to execute the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td>Yes</td><td>Task prompt</td></tr><tr><td><code>--permissions</code></td><td><code>String</code></td><td>Yes</td><td>Comma-separated permissions for the task</td></tr></tbody></table></div>
+<h4 id="cron-expression-format" class="anchored"><a class="hanchor" href="#cron-expression-format" aria-label="link">#</a>Cron Expression Format</h4>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, Sunday=0)
+│ │ │ │ │
+* * * * *
+</pre></div>
+</div>
+<p><strong>Examples:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run every day at 2 AM</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;daily-report&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;0 2 * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Generate daily system health report&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read,audit.read&quot;</span>
+
+<span class="c1"># Run every Monday at 9 AM</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;weekly-review&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Review code changes from last week&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read&quot;</span>
+
+<span class="c1"># Run every 15 minutes</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;health-check&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;*/15 * * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Check system health&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read,shell.exec&quot;</span>
+</pre></div>
+</div>
+<h3 id="listing-scheduled-tasks" class="anchored"><a class="hanchor" href="#listing-scheduled-tasks" aria-label="link">#</a>Listing Scheduled Tasks</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>list
+</pre></div>
+</div>
+<p>Shows all schedules with name, cron expression, agent, state, next run time, and run count.</p>
+<h3 id="pausing-a-schedule" class="anchored"><a class="hanchor" href="#pausing-a-schedule" aria-label="link">#</a>Pausing a Schedule</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>pause<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Suspends a scheduled task. It will not run until resumed.</p>
+<h3 id="resuming-a-schedule" class="anchored"><a class="hanchor" href="#resuming-a-schedule" aria-label="link">#</a>Resuming a Schedule</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>resume<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Re-activates a paused schedule.</p>
+<h3 id="deleting-a-schedule" class="anchored"><a class="hanchor" href="#deleting-a-schedule" aria-label="link">#</a>Deleting a Schedule</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>delete<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Permanently removes a scheduled task.</p>
+<hr>
+<h2 id="autonomous-mode" class="anchored"><a class="hanchor" href="#autonomous-mode" aria-label="link">#</a>Autonomous Mode</h2>
+<p>Tasks that must run to natural completion — deep refactors, multi-file analysis, extended research — should use autonomous mode to avoid hitting artificial iteration or time ceilings.</p>
+<h3 id="enabling-autonomous-mode" class="anchored"><a class="hanchor" href="#enabling-autonomous-mode" aria-label="link">#</a>Enabling Autonomous Mode</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span>
+</pre></div>
+</div>
+<p>When <code>autonomous=true</code>, the kernel replaces all complexity-based limits with the <code>[kernel.autonomous_mode]</code> ceiling:</p>
+<div class="table-wrap"><table><thead><tr><th>Limit</th><th>Normal (high complexity)</th><th>Autonomous</th></tr></thead><tbody><tr><td>Max iterations</td><td>1,000</td><td><strong>10,000</strong></td></tr><tr><td>Task timeout</td><td>1 hour</td><td><strong>24 hours</strong></td></tr><tr><td>Per-tool timeout</td><td>5 minutes</td><td><strong>10 minutes</strong></td></tr><tr><td>Max parallel tool calls</td><td>10</td><td><strong>10</strong></td></tr></tbody></table></div>
+<h3 id="child-task-inheritance" class="anchored"><a class="hanchor" href="#child-task-inheritance" aria-label="link">#</a>Child Task Inheritance</h3>
+<p>Child tasks created by delegation from an autonomous parent <strong>automatically inherit <code>autonomous=true</code></strong>. This ensures sub-agents in an orchestrated workflow are not cut short by the default limits.</p>
+<h3 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h3>
+<p>All autonomous mode limits are configurable in <code>config/default.toml</code>:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[kernel.autonomous_mode]</span>
+<span class="n">max_iterations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000</span>
+<span class="n">task_timeout_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">86400</span><span class="w">    </span><span class="c1"># 24 hours</span>
+<span class="n">tool_timeout_seconds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">600</span><span class="w">   </span><span class="c1"># 10 minutes per tool call</span>
+<span class="n">max_parallel_tool_calls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span>
+</pre></div>
+</div>
+<h3 id="when-to-use-autonomous-mode" class="anchored"><a class="hanchor" href="#when-to-use-autonomous-mode" aria-label="link">#</a>When to Use Autonomous Mode</h3>
+<div class="table-wrap"><table><thead><tr><th>Use case</th><th>Autonomous?</th></tr></thead><tbody><tr><td>Simple lookup or single-step query</td><td>No</td></tr><tr><td>Multi-file codebase analysis</td><td>Yes</td></tr><tr><td>Write tests + fix all failures</td><td>Yes</td></tr><tr><td>Extended research with many tool calls</td><td>Yes</td></tr><tr><td>Scheduled nightly maintenance</td><td>Yes</td></tr><tr><td>Quick summarization</td><td>No</td></tr></tbody></table></div>
+<hr>
+<h2 id="task-timeouts" class="anchored"><a class="hanchor" href="#task-timeouts" aria-label="link">#</a>Task Timeouts</h2>
+<p>Tasks have a configurable timeout. If a task exceeds its timeout, it transitions to <code>Failed</code>.</p>
+<div class="table-wrap"><table><thead><tr><th>Config Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>[kernel].default_task_timeout_secs</code></td><td><code>3600</code> (1 hour)</td><td>Default timeout for all tasks (seconds)</td></tr><tr><td><code>[kernel.autonomous_mode].task_timeout_secs</code></td><td><code>86400</code> (24 hours)</td><td>Timeout when <code>autonomous=true</code></td></tr></tbody></table></div>
+<p>The scheduler's <code>check_timeouts()</code> method sweeps for timed-out tasks and marks them <code>Failed</code> with a <code>TimedOutTask</code> record.</p>
+<hr>
+<h2 id="concurrent-task-limits" class="anchored"><a class="hanchor" href="#concurrent-task-limits" aria-label="link">#</a>Concurrent Task Limits</h2>
+<p>The kernel limits the number of simultaneously running tasks.</p>
+<div class="table-wrap"><table><thead><tr><th>Config Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>[kernel].max_concurrent_tasks</code></td><td><code>4</code> (dev) / <code>8</code> (prod)</td><td>Maximum parallel tasks</td></tr></tbody></table></div>
+<p>When the limit is reached, new tasks remain <code>Queued</code> until a running task completes. Tasks are dequeued in priority order (highest priority first; FIFO within the same priority).</p>
+<hr>
+<h2 id="task-budgets" class="anchored"><a class="hanchor" href="#task-budgets" aria-label="link">#</a>Task Budgets</h2>
+<p>Each agent can have resource budgets that limit token usage, cost, and tool calls per day.</p>
+<div class="table-wrap"><table><thead><tr><th>Budget Field</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>max_tokens_per_day</code></td><td><code>5,000,000</code></td><td>Maximum tokens per day (0 = unlimited)</td></tr><tr><td><code>max_cost_usd_per_day</code></td><td><code>$50.00</code></td><td>Maximum cost per day (0 = unlimited)</td></tr><tr><td><code>max_tool_calls_per_day</code></td><td><code>10,000</code></td><td>Maximum tool calls per day (0 = unlimited)</td></tr><tr><td><code>warn_at_pct</code></td><td><code>80%</code></td><td>Emit warning at this utilization</td></tr><tr><td><code>pause_at_pct</code></td><td><code>95%</code></td><td>Pause task at this utilization</td></tr><tr><td><code>on_hard_limit</code></td><td><code>Suspend</code></td><td>Action on 100%: <code>Suspend</code>, <code>NotifyOnly</code>, or <code>Kill</code></td></tr></tbody></table></div>
+<p>When a budget threshold is hit:</p>
+<ul><li><strong>Warning (80%)</strong> — log a warning, continue execution</li><li><strong>Pause (95%)</strong> — attempt model downgrade if configured, otherwise pause</li><li><strong>Hard limit (100%)</strong> — <code>Suspend</code> pauses the task, <code>Kill</code> terminates it, <code>NotifyOnly</code> alerts only</li></ul>
+<hr>
+<h2 id="task-dependencies" class="anchored"><a class="hanchor" href="#task-dependencies" aria-label="link">#</a>Task Dependencies</h2>
+<p>Tasks can form dependency chains through delegation. The kernel maintains a <code>TaskDependencyGraph</code> that:</p>
+<ul><li>Prevents circular dependencies via DFS cycle detection</li><li>Tracks parent-child relationships between delegated tasks</li><li>Automatically requeues waiting parent tasks when child tasks complete</li></ul>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># A parent task might delegate to a child via TaskDelegation message</span>
+<span class="c1"># The kernel tracks: parent task waits on child task</span>
+<span class="c1"># When child completes, parent is requeued to continue</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="sub-agent-tasks" class="anchored"><a class="hanchor" href="#sub-agent-tasks" aria-label="link">#</a>Sub-Agent Tasks</h2>
+<p>Tasks spawned via the <code>spawn-agent</code> coordination tool form a parent-child hierarchy tracked by the kernel. These tasks differ from delegation in that they use the <code>_kernel_action</code> pattern for privileged spawn operations.</p>
+<h3 id="sub-agent-task-fields" class="anchored"><a class="hanchor" href="#sub-agent-task-fields" aria-label="link">#</a>Sub-Agent Task Fields</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>parent_task_id</code></td><td><code>Option&lt;TaskID&gt;</code></td><td>Set when spawned by another task. Links child to parent.</td></tr><tr><td><code>spawn_depth</code></td><td><code>u8</code></td><td>Nesting level: root = 0, child = 1, grandchild = 2, …</td></tr><tr><td><code>is_team_coordinator</code></td><td><code>bool</code></td><td><code>true</code> when this task coordinates an agent team</td></tr></tbody></table></div>
+<h3 id="depth-limit-enforcement" class="anchored"><a class="hanchor" href="#depth-limit-enforcement" aria-label="link">#</a>Depth Limit Enforcement</h3>
+<p>The kernel rejects spawn requests that would exceed the maximum spawn depth of 5 (hardcoded <code>MAX_SPAWN_DEPTH</code>). This prevents:</p>
+<ul><li>Unbounded recursive agent spawning</li><li>Resource exhaustion from deep nesting chains</li><li>Circular spawn patterns</li></ul>
+<h3 id="cascading-cancellation" class="anchored"><a class="hanchor" href="#cascading-cancellation" aria-label="link">#</a>Cascading Cancellation</h3>
+<p>When a parent task is cancelled, the kernel cascades the cancellation to all registered child sub-agents. Children at any depth in the hierarchy are terminated.</p>
+<h3 id="team-coordinator-tasks" class="anchored"><a class="hanchor" href="#team-coordinator-tasks" aria-label="link">#</a>Team Coordinator Tasks</h3>
+<p>Tasks created by <code>agentos team run</code> have <code>is_team_coordinator = true</code>. The coordinator task:</p>
+<ul><li>Receives the team goal and member descriptions in its prompt</li><li>Uses <code>spawn-agent</code> to dispatch subtasks to worker agents</li><li>Uses <code>await-agents</code> to collect results</li><li>Synthesizes a final answer from worker outputs</li></ul>
+<p>Worker tasks spawned by the coordinator have <code>parent_task_id</code> pointing to the coordinator and <code>spawn_depth = 1</code>.</p>
+<p>See <a class="wikilink" href="ch-05.html">Agent Management</a> for the full multi-agent coordination reference.</p>
+<hr>
+<h2 id="summary" class="anchored"><a class="hanchor" href="#summary" aria-label="link">#</a>Summary</h2>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Command</th><th>Key Behavior</th></tr></thead><tbody><tr><td>Run task</td><td><code>agentos task run [--agent name] &quot;prompt&quot;</code></td><td>Auto-routes if no agent specified</td></tr><tr><td>Run autonomous task</td><td><code>agentos task run --autonomous &quot;prompt&quot;</code></td><td>No iteration/timeout limits; child tasks inherit</td></tr><tr><td>List tasks</td><td><code>agentos task list</code></td><td>Shows ID, state, agent, prompt preview</td></tr><tr><td>View logs</td><td><code>agentos task logs &lt;id&gt;</code></td><td>Execution history and tool calls</td></tr><tr><td>Cancel task</td><td><code>agentos task cancel &lt;id&gt;</code></td><td>Transitions to Cancelled state</td></tr><tr><td>Background run</td><td><code>agentos bg run --name ... --agent ... --task ...</code></td><td>Detached execution</td></tr><tr><td>Background list</td><td><code>agentos bg list</code></td><td>Shows all background tasks</td></tr><tr><td>Background logs</td><td><code>agentos bg logs &lt;name&gt; [--follow]</code></td><td>Stream execution output</td></tr><tr><td>Background kill</td><td><code>agentos bg kill &lt;name&gt;</code></td><td>Terminate background task</td></tr><tr><td>Schedule create</td><td><code>agentos schedule create --name ... --cron ... --agent ... --task ...</code></td><td>Cron-based scheduling</td></tr><tr><td>Schedule list</td><td><code>agentos schedule list</code></td><td>Shows schedules with next run time</td></tr><tr><td>Schedule pause</td><td><code>agentos schedule pause &lt;name&gt;</code></td><td>Suspend schedule</td></tr><tr><td>Schedule resume</td><td><code>agentos schedule resume &lt;name&gt;</code></td><td>Re-activate schedule</td></tr><tr><td>Schedule delete</td><td><code>agentos schedule delete &lt;name&gt;</code></td><td>Remove schedule</td></tr></tbody></table></div></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-05.html"><span class="pn-dir">← Previous</span><span class="pn-title">Agent Management</span></a><a class="pn pn-next" href="ch-07.html"><span class="pn-dir">Next →</span><span class="pn-title">Tool System</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#what-is-a-task" data-target="what-is-a-task">What Is a Task?</a></li><li class="toc-h2"><a href="#task-lifecycle" data-target="task-lifecycle">Task Lifecycle</a></li><li class="toc-h2"><a href="#creating-tasks" data-target="creating-tasks">Creating Tasks</a></li><li class="toc-h2"><a href="#task-routing" data-target="task-routing">Task Routing</a></li><li class="toc-h3"><a href="#routing-strategies" data-target="routing-strategies">Routing Strategies</a></li><li class="toc-h3"><a href="#routing-rules" data-target="routing-rules">Routing Rules</a></li><li class="toc-h2"><a href="#task-execution-flow" data-target="task-execution-flow">Task Execution Flow</a></li><li class="toc-h3"><a href="#execution-steps" data-target="execution-steps">Execution Steps</a></li><li class="toc-h2"><a href="#tool-call-loop" data-target="tool-call-loop">Tool Call Loop</a></li><li class="toc-h3"><a href="#layer-a-structural-validation" data-target="layer-a-structural-validation">Layer A — Structural Validation</a></li><li class="toc-h3"><a href="#layer-b-semantic-coherence" data-target="layer-b-semantic-coherence">Layer B — Semantic Coherence</a></li><li class="toc-h2"><a href="#risk-classification" data-target="risk-classification">Risk Classification</a></li><li class="toc-h3"><a href="#escalation-triggered-pausing" data-target="escalation-triggered-pausing">Escalation-Triggered Pausing</a></li><li class="toc-h2"><a href="#listing-tasks" data-target="listing-tasks">Listing Tasks</a></li><li class="toc-h2"><a href="#task-logs" data-target="task-logs">Task Logs</a></li><li class="toc-h2"><a href="#cancelling-tasks" data-target="cancelling-tasks">Cancelling Tasks</a></li><li class="toc-h2"><a href="#checkpointing-resume" data-target="checkpointing-resume">Checkpointing &amp; Resume</a></li><li class="toc-h2"><a href="#background-tasks" data-target="background-tasks">Background Tasks</a></li><li class="toc-h3"><a href="#running-a-background-task" data-target="running-a-background-task">Running a Background Task</a></li><li class="toc-h3"><a href="#listing-background-tasks" data-target="listing-background-tasks">Listing Background Tasks</a></li><li class="toc-h3"><a href="#viewing-background-task-logs" data-target="viewing-background-task-logs">Viewing Background Task Logs</a></li><li class="toc-h3"><a href="#killing-a-background-task" data-target="killing-a-background-task">Killing a Background Task</a></li><li class="toc-h2"><a href="#scheduled-tasks" data-target="scheduled-tasks">Scheduled Tasks</a></li><li class="toc-h3"><a href="#creating-a-scheduled-task" data-target="creating-a-scheduled-task">Creating a Scheduled Task</a></li><li class="toc-h3"><a href="#listing-scheduled-tasks" data-target="listing-scheduled-tasks">Listing Scheduled Tasks</a></li><li class="toc-h3"><a href="#pausing-a-schedule" data-target="pausing-a-schedule">Pausing a Schedule</a></li><li class="toc-h3"><a href="#resuming-a-schedule" data-target="resuming-a-schedule">Resuming a Schedule</a></li><li class="toc-h3"><a href="#deleting-a-schedule" data-target="deleting-a-schedule">Deleting a Schedule</a></li><li class="toc-h2"><a href="#autonomous-mode" data-target="autonomous-mode">Autonomous Mode</a></li><li class="toc-h3"><a href="#enabling-autonomous-mode" data-target="enabling-autonomous-mode">Enabling Autonomous Mode</a></li><li class="toc-h3"><a href="#child-task-inheritance" data-target="child-task-inheritance">Child Task Inheritance</a></li><li class="toc-h3"><a href="#configuration" data-target="configuration">Configuration</a></li><li class="toc-h3"><a href="#when-to-use-autonomous-mode" data-target="when-to-use-autonomous-mode">When to Use Autonomous Mode</a></li><li class="toc-h2"><a href="#task-timeouts" data-target="task-timeouts">Task Timeouts</a></li><li class="toc-h2"><a href="#concurrent-task-limits" data-target="concurrent-task-limits">Concurrent Task Limits</a></li><li class="toc-h2"><a href="#task-budgets" data-target="task-budgets">Task Budgets</a></li><li class="toc-h2"><a href="#task-dependencies" data-target="task-dependencies">Task Dependencies</a></li><li class="toc-h2"><a href="#sub-agent-tasks" data-target="sub-agent-tasks">Sub-Agent Tasks</a></li><li class="toc-h3"><a href="#sub-agent-task-fields" data-target="sub-agent-task-fields">Sub-Agent Task Fields</a></li><li class="toc-h3"><a href="#depth-limit-enforcement" data-target="depth-limit-enforcement">Depth Limit Enforcement</a></li><li class="toc-h3"><a href="#cascading-cancellation" data-target="cascading-cancellation">Cascading Cancellation</a></li><li class="toc-h3"><a href="#team-coordinator-tasks" data-target="team-coordinator-tasks">Team Coordinator Tasks</a></li><li class="toc-h2"><a href="#summary" data-target="summary">Summary</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

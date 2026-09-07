@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "poll-agent"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Non-blocking check on spawned sub-agent status. Returns current state, iteration count, last tool call, and progress summary without blocking the parent task. Use this to monitor long-running children progressively."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
 capability_tags = ["multi-agent", "monitoring", "coordination", "streaming", "sub-task"]
 
 [capabilities_required]
@@ -18,16 +20,16 @@ outputs = ["agent_status"]
 input  = "PollAgentIntent"
 output = "PollAgentResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_ids"]
 
-[input_schema.properties.task_ids]
+[payload_schema.properties.task_ids]
 type = "array"
 items = { type = "string" }
 description = "Task IDs of spawned sub-agents to check."
 
-[input_schema.properties.include_progress]
+[payload_schema.properties.include_progress]
 type = "boolean"
 default = true
 description = "Whether to include progress event history. Default: true."

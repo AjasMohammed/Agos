@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "cancel-timer"
@@ -7,7 +8,6 @@ description = "Cancel a pending one-shot timer by name before it fires"
 author      = "agentos-core"
 trust_tier  = "core"
 group       = "events"
-risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["schedule.timer:w"]
@@ -19,11 +19,11 @@ outputs = ["status"]
 input  = "CancelTimerIntent"
 output = "CancelTimerResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Name of the timer to cancel"
 

@@ -94,13 +94,16 @@ impl HomeAssistantDriver {
 
 /// Validate a Home Assistant entity_id (format: `domain.object_id`).
 fn validate_entity_id(entity_id: &str) -> Result<(), AgentOSError> {
+    // ASCII-only: the value is interpolated into the REST path
+    // (`/api/states/{entity_id}`); Unicode alphanumerics would produce
+    // unencoded request URLs.
     if entity_id.is_empty()
         || !entity_id
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
     {
         return Err(AgentOSError::HalError(
-            "Invalid entity_id: must be alphanumeric with dots and underscores (e.g., light.kitchen)"
+            "Invalid entity_id: must be ASCII alphanumeric with dots and underscores (e.g., light.kitchen)"
                 .into(),
         ));
     }
@@ -114,9 +117,9 @@ fn validate_entity_id(entity_id: &str) -> Result<(), AgentOSError> {
 
 /// Validate a HA service domain or service name (alphanumeric + underscore, non-empty).
 fn validate_identifier(value: &str, label: &str) -> Result<(), AgentOSError> {
-    if value.is_empty() || !value.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(AgentOSError::HalError(format!(
-            "Invalid {label}: must be non-empty alphanumeric with underscores"
+            "Invalid {label}: must be non-empty ASCII alphanumeric with underscores"
         )));
     }
     Ok(())
@@ -243,6 +246,16 @@ mod tests {
     #[test]
     fn test_validate_entity_id_rejects_empty() {
         assert!(validate_entity_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_entity_id_rejects_unicode() {
+        // Unicode alphanumerics are valid per char::is_alphanumeric but must
+        // be rejected: the value lands unencoded in the REST path.
+        assert!(validate_entity_id("light.küche").is_err());
+        assert!(validate_entity_id("光.kitchen").is_err());
+        assert!(validate_identifier("türn_on", "service").is_err());
+        assert!(validate_entity_id("light.kitchen").is_ok());
     }
 
     #[test]

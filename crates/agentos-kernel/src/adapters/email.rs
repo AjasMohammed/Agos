@@ -1,5 +1,5 @@
 use crate::notification_router::{DeliveryAdapter, DeliveryError, InboundMessage};
-use agentos_types::{DeliveryChannel, UserMessage};
+use agentos_types::{ChannelInstanceID, DeliveryChannel, UserMessage};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -12,7 +12,24 @@ use tokio::sync::mpsc;
 ///
 /// A future PR will add the SMTP `deliver()` implementation and IMAP IDLE
 /// `start_listening()` for reply detection.
-pub struct EmailDeliveryAdapter;
+pub struct EmailDeliveryAdapter {
+    /// `build_channel_adapter` classifies `ChannelKind::Email` as a
+    /// delivery-stack kind and registers this adapter on the
+    /// `NotificationRouter`, so it must claim its instance id like the
+    /// Telegram and Ntfy adapters do. Without it `adapter_for` found nothing,
+    /// `send_to_channel` fell through to the `ChannelManager` — which has no
+    /// such instance — and the caller got "channel <uuid> not found", naming
+    /// the wrong subsystem.
+    channel_instance_id: ChannelInstanceID,
+}
+
+impl EmailDeliveryAdapter {
+    pub fn new(channel_instance_id: ChannelInstanceID) -> Self {
+        Self {
+            channel_instance_id,
+        }
+    }
+}
 
 #[async_trait]
 impl DeliveryAdapter for EmailDeliveryAdapter {
@@ -28,8 +45,17 @@ impl DeliveryAdapter for EmailDeliveryAdapter {
         ))
     }
 
+    /// Always `false` — and that is now load-bearing: `deliver_via` turns an
+    /// unavailable adapter into an error, so `channel-send` reports the failure
+    /// instead of answering "delivered" and writing a `ChannelMessageSent`
+    /// audit row. `deliver()` above is consequently unreachable through the
+    /// router; it stays as the fallback for any direct caller.
     async fn is_available(&self) -> bool {
         false
+    }
+
+    fn adapter_instance_id(&self) -> Option<String> {
+        Some(self.channel_instance_id.to_string())
     }
 
     fn supports_inbound(&self) -> bool {

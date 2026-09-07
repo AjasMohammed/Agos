@@ -6,9 +6,80 @@ use chrono::Utc;
 use std::time::Duration;
 
 /// Maximum sub-agent spawn depth. Tasks at this depth may not spawn children.
-const MAX_SPAWN_DEPTH: u8 = 5;
+/// Shared by every delegation path (`spawn-agent`, `task-delegate`,
+/// `agent-call`, `spawn-async`) so the fork-bomb bound cannot be bypassed by
+/// picking a different tool.
+pub(crate) const MAX_SPAWN_DEPTH: u8 = 5;
+
+/// Maximum number of simultaneously-live (non-terminal) children a single
+/// parent task may have. Bounds concurrent fan-out — sequential delegation is
+/// unaffected because the count drops as children finish. Combined with
+/// [`MAX_SPAWN_DEPTH`] this caps total live tree size and prevents a parent
+/// from enqueuing an unbounded number of children (queue-exhaustion bomb).
+pub(crate) const MAX_CONCURRENT_CHILDREN: usize = 32;
 
 impl Kernel {
+    /// Reject a spawn if the parent already has [`MAX_CONCURRENT_CHILDREN`]
+    /// live children. Shared by every delegation path.
+    pub(crate) async fn check_child_fanout(
+        &self,
+        parent_task_id: TaskID,
+    ) -> Result<(), AgentOSError> {
+        let live = self.scheduler.count_active_children(&parent_task_id).await;
+        if live >= MAX_CONCURRENT_CHILDREN {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "agent.spawn".to_string(),
+                operation: format!(
+                    "concurrent child limit ({MAX_CONCURRENT_CHILDREN}) reached \
+                     for parent task '{parent_task_id}' — wait for children to finish"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Security-hardened child-task scoping shared by the delegation paths that
+    /// do NOT build the child token themselves (`task-delegate`, `agent-call`).
+    ///
+    /// Enforces the invariants that MUST hold for any child task regardless of
+    /// which tool the LLM invoked:
+    ///  - depth cap (fork-bomb bound),
+    ///  - child capability ⊆ parent — pure intersection via `scope_for_child`,
+    ///    which also re-verifies the parent token's HMAC signature and expiry,
+    ///  - NO permission widening (no `process.exec` re-grant),
+    ///  - a fresh child TaskID (no scheduler-entry collision).
+    ///
+    /// Returns the scoped child token and the child's incremented spawn depth.
+    pub(crate) async fn scope_child_task(
+        &self,
+        parent_task: &AgentTask,
+        target_id: AgentID,
+        target_permissions: &PermissionSet,
+        timeout: Duration,
+    ) -> Result<(CapabilityToken, u8), AgentOSError> {
+        if parent_task.spawn_depth >= MAX_SPAWN_DEPTH {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "agent.spawn".to_string(),
+                operation: format!(
+                    "spawn depth limit ({MAX_SPAWN_DEPTH}) exceeded (current depth: {})",
+                    parent_task.spawn_depth
+                ),
+            });
+        }
+        self.check_child_fanout(parent_task.id).await?;
+        // scope_for_child = parent ∩ target, plus parent-token signature/expiry
+        // verification. This replaces the old `issue_token` paths that skipped
+        // both checks and then re-granted process.exec (a privilege widening).
+        let child_token = self.capability_engine.scope_for_child(
+            &parent_task.capability_token,
+            TaskID::new(),
+            target_id,
+            target_permissions,
+            timeout,
+        )?;
+        Ok((child_token, parent_task.spawn_depth + 1))
+    }
+
     /// Spawn a child task scoped to the parent's capabilities.
     ///
     /// Spawn a child task scoped to a subset of the parent's capabilities.
@@ -69,6 +140,15 @@ impl Kernel {
             };
         }
 
+        // 2b. Enforce the concurrent fan-out cap — a parent may not have more
+        //     than MAX_CONCURRENT_CHILDREN live children at once.
+        if let Err(e) = self.check_child_fanout(parent_task_id).await {
+            tracing::warn!(parent_task_id = %parent_task_id, error = %e, "SpawnSubAgent: fan-out limit");
+            return KernelResponse::Error {
+                message: e.to_string(),
+            };
+        }
+
         // 3. Resolve the target agent by name.
         let agent = {
             let registry = self.agent_registry.read().await;
@@ -104,6 +184,43 @@ impl Kernel {
                 ps.grant(resource.clone(), true, true, true, None);
             }
             ps
+        };
+
+        // 4b. Org-chart clamp: if the target agent occupies org node(s), its
+        //     effective scope can never exceed the configured node ceiling(s),
+        //     no matter how broadly the parent delegates. Fail-closed — clamp to
+        //     the intersection of every node the agent belongs to. This is the
+        //     runtime half of the downward-only invariant the OrgStore enforces
+        //     at write time (see org_store.rs).
+        let requested = if let Some(org_store) = &self.org_store {
+            match org_store.scopes_for_agent(agent_name).await {
+                Ok(scopes) if !scopes.is_empty() => {
+                    let node_count = scopes.len();
+                    let clamped = scopes
+                        .iter()
+                        .fold(requested, |acc, ceiling| acc.intersect_with(ceiling));
+                    tracing::debug!(
+                        agent_name = %agent_name,
+                        node_count,
+                        "SpawnSubAgent: clamped child scope to org node ceiling"
+                    );
+                    clamped
+                }
+                Ok(_) => requested, // agent not in any org — no clamp
+                Err(e) => {
+                    // Lookup failure must not silently widen scope. The downstream
+                    // scope_for_child still intersects with the parent token, so
+                    // we degrade to that bound and log loudly.
+                    tracing::warn!(
+                        agent_name = %agent_name,
+                        error = %e,
+                        "SpawnSubAgent: org scope lookup failed — proceeding with parent-token bound only"
+                    );
+                    requested
+                }
+            }
+        } else {
+            requested
         };
 
         // Resolve effective tool_categories allowlist for the child.
@@ -192,6 +309,10 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: effective_tool_categories,
+            disable_tool_scoping: false,
+            // Inherit the parent's causal depth so a spawned sub-agent cannot
+            // restart the event-trigger chain counter at 0.
+            chain_depth: parent_task.event_chain_depth(),
         };
 
         self.scheduler.enqueue(child_task).await;
@@ -389,6 +510,8 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
+            chain_depth: 0,
         }
     }
 

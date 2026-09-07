@@ -51,13 +51,38 @@ impl ChannelAdapter for TeamsAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
-
-        let body = json!({
-            "@type": "MessageCard",
-            "@context": "https://schema.org/extensions",
-            "text": text
-        });
+        // MessageCard renders images inline via a section `images` array (URLs).
+        // Use that when the content has images; otherwise plain text (which
+        // still carries any file URL via render_for_delivery).
+        let images = msg.content.image_urls();
+        let body = if images.is_empty() {
+            json!({
+                "@type": "MessageCard",
+                "@context": "https://schema.org/extensions",
+                "text": msg.content.render_for_delivery()
+            })
+        } else {
+            let imgs: Vec<serde_json::Value> = images
+                .iter()
+                .take(10)
+                .map(|u| json!({ "image": u }))
+                .collect();
+            // Legacy MessageCard rejects a card with empty `text` and no
+            // `summary`/`title`, so supply a fallback for image-only sends.
+            let caption = msg.content.text_caption();
+            let card_text = if caption.trim().is_empty() {
+                "Image".to_string()
+            } else {
+                caption
+            };
+            json!({
+                "@type": "MessageCard",
+                "@context": "https://schema.org/extensions",
+                "summary": "Image",
+                "text": card_text,
+                "sections": [ { "images": imgs } ]
+            })
+        };
 
         let response = self
             .client

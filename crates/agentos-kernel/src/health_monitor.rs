@@ -3,21 +3,33 @@ use crate::kernel::Kernel;
 use agentos_audit::AuditLog;
 use agentos_types::{EventSeverity, EventSource, EventType, PermissionEntry, PermissionSet};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Minimum interval between emissions of the same event key (debounce).
-const DEBOUNCE_INTERVAL_SECS: i64 = 600; // 10 minutes
+/// Minimum interval before a *still-active* condition re-announces itself.
+///
+/// Every health event in this file is a level condition ("disk is above 85%"),
+/// not a discrete occurrence, so it is edge-triggered: it fires when the
+/// condition becomes true and stays silent while it holds. This interval is the
+/// safety valve so a condition that never recovers is not forgotten forever —
+/// it re-alerts at most once every 6 hours. Before edge-triggering, a 10-minute
+/// debounce meant a full disk re-fired 144 times a day, and each re-fire spawned
+/// an agent task downstream.
+const REALERT_INTERVAL_SECS: i64 = 21_600; // 6 hours
 
 /// Run a periodic health monitoring loop that emits system health events.
 ///
 /// Reads CPU, memory, disk, and GPU metrics from the HAL and emits typed
-/// events when thresholds are exceeded. Debounces emissions so each event
-/// type fires at most once per 10 minutes, even if the threshold stays exceeded.
-/// Debounce state is persisted to the audit SQLite database so the window
-/// survives kernel restarts.
+/// events when thresholds are exceeded. Emissions are edge-triggered: an event
+/// fires when its condition first becomes true, stays silent while the
+/// condition holds (re-alerting at most once per [`REALERT_INTERVAL_SECS`]),
+/// and re-arms silently when the condition clears.
+/// Emission timestamps are persisted to the audit SQLite database and the
+/// latch set is re-seeded from them at boot (see
+/// [`seed_active_from_persisted`]), so a restart does not re-announce a
+/// condition that was already latched.
 pub async fn run_health_monitor(kernel: Arc<Kernel>, cancellation: CancellationToken) {
     let config = kernel.config.health_monitor.clone();
     if !config.enabled {
@@ -44,7 +56,7 @@ pub async fn run_health_monitor(kernel: Arc<Kernel>, cancellation: CancellationT
     let permissions = hal_read_permissions();
     // Clone the audit Arc so check_system_health can borrow kernel and audit independently.
     let audit = Arc::clone(&kernel.audit);
-    // Load persisted debounce state so the 10-minute window survives restarts.
+    // Load persisted emission timestamps so the re-alert window survives restarts.
     let mut last_emitted: HashMap<String, DateTime<Utc>> = match audit.load_health_debounce() {
         Ok((map, skipped)) => {
             for key in &skipped {
@@ -65,11 +77,27 @@ pub async fn run_health_monitor(kernel: Arc<Kernel>, cancellation: CancellationT
         }
     };
 
+    // Conditions currently latched as true, re-seeded from the persisted
+    // emission timestamps so a restart does not re-announce a held condition.
+    let mut active: HashSet<String> = seed_active_from_persisted(&last_emitted, Utc::now());
+    // GPUs already announced this boot. "A GPU exists" is a static fact, not a
+    // condition — announce once, never re-alert, never persist.
+    let mut announced_gpus: HashSet<String> = HashSet::new();
+
     loop {
         tokio::select! {
             _ = cancellation.cancelled() => break,
             _ = tokio::time::sleep(interval) => {
-                check_system_health(&kernel, &thresholds, &permissions, &mut last_emitted, &audit).await;
+                check_system_health(
+                    &kernel,
+                    &thresholds,
+                    &permissions,
+                    &mut active,
+                    &mut announced_gpus,
+                    &mut last_emitted,
+                    &audit,
+                )
+                .await;
                 // Ping the systemd watchdog after each successful cycle so systemd
                 // can distinguish hangs from crashes.  No-op outside systemd.
                 crate::sd_notify::notify_watchdog();
@@ -101,38 +129,83 @@ fn hal_read_permissions() -> PermissionSet {
     ps
 }
 
-/// Check whether enough time has elapsed since the last emission of the given key.
-/// If so, update the in-memory timestamp, persist it to the audit DB, and return true;
-/// otherwise return false.
-/// For single-instance events, pass the event type name (e.g., "CPUSpikeDetected").
-/// For per-device events, pass a compound key (e.g., "GPUMemoryPressure:rtx4090").
-fn should_emit(
-    last_emitted: &mut HashMap<String, DateTime<Utc>>,
-    key: &str,
-    audit: &AuditLog,
-) -> bool {
-    let now = Utc::now();
-    let debounce = chrono::Duration::seconds(DEBOUNCE_INTERVAL_SECS);
-    match last_emitted.get(key) {
-        Some(last) if now - *last < debounce => false,
-        _ => {
-            last_emitted.insert(key.to_string(), now);
-            if let Err(e) = audit.save_health_debounce(key, now) {
-                tracing::warn!(
-                    error = %e,
-                    key = %key,
-                    "Failed to persist health debounce state"
-                );
-            }
-            true
-        }
-    }
+/// Re-latch, at boot, every condition whose last emission is still inside the
+/// re-alert window.
+///
+/// The latch set is in-memory, so without this the first tick after a restart
+/// takes the *unlatched* branch and emits regardless of the persisted
+/// timestamp: under systemd `Restart=always` a full disk yields one
+/// `DiskSpaceLow` — and one downstream agent task — per boot. An emission older
+/// than the window would have re-alerted anyway, so it is left unlatched.
+/// Anything that recovered while the kernel was down is cleared by the first
+/// tick's `false` branch.
+fn seed_active_from_persisted(
+    last_emitted: &HashMap<String, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> HashSet<String> {
+    let realert = chrono::Duration::seconds(REALERT_INTERVAL_SECS);
+    last_emitted
+        .iter()
+        .filter(|(_, emitted_at)| now - **emitted_at < realert)
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
+/// Edge-trigger a level condition. Returns true only when the event should be emitted.
+///
+/// * condition true, not latched → latch it and emit.
+/// * condition true, already latched → emit only if [`REALERT_INTERVAL_SECS`] elapsed.
+/// * condition false → clear the latch (silently — there is no recovery event) so
+///   the next transition to true emits again.
+///
+/// MUST be called on every tick for every known key, with the *current* value of
+/// the condition, or a recovery is never observed and the latch sticks forever.
+///
+/// For single-instance events, pass the event type name (e.g., "CPUSpikeDetected").
+/// For per-device events, pass a compound key (e.g., "GPUMemoryPressure:rtx4090").
+/// ponytail: a key that is never passed again — an unplugged GPU, a removed
+/// mount, or a legacy aggregate key re-seeded from an old debounce row — stays
+/// latched. Bounded by device count, so not worth a reaper.
+fn should_emit_condition(
+    active: &mut HashSet<String>,
+    last_emitted: &mut HashMap<String, DateTime<Utc>>,
+    key: &str,
+    condition: bool,
+    audit: &AuditLog,
+) -> bool {
+    if !condition {
+        active.remove(key);
+        return false;
+    }
+
+    let now = Utc::now();
+    if !active.insert(key.to_string()) {
+        // Already latched — only the re-alert valve can let this through.
+        if let Some(last) = last_emitted.get(key) {
+            if now - *last < chrono::Duration::seconds(REALERT_INTERVAL_SECS) {
+                return false;
+            }
+        }
+    }
+
+    last_emitted.insert(key.to_string(), now);
+    if let Err(e) = audit.save_health_debounce(key, now) {
+        tracing::warn!(
+            error = %e,
+            key = %key,
+            "Failed to persist health emission timestamp"
+        );
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn check_system_health(
     kernel: &Kernel,
     thresholds: &HealthThresholds,
     permissions: &PermissionSet,
+    active: &mut HashSet<String>,
+    announced_gpus: &mut HashSet<String>,
     last_emitted: &mut HashMap<String, DateTime<Utc>>,
     audit: &AuditLog,
 ) {
@@ -150,9 +223,13 @@ async fn check_system_health(
             if let Some(cpu) = snapshot.get("cpu_usage_percent").and_then(|v| v.as_f64()) {
                 cpu_metric = Some(cpu);
                 let cpu = cpu as f32;
-                if cpu > thresholds.cpu_warning_percent
-                    && should_emit(last_emitted, "CPUSpikeDetected", audit)
-                {
+                if should_emit_condition(
+                    active,
+                    last_emitted,
+                    "CPUSpikeDetected",
+                    cpu > thresholds.cpu_warning_percent,
+                    audit,
+                ) {
                     kernel
                         .emit_event(
                             EventType::CPUSpikeDetected,
@@ -180,9 +257,13 @@ async fn check_system_health(
             if mem_total > 0 {
                 let mem_percent = (mem_used as f32 / mem_total as f32) * 100.0;
                 memory_metric = Some(mem_percent as f64);
-                if mem_percent > thresholds.memory_warning_percent
-                    && should_emit(last_emitted, "MemoryPressure", audit)
-                {
+                if should_emit_condition(
+                    active,
+                    last_emitted,
+                    "MemoryPressure",
+                    mem_percent > thresholds.memory_warning_percent,
+                    audit,
+                ) {
                     kernel
                         .emit_event(
                             EventType::MemoryPressure,
@@ -208,6 +289,9 @@ async fn check_system_health(
             if let Some(disks) = snapshot.get("disk_usage").and_then(|d| d.as_array()) {
                 let mut critical_mounts: Vec<serde_json::Value> = Vec::new();
                 let mut low_mounts: Vec<serde_json::Value> = Vec::new();
+                // Set when at least one mount *newly* latched this tick.
+                let mut emit_critical = false;
+                let mut emit_low = false;
 
                 for disk in disks {
                     let total = disk
@@ -235,13 +319,40 @@ async fn check_system_health(
                             .unwrap_or(used_percent as f64),
                     );
 
-                    if used_percent > thresholds.disk_critical_percent {
+                    let is_critical = used_percent > thresholds.disk_critical_percent;
+                    let is_low = !is_critical && used_percent > thresholds.disk_warning_percent;
+
+                    // Latch per mount, not per tier: with one aggregate key, `/` at
+                    // 96% hid `/var` crossing the same threshold hours later until
+                    // the 6h re-alert valve opened. Both keys are evaluated for
+                    // every mount on every tick, so a mount that recovers — or
+                    // moves between tiers — clears the latch it no longer holds.
+                    if should_emit_condition(
+                        active,
+                        last_emitted,
+                        &format!("DiskSpaceCritical:{}", mount),
+                        is_critical,
+                        audit,
+                    ) {
+                        emit_critical = true;
+                    }
+                    if should_emit_condition(
+                        active,
+                        last_emitted,
+                        &format!("DiskSpaceLow:{}", mount),
+                        is_low,
+                        audit,
+                    ) {
+                        emit_low = true;
+                    }
+
+                    if is_critical {
                         critical_mounts.push(serde_json::json!({
                             "mount_point": mount,
                             "disk_percent": used_percent,
                             "threshold": thresholds.disk_critical_percent,
                         }));
-                    } else if used_percent > thresholds.disk_warning_percent {
+                    } else if is_low {
                         low_mounts.push(serde_json::json!({
                             "mount_point": mount,
                             "disk_percent": used_percent,
@@ -250,16 +361,10 @@ async fn check_system_health(
                     }
                 }
 
-                // One event per tier per cycle — debounced on the aggregate key.
-                // Trade-off: if all mounts become healthy and then one goes critical
-                // again within the same 10-minute window, the re-occurrence is
-                // suppressed until the window expires. This is intentional: the
-                // aggregate key ("DiskSpaceCritical") debounces the tier as a whole,
-                // not individual mounts. The 10-minute window limits audit log noise
-                // at the cost of up to 10 minutes' delay for a re-triggered event.
-                if !critical_mounts.is_empty()
-                    && should_emit(last_emitted, "DiskSpaceCritical", audit)
-                {
+                // One aggregate event per tier, fired when any mount newly latched,
+                // with a payload listing every mount currently in that tier — one
+                // event still says everything, but no crossing waits on the valve.
+                if emit_critical {
                     kernel
                         .emit_event(
                             EventType::DiskSpaceCritical,
@@ -270,7 +375,7 @@ async fn check_system_health(
                         )
                         .await;
                 }
-                if !low_mounts.is_empty() && should_emit(last_emitted, "DiskSpaceLow", audit) {
+                if emit_low {
                     kernel
                         .emit_event(
                             EventType::DiskSpaceLow,
@@ -324,9 +429,13 @@ async fn check_system_health(
                 }
 
                 let vram_percent = (vram_used as f32 / vram_total as f32) * 100.0;
-                if vram_percent > thresholds.gpu_vram_warning_percent
-                    && should_emit(last_emitted, &format!("GPUMemoryPressure:{}", name), audit)
-                {
+                if should_emit_condition(
+                    active,
+                    last_emitted,
+                    &format!("GPUMemoryPressure:{}", name),
+                    vram_percent > thresholds.gpu_vram_warning_percent,
+                    audit,
+                ) {
                     kernel
                         .emit_event(
                             EventType::GPUMemoryPressure,
@@ -344,8 +453,9 @@ async fn check_system_health(
                         .await;
                 }
 
-                // Emit GPUAvailable when a GPU with VRAM is detected — keyed per GPU
-                if should_emit(last_emitted, &format!("GPUAvailable:{}", name), audit) {
+                // "A GPU exists" is a static fact, not a condition: announce each GPU
+                // once per boot. HashSet::insert returns false if already announced.
+                if announced_gpus.insert(name.to_string()) {
                     kernel
                         .emit_event(
                             EventType::GPUAvailable,
@@ -382,13 +492,15 @@ async fn check_system_health(
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 let is_up = iface.get("is_up").and_then(|v| v.as_bool()).unwrap_or(true);
-                if !is_up
-                    && should_emit(
-                        last_emitted,
-                        &format!("NetworkInterfaceDown:{}", name),
-                        audit,
-                    )
-                {
+                // A downed interface stays down: level condition, not a one-shot
+                // notification. Coming back up clears the latch.
+                if should_emit_condition(
+                    active,
+                    last_emitted,
+                    &format!("NetworkInterfaceDown:{}", name),
+                    !is_up,
+                    audit,
+                ) {
                     kernel
                         .emit_event(
                             EventType::NetworkInterfaceDown,
@@ -419,9 +531,13 @@ async fn check_system_health(
                 .unwrap_or(0);
             if mem_limit > 0 {
                 let usage_pct = (mem_usage as f32 / mem_limit as f32) * 100.0;
-                if usage_pct > 95.0
-                    && should_emit(last_emitted, "ContainerResourceQuotaExceeded", audit)
-                {
+                if should_emit_condition(
+                    active,
+                    last_emitted,
+                    "ContainerResourceQuotaExceeded",
+                    usage_pct > 95.0,
+                    audit,
+                ) {
                     kernel
                         .emit_event(
                             EventType::ContainerResourceQuotaExceeded,
@@ -462,13 +578,13 @@ async fn check_system_health(
                 let value = reading.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let threshold = reading.get("threshold").and_then(|v| v.as_f64());
                 if let Some(thresh) = threshold {
-                    if value > thresh
-                        && should_emit(
-                            last_emitted,
-                            &format!("SensorReadingThresholdExceeded:{}", name),
-                            audit,
-                        )
-                    {
+                    if should_emit_condition(
+                        active,
+                        last_emitted,
+                        &format!("SensorReadingThresholdExceeded:{}", name),
+                        value > thresh,
+                        audit,
+                    ) {
                         kernel
                             .emit_event(
                                 EventType::SensorReadingThresholdExceeded,
@@ -505,40 +621,212 @@ mod tests {
         assert!(!ps.check("fs:/etc/passwd", PermissionOp::Read));
     }
 
-    #[test]
-    fn should_emit_allows_first_call_and_debounces_second() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let audit = AuditLog::open(tmp.path()).unwrap();
-        let mut state: HashMap<String, DateTime<Utc>> = HashMap::new();
-
-        // First call — no prior state, must emit.
-        assert!(should_emit(&mut state, "DiskSpaceLow", &audit));
-        // Immediate second call — debounce window active, must not emit.
-        assert!(!should_emit(&mut state, "DiskSpaceLow", &audit));
-        // Different key — independent debounce, must emit.
-        assert!(should_emit(&mut state, "DiskSpaceCritical", &audit));
+    /// Open a throwaway audit log; the NamedTempFile must stay alive for the
+    /// lifetime of the returned log, so hand both back.
+    fn test_audit() -> (tempfile::NamedTempFile, AuditLog) {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let audit = AuditLog::open(tmp.path()).expect("open audit log");
+        (tmp, audit)
     }
 
+    /// (a) A condition that stays true inside the re-alert window emits exactly once.
+    /// This is the whole point of edge-triggering: the old 10-minute debounce
+    /// re-fired a full disk 144 times a day, spawning an agent task each time.
     #[test]
-    fn debounce_persists_across_reload() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let audit = AuditLog::open(tmp.path()).unwrap();
-        let mut state: HashMap<String, DateTime<Utc>> = HashMap::new();
+    fn holding_condition_emits_once_within_realert_window() {
+        let (_tmp, audit) = test_audit();
+        let mut active: HashSet<String> = HashSet::new();
+        let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
 
-        // Emit once so the timestamp is persisted.
-        assert!(should_emit(&mut state, "DiskSpaceLow", &audit));
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
+        for _ in 0..10 {
+            assert!(
+                !should_emit_condition(&mut active, &mut last, "DiskSpaceLow", true, &audit),
+                "a still-true condition must not re-emit inside the re-alert window"
+            );
+        }
+        // A different key latches independently.
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceCritical",
+            true,
+            &audit
+        ));
+    }
 
-        // Simulate a restart: load state from DB into a fresh in-memory map.
-        let (loaded, skipped) = audit.load_health_debounce().unwrap();
+    /// (b) Recovery clears the latch, so the next transition to true emits again.
+    #[test]
+    fn recovery_rearms_the_condition() {
+        let (_tmp, audit) = test_audit();
+        let mut active: HashSet<String> = HashSet::new();
+        let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "MemoryPressure",
+            true,
+            &audit
+        ));
+        // Condition clears — no recovery event, but the latch must drop.
+        assert!(!should_emit_condition(
+            &mut active,
+            &mut last,
+            "MemoryPressure",
+            false,
+            &audit
+        ));
+        assert!(!active.contains("MemoryPressure"));
+        // Re-occurrence emits immediately, without waiting out the re-alert window.
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "MemoryPressure",
+            true,
+            &audit
+        ));
+    }
+
+    /// (c) A condition that never recovers still re-alerts once the interval passes.
+    #[test]
+    fn stuck_condition_realerts_after_interval() {
+        let (_tmp, audit) = test_audit();
+        let mut active: HashSet<String> = HashSet::new();
+        let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
+        assert!(!should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
+
+        // Backdate the last emission past the re-alert interval.
+        last.insert(
+            "DiskSpaceLow".to_string(),
+            Utc::now() - chrono::Duration::seconds(REALERT_INTERVAL_SECS + 1),
+        );
+        assert!(
+            should_emit_condition(&mut active, &mut last, "DiskSpaceLow", true, &audit),
+            "a condition stuck past the re-alert interval must announce itself again"
+        );
+        // ...and the valve closes again right after.
+        assert!(!should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
+    }
+
+    /// Emission timestamps round-trip through the audit DB, and the latch set is
+    /// re-seeded from them at boot: a condition that was already latched when the
+    /// process died stays silent. Before the seeding, systemd `Restart=always`
+    /// turned a full disk into one event — and one agent task — per restart.
+    #[test]
+    fn emission_timestamp_persists_across_reload() {
+        let (_tmp, audit) = test_audit();
+        let mut active: HashSet<String> = HashSet::new();
+        let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
+
+        let (loaded, skipped) = audit.load_health_debounce().expect("reload debounce state");
         assert!(skipped.is_empty(), "no rows should have bad timestamps");
         assert!(
             loaded.contains_key("DiskSpaceLow"),
             "persisted key must survive DB round-trip"
         );
 
-        let mut reloaded_state = loaded;
-        // The debounce window is still active — must not emit again.
-        assert!(!should_emit(&mut reloaded_state, "DiskSpaceLow", &audit));
+        // Fresh boot: the latch is re-seeded from the persisted emission, so a
+        // condition that is still true stays silent.
+        let mut reloaded = loaded;
+        let mut fresh_active = seed_active_from_persisted(&reloaded, Utc::now());
+        assert!(fresh_active.contains("DiskSpaceLow"));
+        assert!(
+            !should_emit_condition(
+                &mut fresh_active,
+                &mut reloaded,
+                "DiskSpaceLow",
+                true,
+                &audit
+            ),
+            "a condition already latched before the restart must not re-announce"
+        );
+    }
+
+    /// (d) The boot seed only covers emissions inside the re-alert window: an
+    /// older one would have re-alerted anyway, and a condition that recovered
+    /// while the kernel was down unlatches on the first tick.
+    #[test]
+    fn stale_persisted_emission_still_reannounces_after_restart() {
+        let (_tmp, audit) = test_audit();
+        let now = Utc::now();
+        let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
+        last.insert(
+            "DiskSpaceLow".to_string(),
+            now - chrono::Duration::minutes(5),
+        );
+        last.insert(
+            "DiskSpaceCritical".to_string(),
+            now - chrono::Duration::seconds(REALERT_INTERVAL_SECS + 1),
+        );
+
+        let mut active = seed_active_from_persisted(&last, now);
+        assert!(
+            active.contains("DiskSpaceLow"),
+            "recent emission re-latches"
+        );
+        assert!(
+            !active.contains("DiskSpaceCritical"),
+            "an emission past the re-alert window must not re-latch"
+        );
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceCritical",
+            true,
+            &audit
+        ));
+
+        // Recovered during downtime: the first tick clears the seeded latch, so
+        // the next occurrence emits immediately.
+        assert!(!should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            false,
+            &audit
+        ));
+        assert!(should_emit_condition(
+            &mut active,
+            &mut last,
+            "DiskSpaceLow",
+            true,
+            &audit
+        ));
     }
 
     #[test]

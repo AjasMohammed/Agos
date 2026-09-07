@@ -1,0 +1,11 @@
+# Spectral ruleset for the AgentOS OpenAPI contract (crates/agentos-api/openapi.json).
+# Lints structural/quality issues in the generated spec as a CI gate.
+extends: ["spectral:oas"]
+rules:
+  # The generated spec intentionally omits contact/license/server metadata for now.
+  info-contact: off
+  info-license: off
+  license-url: off
+  oas3-server-not-example.com: off
+  # utoipa emits operationId per handler; keep this on as an error-equivalent check.
+  operation-operationId: warn

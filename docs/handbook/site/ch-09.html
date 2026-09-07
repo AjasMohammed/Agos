@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secrets and Vault · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#vault-architecture" data-target="vault-architecture">Vault Architecture</a><a class="nav-sub" href="#security-guarantees" data-target="security-guarantees">Security Guarantees</a><a class="nav-sub" href="#setting-secrets" data-target="setting-secrets">Setting Secrets</a><a class="nav-sub" href="#secret-scopes" data-target="secret-scopes">Secret Scopes</a><a class="nav-sub" href="#listing-secrets" data-target="listing-secrets">Listing Secrets</a><a class="nav-sub" href="#rotating-secrets" data-target="rotating-secrets">Rotating Secrets</a><a class="nav-sub" href="#revoking-secrets" data-target="revoking-secrets">Revoking Secrets</a><a class="nav-sub" href="#emergency-lockdown" data-target="emergency-lockdown">Emergency Lockdown</a><a class="nav-sub" href="#how-agents-access-secrets" data-target="how-agents-access-secrets">How Agents Access Secrets</a><a class="nav-sub" href="#configuration" data-target="configuration">Configuration</a><a class="nav-sub" href="#audit-events" data-target="audit-events">Audit Events</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 09 · Secrets and Vault</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 09</div><h1 class="ch-title">Secrets and Vault</h1><p class="ch-summary">AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode, OAuth credential storage</p></div>
+    <article class="prose"><h1 id="secrets-and-vault" class="anchored"><a class="hanchor" href="#secrets-and-vault" aria-label="link">#</a>Secrets and Vault</h1>
+<blockquote><p>The AgentOS vault stores sensitive credentials — API keys, passwords, tokens — with AES-256-GCM encryption and Argon2id key derivation. Agents never see raw secret values.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>The secrets vault is a security boundary that sits between agents and credentials. Its two core guarantees:</p>
+<ol><li><strong>Secrets never leave the kernel in plaintext</strong> — agents receive opaque proxy tokens, not raw values</li><li><strong>Secrets never enter the system insecurely</strong> — not via CLI arguments, not via environment variables, not via config files</li></ol>
+<p>The vault lives in <code>crates/agentos-vault/</code> and is backed by a single SQLite database (<code>vault.db</code> by default).</p>
+<hr>
+<h2 id="vault-architecture" class="anchored"><a class="hanchor" href="#vault-architecture" aria-label="link">#</a>Vault Architecture</h2>
+<h3 id="encryption" class="anchored"><a class="hanchor" href="#encryption" aria-label="link">#</a>Encryption</h3>
+<p>Every secret stored in the vault is encrypted with <strong>AES-256-GCM</strong>:</p>
+<ul><li>256-bit symmetric key derived from a passphrase</li><li>GCM mode provides both confidentiality and integrity (authenticated encryption)</li><li>Each secret has its own random nonce — the same value stored twice produces different ciphertexts</li></ul>
+<h3 id="key-derivation" class="anchored"><a class="hanchor" href="#key-derivation" aria-label="link">#</a>Key Derivation</h3>
+<p>The vault key is derived from a passphrase using <strong>Argon2id</strong>:</p>
+<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Value</th><th>Rationale</th></tr></thead><tbody><tr><td>Memory</td><td>64 MiB</td><td>High memory cost increases attacker cost</td></tr><tr><td>Iterations</td><td>3</td><td>OWASP-recommended minimum</td></tr><tr><td>Parallelism</td><td>4 lanes</td><td>Utilizes multi-core hardware</td></tr><tr><td>Output</td><td>32 bytes</td><td>AES-256 key</td></tr><tr><td>Algorithm</td><td>Argon2id</td><td>Resistance to both side-channel and GPU attacks</td></tr></tbody></table></div>
+<p>A random 32-byte salt is generated once at vault initialization and stored in the database alongside the ciphertext. This ensures that identical passphrases on different installations produce different keys.</p>
+<h3 id="memory-safety" class="anchored"><a class="hanchor" href="#memory-safety" aria-label="link">#</a>Memory Safety</h3>
+<p>All sensitive material uses <strong>zero-on-drop</strong> semantics:</p>
+<ul><li>The master key is a <code>MasterKey</code> struct implementing <code>ZeroizeOnDrop</code> — its 32 key bytes are overwritten with zeros when the struct goes out of scope</li><li>Passphrase input is stored in <code>ZeroizingString</code>, which zeroes its heap allocation on drop</li><li>Secret values retrieved for kernel-internal use follow the same pattern</li></ul>
+<h3 id="storage" class="anchored"><a class="hanchor" href="#storage" aria-label="link">#</a>Storage</h3>
+<p>The vault database (<code>vault.db</code>) stores per-secret:</p>
+<ul><li>Name</li><li>Encrypted value (AES-256-GCM ciphertext + nonce)</li><li>Scope</li><li>Owner reference</li><li><code>created_at</code> timestamp</li><li><code>last_used_at</code> timestamp</li></ul>
+<p>The database file must be protected by OS-level filesystem permissions — the vault encryption provides a second line of defense if the file is copied off-system.</p>
+<hr>
+<h2 id="security-guarantees" class="anchored"><a class="hanchor" href="#security-guarantees" aria-label="link">#</a>Security Guarantees</h2>
+<div class="table-wrap"><table><thead><tr><th>Guarantee</th><th>How it is enforced</th></tr></thead><tbody><tr><td>Never in CLI arguments</td><td><code>agentos secret set</code> uses <code>rpassword::read_password()</code> — terminal echo is suppressed, value is never in the shell command string</td></tr><tr><td>Never in environment variables</td><td>Secrets are retrieved by the kernel on startup, not via <code>$ENV</code> injection</td></tr><tr><td>Never in config files</td><td><code>config/default.toml</code> contains no secret values; vault path and params only</td></tr><tr><td>Zeroed from memory</td><td><code>ZeroizeOnDrop</code> on <code>MasterKey</code> and <code>ZeroizingString</code></td></tr><tr><td>Audit trail</td><td>Every secret access and vault lockdown event is written to the audit log</td></tr></tbody></table></div>
+<hr>
+<h2 id="setting-secrets" class="anchored"><a class="hanchor" href="#setting-secrets" aria-label="link">#</a>Setting Secrets</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>NAME<span class="w"> </span><span class="o">[</span>--scope<span class="w"> </span>SCOPE<span class="o">]</span>
+</pre></div>
+</div>
+<p>The command prompts for the value with hidden input — the value is never visible in the shell history or process table:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>OPENAI_API_KEY
+<span class="c1"># Enter value for &#39;OPENAI_API_KEY&#39; (input hidden): ▌</span>
+<span class="c1"># ✅ Secret &#39;OPENAI_API_KEY&#39; stored securely</span>
+
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>DB_PASSWORD<span class="w"> </span>--scope<span class="w"> </span>agent:worker
+<span class="c1"># Enter value for &#39;DB_PASSWORD&#39; (input hidden): ▌</span>
+<span class="c1"># ✅ Secret &#39;DB_PASSWORD&#39; stored securely</span>
+</pre></div>
+</div>
+<p><strong>Parameters:</strong></p>
+<ul><li><code>NAME</code> — the secret name (e.g. <code>OPENAI_API_KEY</code>, <code>STRIPE_SECRET_KEY</code>)</li><li><code>--scope</code> — access scope (see <a class="wikilink" href="ch-09.html#secret-scopes">Secret Scopes</a>); defaults to <code>global</code></li></ul>
+<hr>
+<h2 id="secret-scopes" class="anchored"><a class="hanchor" href="#secret-scopes" aria-label="link">#</a>Secret Scopes</h2>
+<p>Scopes control which agents and tools can access a secret. The kernel enforces scope at retrieval time.</p>
+<div class="table-wrap"><table><thead><tr><th>Scope</th><th>Format</th><th>When to use</th></tr></thead><tbody><tr><td><code>global</code></td><td><code>global</code></td><td>Secrets accessible to all agents (e.g., shared API credentials)</td></tr><tr><td>Agent-scoped</td><td><code>agent:&lt;name&gt;</code></td><td>Secrets tied to a specific agent (e.g., the agent's own service account key)</td></tr><tr><td>Tool-scoped</td><td><code>tool:&lt;name&gt;</code></td><td>Secrets used by a specific tool (e.g., an API key only the <code>stripe-tool</code> should touch)</td></tr></tbody></table></div>
+<h3 id="examples" class="anchored"><a class="hanchor" href="#examples" aria-label="link">#</a>Examples</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Global — any agent can use this</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>ANTHROPIC_API_KEY<span class="w"> </span>--scope<span class="w"> </span>global
+
+<span class="c1"># Scoped to the &#39;finance-agent&#39; only</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>PAYROLL_DB_PASSWORD<span class="w"> </span>--scope<span class="w"> </span>agent:finance-agent
+
+<span class="c1"># Scoped to the &#39;stripe-payment&#39; tool only</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>STRIPE_SECRET_KEY<span class="w"> </span>--scope<span class="w"> </span>tool:stripe-payment
+</pre></div>
+</div>
+<div class="callout callout-tip"><div class="callout-title">Prefer Narrow Scopes</div><p>Use the narrowest scope that works. A compromised agent with <code>global</code> scope access can reach all secrets; one with <code>agent:worker</code> scope can only reach its own.</p></div>
+<hr>
+<h2 id="listing-secrets" class="anchored"><a class="hanchor" href="#listing-secrets" aria-label="link">#</a>Listing Secrets</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>list
+</pre></div>
+</div>
+<p>Lists all stored secrets — <strong>metadata only</strong>. Secret values are never shown:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME                      SCOPE                LAST USED
+--------------------------------------------------------------
+OPENAI_API_KEY            Global               2026-03-17 09:22:00 UTC
+DB_PASSWORD               Agent(worker)        never
+STRIPE_SECRET_KEY         Tool(stripe-payment) 2026-03-16 14:05:00 UTC
+</pre></div>
+</div>
+<p>The <code>last_used_at</code> timestamp updates each time the kernel retrieves a secret value for an agent or tool.</p>
+<hr>
+<h2 id="rotating-secrets" class="anchored"><a class="hanchor" href="#rotating-secrets" aria-label="link">#</a>Rotating Secrets</h2>
+<p>Use <code>rotate</code> when a credential has been compromised or needs periodic renewal. The old value is replaced atomically — the secret is unavailable for the minimum possible time:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>rotate<span class="w"> </span>NAME
+</pre></div>
+</div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>rotate<span class="w"> </span>OPENAI_API_KEY
+<span class="c1"># Enter new value for &#39;OPENAI_API_KEY&#39; (input hidden): ▌</span>
+<span class="c1"># ✅ Secret &#39;OPENAI_API_KEY&#39; rotated</span>
+</pre></div>
+</div>
+<p>The rotation is logged to the audit trail with a <code>SecretRotated</code> event. The scope and ownership are preserved — only the encrypted value changes.</p>
+<hr>
+<h2 id="revoking-secrets" class="anchored"><a class="hanchor" href="#revoking-secrets" aria-label="link">#</a>Revoking Secrets</h2>
+<p><code>revoke</code> permanently deletes a secret from the vault:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>revoke<span class="w"> </span>NAME
+</pre></div>
+</div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>revoke<span class="w"> </span>OLD_API_KEY
+<span class="c1"># ✅ Secret &#39;OLD_API_KEY&#39; revoked</span>
+</pre></div>
+</div>
+<p>After revocation, any agent or tool that attempts to access the secret will receive an error. The revocation event is written to the audit log.</p>
+<hr>
+<h2 id="emergency-lockdown" class="anchored"><a class="hanchor" href="#emergency-lockdown" aria-label="link">#</a>Emergency Lockdown</h2>
+<p><code>lockdown</code> is a break-glass command for security incidents. It revokes <strong>all active proxy tokens</strong> and <strong>blocks new issuance</strong> until the kernel is restarted:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>lockdown
+</pre></div>
+</div>
+<p><strong>What it does:</strong></p>
+<ol><li>Invalidates all currently-issued proxy tokens (agents can no longer access any secrets)</li><li>Blocks the kernel from issuing new proxy tokens for any secret</li><li>Writes a <code>SecretRevoked</code> event (with lockdown details in the payload) to the audit log</li><li>Does <strong>not</strong> delete the encrypted values — secrets can be recovered after the kernel restarts with the correct passphrase</li></ol>
+<p><strong>When to use it:</strong></p>
+<ul><li>A credential leak is suspected</li><li>An agent is exhibiting unexpected behavior that may involve secret access</li><li>An operator needs to stop all secret access immediately while investigating</li></ul>
+<div class="callout callout-danger"><div class="callout-title">Lockdown Stops All Agent Activity</div><p>Any running task that requires a secret (e.g., LLM API calls) will fail immediately after lockdown. Use this command only when necessary. To restore operation, restart the kernel — the vault will reinitialize with valid proxy tokens.</p></div>
+<hr>
+<h2 id="how-agents-access-secrets" class="anchored"><a class="hanchor" href="#how-agents-access-secrets" aria-label="link">#</a>How Agents Access Secrets</h2>
+<p>Agents <strong>never see raw secret values</strong>. The flow is:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent task starts
+  → Kernel issues CapabilityToken with allowed tools
+  → Agent issues intent: Execute(&quot;llm-call&quot;, {model: &quot;gpt-4&quot;})
+  → Kernel retrieves OPENAI_API_KEY from vault (decrypt with master key)
+  → Kernel injects raw value into the LLM adapter HTTP request
+  → Raw value is zeroed from memory after the request
+  → Agent receives the LLM response — never the API key
+</pre></div>
+</div>
+<p>The kernel decrypts secrets on demand, uses them for the minimum necessary duration, then zeroes the plaintext. Secret values do not flow through the intent system, the audit log content, or the agent's context window.</p>
+<hr>
+<h2 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h2>
+<p>Vault settings in <code>config/default.toml</code>:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[secrets]</span>
+<span class="c1"># Path to the SQLite vault database</span>
+<span class="n">vault_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/tmp/agentos/vault/secrets.db&quot;</span>
+</pre></div>
+</div>
+<p>Argon2id key derivation parameters (64 MiB memory, 3 iterations, 4 lanes) are hardcoded for security and cannot be weakened via config.</p>
+<p>The vault passphrase is <strong>never</strong> stored in config. It is provided at kernel startup:</p>
+<ul><li>Via the <code>AGENTOS_VAULT_PASSPHRASE</code> environment variable (set by the systemd service or container entrypoint, not by humans)</li><li>Or interactively when running in development mode</li></ul>
+<hr>
+<h2 id="audit-events" class="anchored"><a class="hanchor" href="#audit-events" aria-label="link">#</a>Audit Events</h2>
+<p>All vault operations are logged to the audit trail:</p>
+<div class="table-wrap"><table><thead><tr><th>Event</th><th>Trigger</th></tr></thead><tbody><tr><td><code>SecretCreated</code></td><td><code>agentos secret set</code></td></tr><tr><td><code>SecretAccessed</code></td><td>Kernel decrypts a value for agent use</td></tr><tr><td><code>SecretRotated</code></td><td><code>agentos secret rotate</code></td></tr><tr><td><code>SecretRevoked</code></td><td><code>agentos secret revoke</code></td></tr><tr><td><code>SecretRevoked</code> (with lockdown payload)</td><td><code>agentos secret lockdown</code> — lockdown uses the <code>SecretRevoked</code> audit event type with lockdown details in the payload; <code>VaultLockdown</code> is not a distinct event type</td></tr></tbody></table></div>
+<p>Audit entries include the secret name, scope, requesting agent/tool, and timestamp. Secret values are never written to the audit log.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-08.html">Security Model</a> — Full security model including vault isolation (Layer 6)</li><li><a class="wikilink" href="ch-04.html">CLI Reference Complete</a> — Complete CLI reference</li><li><a class="wikilink" href="ch-03.html">Architecture Overview</a> — System architecture</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-08.html"><span class="pn-dir">← Previous</span><span class="pn-title">Security Model</span></a><a class="pn pn-next" href="ch-10.html"><span class="pn-dir">Next →</span><span class="pn-title">Memory System</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#vault-architecture" data-target="vault-architecture">Vault Architecture</a></li><li class="toc-h3"><a href="#encryption" data-target="encryption">Encryption</a></li><li class="toc-h3"><a href="#key-derivation" data-target="key-derivation">Key Derivation</a></li><li class="toc-h3"><a href="#memory-safety" data-target="memory-safety">Memory Safety</a></li><li class="toc-h3"><a href="#storage" data-target="storage">Storage</a></li><li class="toc-h2"><a href="#security-guarantees" data-target="security-guarantees">Security Guarantees</a></li><li class="toc-h2"><a href="#setting-secrets" data-target="setting-secrets">Setting Secrets</a></li><li class="toc-h2"><a href="#secret-scopes" data-target="secret-scopes">Secret Scopes</a></li><li class="toc-h3"><a href="#examples" data-target="examples">Examples</a></li><li class="toc-h2"><a href="#listing-secrets" data-target="listing-secrets">Listing Secrets</a></li><li class="toc-h2"><a href="#rotating-secrets" data-target="rotating-secrets">Rotating Secrets</a></li><li class="toc-h2"><a href="#revoking-secrets" data-target="revoking-secrets">Revoking Secrets</a></li><li class="toc-h2"><a href="#emergency-lockdown" data-target="emergency-lockdown">Emergency Lockdown</a></li><li class="toc-h2"><a href="#how-agents-access-secrets" data-target="how-agents-access-secrets">How Agents Access Secrets</a></li><li class="toc-h2"><a href="#configuration" data-target="configuration">Configuration</a></li><li class="toc-h2"><a href="#audit-events" data-target="audit-events">Audit Events</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

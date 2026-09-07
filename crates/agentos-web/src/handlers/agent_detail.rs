@@ -173,9 +173,11 @@ pub async fn update_settings(
         .service
         .update_agent_settings(agentos_api::types::UpdateAgentSettingsRequest {
             agent_name: name.clone(),
-            description,
-            thinking_level,
-            system_prompt,
+            description: Some(description),
+            thinking_level: Some(thinking_level),
+            // This form always submits every field, so each one is an explicit
+            // set. An empty prompt means "clear", which the API spells `Some("")`.
+            system_prompt: Some(system_prompt.unwrap_or_default()),
         })
         .await
     {

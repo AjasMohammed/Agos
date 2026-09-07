@@ -83,6 +83,9 @@ agentos task run [--agent <NAME>] [--autonomous] "<PROMPT>"
 |------|------|----------|-------------|
 | `--agent` | `String` | No | Agent name to execute the task. If omitted, the router selects one automatically |
 | `--autonomous` | flag | No | Run without iteration or timeout limits. Use for long-running workflows |
+| `--no-checkpoint` | flag | No | Disable checkpoint writes for this task (ephemeral execution) |
+| `--thinking <off\|low\|medium\|high\|max>` | enum | No | Extended-thinking budget (default: `off`; Anthropic models only) |
+| `-i`, `--interactive` | flag | No | Prompt inline at the terminal for human approval instead of returning to the shell (requires a TTY) |
 | `prompt` | positional | Yes | The task prompt |
 
 **Examples:**
@@ -108,11 +111,11 @@ When a task is created:
 
 ## Task Routing
 
-When no `--agent` is specified, the kernel's `TaskRouter` selects an agent using the configured strategy. Only agents with `Online` or `Idle` status are considered.
+When no `--agent` is specified, the kernel's `TaskRouter` selects an agent using the configured strategy. Only agents with `Online` or `Idle` status are considered. The strategy is set via the `[routing] strategy` key in `config/default.toml` — it is **not** a `--strategy` CLI flag on `task run`.
 
 ### Routing Strategies
 
-| Strategy | `--strategy` value | Selection Logic |
+| Strategy | Config value | Selection Logic |
 |----------|-------------------|-----------------|
 | **Capability-first** | `capability-first` | Pick the most capable model. Priority: Anthropic > OpenAI > Gemini > Custom > Ollama |
 | **Cost-first** | `cost-first` | Pick the cheapest model. Priority: Ollama > Custom > Gemini > OpenAI > Anthropic |
@@ -274,6 +277,26 @@ Transitions the task to `Cancelled` state. Only tasks in `Queued`, `Running`, or
 
 ```bash
 agentos task cancel a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+---
+
+## Checkpointing & Resume
+
+The kernel writes a durable checkpoint after each tool-call iteration so a task can be recovered if the kernel restarts mid-execution. Checkpoints are deleted on normal completion. Pass `--no-checkpoint` to `task run` for ephemeral execution that skips checkpoint writes. You can also inspect the per-iteration tool-call trace of any task for debugging and audit purposes (see [[14-Audit Log]]).
+
+```bash
+# Resume a checkpointed task from its latest checkpoint
+agentos task resume <id>
+
+# List all tasks that have a recoverable checkpoint
+agentos task checkpoints
+
+# Show the per-iteration tool-call trace for a task (optionally as JSON or a single iteration)
+agentos task trace <id> [--json] [--iter N]
+
+# List recent task execution traces
+agentos task traces [--limit N] [--agent <id>]
 ```
 
 ---
@@ -503,9 +526,9 @@ Each agent can have resource budgets that limit token usage, cost, and tool call
 
 | Budget Field | Default | Description |
 |-------------|---------|-------------|
-| `max_tokens_per_day` | `500,000` | Maximum tokens per day (0 = unlimited) |
-| `max_cost_usd_per_day` | `$5.00` | Maximum cost per day (0 = unlimited) |
-| `max_tool_calls_per_day` | `200` | Maximum tool calls per day (0 = unlimited) |
+| `max_tokens_per_day` | `5,000,000` | Maximum tokens per day (0 = unlimited) |
+| `max_cost_usd_per_day` | `$50.00` | Maximum cost per day (0 = unlimited) |
+| `max_tool_calls_per_day` | `10,000` | Maximum tool calls per day (0 = unlimited) |
 | `warn_at_pct` | `80%` | Emit warning at this utilization |
 | `pause_at_pct` | `95%` | Pause task at this utilization |
 | `on_hard_limit` | `Suspend` | Action on 100%: `Suspend`, `NotifyOnly`, or `Kill` |
@@ -548,7 +571,7 @@ Tasks spawned via the `spawn-agent` coordination tool form a parent-child hierar
 
 ### Depth Limit Enforcement
 
-The kernel rejects spawn requests that would exceed the maximum spawn depth (default: 4). This prevents:
+The kernel rejects spawn requests that would exceed the maximum spawn depth of 5 (hardcoded `MAX_SPAWN_DEPTH`). This prevents:
 
 - Unbounded recursive agent spawning
 - Resource exhaustion from deep nesting chains

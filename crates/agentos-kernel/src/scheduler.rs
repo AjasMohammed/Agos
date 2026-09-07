@@ -11,6 +11,9 @@ pub struct TimedOutTask {
     pub agent_id: AgentID,
     pub timeout_seconds: u64,
     pub elapsed_seconds: u64,
+    /// Depth for the TaskTimedOut/TaskFailed events emitted for this task, so
+    /// event-triggered tasks that time out don't reset the trigger-loop counter.
+    pub chain_depth: u32,
 }
 
 pub struct TaskScheduler {
@@ -24,6 +27,13 @@ pub struct TaskScheduler {
     state_store: Option<Arc<KernelStateStore>>,
     /// Maps parent task IDs to their spawned child task IDs (for cascade-cancel).
     child_map: RwLock<HashMap<TaskID, Vec<TaskID>>>,
+    /// Failure reason per failed task (first line of the error chain).
+    /// Persisted alongside the task row so it survives restarts.
+    failure_reasons: RwLock<HashMap<TaskID, String>>,
+    /// Maximum queued (not running) tasks per agent; 0 disables the cap.
+    /// `max_concurrent_tasks` bounds execution, not queue depth — see
+    /// `enqueue` for why the rejection path emits no events.
+    max_queued_per_agent: usize,
 }
 
 #[derive(Eq, PartialEq)]
@@ -101,6 +111,11 @@ impl TaskDependencyGraph {
     }
 }
 
+/// Fallback queue-depth cap when the scheduler is built without an explicit
+/// one (tests, `TaskScheduler::new`). Mirrors `default_max_queued_per_agent`
+/// in `config.rs`.
+pub const DEFAULT_MAX_QUEUED_PER_AGENT: usize = 500;
+
 impl TaskScheduler {
     pub fn new(_max_concurrent: usize) -> Self {
         Self::with_state_store(_max_concurrent, None)
@@ -110,13 +125,120 @@ impl TaskScheduler {
         _max_concurrent: usize,
         state_store: Option<Arc<KernelStateStore>>,
     ) -> Self {
+        Self::with_limits(_max_concurrent, state_store, DEFAULT_MAX_QUEUED_PER_AGENT)
+    }
+
+    pub fn with_limits(
+        _max_concurrent: usize,
+        state_store: Option<Arc<KernelStateStore>>,
+        max_queued_per_agent: usize,
+    ) -> Self {
         Self {
             queue: Mutex::new(BinaryHeap::new()),
             tasks: RwLock::new(HashMap::new()),
             dependency_graph: RwLock::new(TaskDependencyGraph::new()),
             state_store,
             child_map: RwLock::new(HashMap::new()),
+            failure_reasons: RwLock::new(HashMap::new()),
+            max_queued_per_agent,
         }
+    }
+
+    /// Record why a task failed. Kept in memory for `list_tasks` and written
+    /// to the state store so the reason is still available after a restart.
+    pub async fn set_failure_reason(&self, task_id: &TaskID, reason: String) {
+        self.failure_reasons
+            .write()
+            .await
+            .insert(*task_id, reason.clone());
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.set_scheduler_task_error(task_id, &reason).await {
+                tracing::warn!(task_id = %task_id, error = %e, "Failed to persist task failure reason");
+            }
+        }
+    }
+
+    /// Persist the final answer of a task that just completed (write-through;
+    /// nothing in memory reads it — the detail view fetches via `outcome`).
+    pub async fn set_result(&self, task_id: &TaskID, answer: &str) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.set_scheduler_task_result(task_id, answer).await {
+                tracing::warn!(task_id = %task_id, error = %e, "Failed to persist task result");
+            }
+        }
+    }
+
+    /// `(completed_at, final answer)` for a terminal task; `None` while it is
+    /// still queued/running or when no state store is configured.
+    pub async fn outcome(
+        &self,
+        task_id: &TaskID,
+    ) -> Option<(chrono::DateTime<chrono::Utc>, Option<String>)> {
+        let terminal = self.tasks.read().await.get(task_id).is_some_and(|t| {
+            matches!(
+                t.state,
+                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+            )
+        });
+        if !terminal {
+            return None;
+        }
+        self.state_store
+            .as_ref()?
+            .scheduler_task_outcome(task_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Failure reason for a task, only while it is actually in `Failed`. A
+    /// task that failed once and later completed (retry/requeue) must not keep
+    /// reporting the stale reason.
+    pub async fn failure_reason(&self, task_id: &TaskID) -> Option<String> {
+        let failed = self
+            .tasks
+            .read()
+            .await
+            .get(task_id)
+            .is_some_and(|t| t.state == TaskState::Failed);
+        if !failed {
+            return None;
+        }
+        self.failure_reasons.read().await.get(task_id).cloned()
+    }
+
+    /// Drop failure reasons for tasks the scheduler no longer tracks (called
+    /// from the periodic prune sweep) so the map can't grow unbounded.
+    pub async fn prune_failure_reasons(&self) -> usize {
+        let live: HashSet<TaskID> = self.tasks.read().await.keys().copied().collect();
+        let mut reasons = self.failure_reasons.write().await;
+        let before = reasons.len();
+        reasons.retain(|id, _| live.contains(id));
+        before - reasons.len()
+    }
+
+    /// Load recently finished tasks (complete/failed/cancelled) from the state
+    /// store into the in-memory map so task history survives a kernel restart.
+    /// They are never re-queued. Returns the number of rows loaded.
+    pub async fn restore_terminal_history(&self, limit: usize) -> anyhow::Result<usize> {
+        let Some(store) = &self.state_store else {
+            return Ok(0);
+        };
+        let rows = store.load_recent_terminal_scheduler_tasks(limit).await?;
+        let mut tasks = self.tasks.write().await;
+        let mut reasons = self.failure_reasons.write().await;
+        let mut loaded = 0usize;
+        for (task, error) in rows {
+            if tasks.contains_key(&task.id) {
+                continue;
+            }
+            if let Some(err) = error {
+                reasons.insert(task.id, err);
+            }
+            tasks.insert(task.id, task);
+            loaded += 1;
+        }
+        Ok(loaded)
     }
 
     async fn persist_task_snapshot(&self, task: AgentTask) {
@@ -138,27 +260,70 @@ impl TaskScheduler {
     /// - `Queued` tasks are re-queued.
     /// - `Running` tasks are normalized to `Queued` and re-queued.
     /// - `Waiting` tasks are restored in the task map but remain paused.
-    pub async fn restore_from_store(&self) -> anyhow::Result<usize> {
+    ///
+    /// Two guards keep a runaway backlog from resurrecting itself on every
+    /// restart (2026-07-26: 190k queued tasks replayed at each boot, growing
+    /// 38k → 62k → 111k → 193k):
+    /// - tasks enqueued more than `max_age_hours` ago are cancelled instead of
+    ///   replayed (`0` disables the cutoff),
+    /// - the same per-agent depth cap that `enqueue` applies is enforced here,
+    ///   so a pre-existing backlog cannot reload past it.
+    ///
+    /// `resumable` holds task IDs that have a saved checkpoint; they bypass
+    /// both guards. A checkpointed task did real work before the crash and is
+    /// resumed from its saved context by `recover_checkpointed_tasks` (A1) —
+    /// and that recovery looks the task up *in the scheduler map*, so
+    /// cancelling one here would silently drop the resume. Storm tasks never
+    /// reach a tool call, so they never have a checkpoint.
+    ///
+    /// Cancelled rows are persisted back as `Cancelled` so the next boot does
+    /// not see them again, and are returned in the second tuple element for
+    /// logging.
+    pub async fn restore_from_store(
+        &self,
+        max_age_hours: u32,
+        resumable: &HashSet<TaskID>,
+    ) -> anyhow::Result<(usize, usize)> {
         let Some(store) = &self.state_store else {
-            return Ok(0);
+            return Ok((0, 0));
         };
 
         let persisted = store.load_non_terminal_scheduler_tasks().await?;
         if persisted.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
+
+        let cutoff = if max_age_hours == 0 {
+            None
+        } else {
+            Some(chrono::Utc::now() - chrono::Duration::hours(i64::from(max_age_hours)))
+        };
 
         let mut restored_count = 0usize;
         let mut normalized_to_queued = Vec::new();
+        let mut dropped = Vec::new();
+        let mut queued_per_agent: HashMap<AgentID, usize> = HashMap::new();
 
-        let mut tasks = self.tasks.write().await;
+        // LOCK ORDER: `queue` before `tasks` whenever both are held, matching
+        // `dequeue_runnable`. Restore only runs at boot today (before the
+        // executor is spawned), so the reverse order was safe — but a future
+        // runtime "reload state" caller would deadlock against the executor.
         let mut queue = self.queue.lock().await;
+        let mut tasks = self.tasks.write().await;
 
         for mut task in persisted {
             if matches!(
                 task.state,
                 TaskState::Complete | TaskState::Failed | TaskState::Cancelled
             ) {
+                continue;
+            }
+
+            let exempt = resumable.contains(&task.id);
+
+            if !exempt && cutoff.is_some_and(|c| task.created_at < c) {
+                task.state = TaskState::Cancelled;
+                dropped.push(task);
                 continue;
             }
 
@@ -169,6 +334,13 @@ impl TaskScheduler {
             }
 
             if task.state == TaskState::Queued {
+                let seen = queued_per_agent.entry(task.agent_id).or_insert(0);
+                if !exempt && self.max_queued_per_agent > 0 && *seen >= self.max_queued_per_agent {
+                    task.state = TaskState::Cancelled;
+                    dropped.push(task);
+                    continue;
+                }
+                *seen += 1;
                 queue.push(PrioritizedTask {
                     priority: task.priority,
                     created_at: task.created_at,
@@ -180,15 +352,47 @@ impl TaskScheduler {
             restored_count = restored_count.saturating_add(1);
         }
 
-        drop(queue);
         drop(tasks);
+        drop(queue);
+
+        let dropped_count = dropped.len();
 
         // Persist normalized state transitions (running -> queued) after lock release.
         for task in normalized_to_queued {
             self.persist_task_snapshot(task).await;
         }
+        // Persist the cancellations so they are not reconsidered next boot.
+        for task in dropped {
+            self.persist_task_snapshot(task).await;
+        }
 
-        Ok(restored_count)
+        Ok((restored_count, dropped_count))
+    }
+
+    /// Delete persisted terminal rows older than `max_age`.
+    ///
+    /// Thin delegate so callers don't need their own `KernelStateStore` handle
+    /// — the scheduler owns these rows. No-op without persistence.
+    pub async fn prune_terminal_persisted(
+        &self,
+        max_age: chrono::Duration,
+    ) -> anyhow::Result<usize> {
+        let pruned = match &self.state_store {
+            Some(store) => store.prune_terminal_scheduler_tasks(max_age).await?,
+            None => 0,
+        };
+        self.prune_failure_reasons().await;
+        Ok(pruned)
+    }
+
+    /// Number of tasks currently in `Queued` state for an agent.
+    pub async fn queued_count_for_agent(&self, agent_id: &AgentID) -> usize {
+        self.tasks
+            .read()
+            .await
+            .values()
+            .filter(|t| t.agent_id == *agent_id && t.state == TaskState::Queued)
+            .count()
     }
 
     /// Return a snapshot of all tasks for use in `task-status` / `task-list` tools.
@@ -215,9 +419,58 @@ impl TaskScheduler {
     }
 
     /// Enqueue a new task. Returns the TaskID.
+    ///
+    /// If the agent already holds `max_queued_per_agent` queued tasks the task
+    /// is **not** queued: it is recorded as `Failed` so `task status` can
+    /// explain what happened, and an ERROR is logged.
+    ///
+    /// The rejection deliberately emits no event. Routing it through
+    /// `complete_task_failure` would emit `TaskFailed` — the very event that
+    /// feeds an event-trigger loop — so a cap breach would fuel the storm the
+    /// cap exists to stop. The scheduler has no event-bus access, which is what
+    /// makes this the safe place for the check; keeping the `-> TaskID`
+    /// signature keeps all 30+ callers unchanged.
     #[tracing::instrument(skip_all, fields(task_id = %task.id, priority = task.priority))]
-    pub async fn enqueue(&self, task: AgentTask) -> TaskID {
+    pub async fn enqueue(&self, mut task: AgentTask) -> TaskID {
         let task_id = task.id;
+
+        // A task already in the map is a *re-enqueue* (checkpoint resume,
+        // requeue of a parked task), not new work — it is already counted in
+        // the agent's queued total. Charging it again lets a full-cap agent
+        // reject the very task it is resuming, which would flip that task to
+        // Failed after `recover_checkpointed_tasks` already bumped its
+        // poison-pill counter — three boots of that and the checkpoint is
+        // deleted for good.
+        let is_reenqueue = self.tasks.read().await.contains_key(&task_id);
+
+        if !is_reenqueue && self.max_queued_per_agent > 0 {
+            let queued = self.queued_count_for_agent(&task.agent_id).await;
+            if queued >= self.max_queued_per_agent {
+                tracing::error!(
+                    task_id = %task_id,
+                    agent_id = %task.agent_id,
+                    queued,
+                    cap = self.max_queued_per_agent,
+                    "Task rejected — agent queue cap exceeded. Drain with \
+                     `agentos task purge --agent <name>`"
+                );
+                task.state = TaskState::Failed;
+                let snapshot = task.clone();
+                self.tasks.write().await.insert(task_id, task);
+                self.persist_task_snapshot(snapshot).await;
+                // Persist why, or the task detail view shows a bare "failed".
+                self.set_failure_reason(
+                    &task_id,
+                    format!(
+                        "Rejected: agent already has {} queued tasks (cap {})",
+                        queued, self.max_queued_per_agent
+                    ),
+                )
+                .await;
+                return task_id;
+            }
+        }
+
         let task_snapshot = task.clone();
         let prioritized = PrioritizedTask {
             priority: task.priority,
@@ -228,6 +481,108 @@ impl TaskScheduler {
         self.queue.lock().await.push(prioritized);
         self.persist_task_snapshot(task_snapshot).await;
         task_id
+    }
+
+    /// Bulk-drop an agent's tasks in the given states (default: `Queued`).
+    ///
+    /// Recovery valve for runaway trigger loops — `cmd_cancel_task` is per-ID
+    /// and cannot drain a six-figure backlog. `Running` tasks are never
+    /// touched; cancel those individually so their cleanup path runs.
+    ///
+    /// Returns the number of tasks dropped from memory and persistence.
+    pub async fn purge_agent_tasks(&self, agent_id: &AgentID, states: &[TaskState]) -> usize {
+        let states: Vec<TaskState> = if states.is_empty() {
+            vec![TaskState::Queued]
+        } else {
+            states
+                .iter()
+                .copied()
+                .filter(|s| *s != TaskState::Running)
+                .collect()
+        };
+        if states.is_empty() {
+            return 0;
+        }
+
+        let mut tasks = self.tasks.write().await;
+        let doomed: Vec<TaskID> = tasks
+            .values()
+            .filter(|t| t.agent_id == *agent_id && states.contains(&t.state))
+            .map(|t| t.id)
+            .collect();
+        if doomed.is_empty() {
+            return 0;
+        }
+        let doomed_set: HashSet<TaskID> = doomed.iter().copied().collect();
+        for id in &doomed {
+            tasks.remove(id);
+        }
+        drop(tasks);
+        {
+            let mut reasons = self.failure_reasons.write().await;
+            for id in &doomed {
+                reasons.remove(id);
+            }
+        }
+
+        // Rebuild the heap without the purged entries.
+        {
+            let mut queue = self.queue.lock().await;
+            let retained: Vec<PrioritizedTask> = std::mem::take(&mut *queue)
+                .into_vec()
+                .into_iter()
+                .filter(|p| !doomed_set.contains(&p.task_id))
+                .collect();
+            *queue = BinaryHeap::from(retained);
+        }
+
+        {
+            let mut children = self.child_map.write().await;
+            children.retain(|parent, _| !doomed_set.contains(parent));
+            for kids in children.values_mut() {
+                kids.retain(|k| !doomed_set.contains(k));
+            }
+        }
+
+        // Release anyone blocked on a purged task. `complete_dependency` only
+        // ever fires from the task-completion paths, which a purged task never
+        // reaches — without this a delegating parent sits in `Waiting` forever
+        // (the parked-task reaper in `check_timeouts` would eventually fail it,
+        // but only after its whole timeout budget elapsed)
+        // and its graph edges leak.
+        let waiters: Vec<TaskID> = {
+            let mut graph = self.dependency_graph.write().await;
+            let mut waiters = Vec::new();
+            for id in &doomed {
+                waiters.extend(graph.dependents_of(*id));
+                graph.remove_edges_for(*id);
+            }
+            waiters.retain(|w| !doomed_set.contains(w));
+            waiters.sort_unstable();
+            waiters.dedup();
+            waiters
+        };
+        for waiter in waiters {
+            if let Err(e) = self.requeue(&waiter).await {
+                tracing::warn!(
+                    task_id = %waiter,
+                    error = %e,
+                    "Failed to wake a task that was waiting on a purged dependency"
+                );
+            }
+        }
+
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.delete_scheduler_tasks(&doomed).await {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Purged tasks from memory but failed to delete persisted rows"
+                );
+            }
+        }
+
+        doomed.len()
     }
 
     /// Register a task in scheduler state without placing it on the run queue.
@@ -242,20 +597,60 @@ impl TaskScheduler {
 
     /// Dequeue the highest-priority task that is in Queued state.
     pub async fn dequeue(&self) -> Option<AgentTask> {
-        let mut queue = self.queue.lock().await;
-        while let Some(prioritized) = queue.pop() {
-            let tasks = self.tasks.read().await;
-            if let Some(task) = tasks.get(&prioritized.task_id) {
-                if task.state == TaskState::Queued {
-                    return Some(task.clone());
-                }
-            }
-        }
-        None
+        self.dequeue_runnable(|_| true).await
     }
 
-    /// Requeue an existing task by ID and mark it as Queued.
-    /// No-ops silently if the task is already in a terminal state (Complete, Failed, Cancelled).
+    /// Dequeue the highest-priority `Queued` task whose agent passes
+    /// `runnable`.
+    ///
+    /// Tasks belonging to agents that fail the predicate are pushed back onto
+    /// the heap, so pausing an agent holds its backlog instead of losing it.
+    /// Without this the pause primitive is only half-implemented: marking an
+    /// agent `manually_offline` correctly stops it being reactivated at boot,
+    /// but its already-queued tasks kept executing.
+    pub async fn dequeue_runnable(&self, runnable: impl Fn(&AgentID) -> bool) -> Option<AgentTask> {
+        let mut queue = self.queue.lock().await;
+        let mut skipped: Vec<PrioritizedTask> = Vec::new();
+        let mut found = None;
+
+        while let Some(prioritized) = queue.pop() {
+            let tasks = self.tasks.read().await;
+            let Some(task) = tasks.get(&prioritized.task_id) else {
+                continue; // task was purged — drop the stale heap entry
+            };
+            if task.state != TaskState::Queued {
+                continue;
+            }
+            if !runnable(&task.agent_id) {
+                drop(tasks);
+                skipped.push(prioritized);
+                continue;
+            }
+            found = Some(task.clone());
+            break;
+        }
+
+        for entry in skipped {
+            queue.push(entry);
+        }
+        found
+    }
+
+    /// Wake a parked task by ID and re-enqueue it for execution.
+    ///
+    /// Only tasks that are actually parked — `Waiting` (blocked on a dependency,
+    /// tool, or sub-agent) or `Suspended` (budget-paused) — are woken. Any other
+    /// state is a silent no-op:
+    ///
+    /// - `Running`: the task already has a live execution loop. Re-enqueuing it
+    ///   would let the executor spawn a **second** concurrent loop over the same
+    ///   task/context — duplicated inferences and tool side-effects. This is the
+    ///   crux of the delegating-parent double-execution bug: a non-blocking
+    ///   `task-delegate` leaves the parent `Running`, and the child's completion
+    ///   fires `requeue` on it. Guarding here makes the wake idempotent and safe
+    ///   regardless of caller.
+    /// - `Queued`: already in the queue; re-pushing would double-enqueue it.
+    /// - `Complete`/`Failed`/`Cancelled`: terminal, nothing to wake.
     #[tracing::instrument(skip_all, fields(task_id = %task_id))]
     pub async fn requeue(&self, task_id: &TaskID) -> Result<(), AgentOSError> {
         let mut tasks = self.tasks.write().await;
@@ -263,10 +658,11 @@ impl TaskScheduler {
             Some(task) => task,
             None => return Err(AgentOSError::TaskNotFound(*task_id)),
         };
-        if matches!(
-            task.state,
-            TaskState::Complete | TaskState::Failed | TaskState::Cancelled
-        ) {
+        if !matches!(task.state, TaskState::Waiting | TaskState::Suspended) {
+            tracing::debug!(
+                state = ?task.state,
+                "requeue skipped: task is not parked (Waiting/Suspended)"
+            );
             return Ok(());
         }
         task.state = TaskState::Queued;
@@ -336,15 +732,26 @@ impl TaskScheduler {
 
     /// List all tasks (for the CLI `task list` command).
     pub async fn list_tasks(&self) -> Vec<TaskSummary> {
+        // Snapshot + release before taking `tasks`: every other path locks
+        // `tasks` first, so holding `failure_reasons` across that acquire
+        // would be a lock-order inversion.
+        let reasons = self.failure_reasons.read().await.clone();
         self.tasks
             .read()
             .await
             .values()
             .map(|t| TaskSummary {
+                error: if t.state == TaskState::Failed {
+                    reasons.get(&t.id).cloned()
+                } else {
+                    None
+                },
                 id: t.id,
                 state: t.state,
                 agent_id: t.agent_id,
-                prompt_preview: t.original_prompt.chars().take(100).collect(),
+                // Long enough that the panel can skip the bracketed context
+                // headers event-trigger prompts start with and still find a title.
+                prompt_preview: t.original_prompt.chars().take(400).collect(),
                 created_at: t.created_at,
                 tool_calls: 0,
                 tokens_used: 0,
@@ -353,6 +760,24 @@ impl TaskScheduler {
                 parent_task_id: t.parent_task_id,
                 spawn_depth: t.spawn_depth,
             })
+            .collect()
+    }
+
+    /// IDs of every task that is not in a terminal state. Used by the checkpoint
+    /// prune sweep to keep the recovery point of tasks that are still alive
+    /// (a long-parked task must stay resumable).
+    pub async fn non_terminal_task_ids(&self) -> HashSet<TaskID> {
+        self.tasks
+            .read()
+            .await
+            .values()
+            .filter(|t| {
+                !matches!(
+                    t.state,
+                    TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                )
+            })
+            .map(|t| t.id)
             .collect()
     }
 
@@ -383,13 +808,27 @@ impl TaskScheduler {
     }
 
     /// Check for timed-out tasks and mark them as Failed.
+    ///
+    /// Covers parked tasks (`Waiting` / `Suspended`) as well as `Running` ones:
+    /// `requeue` only fires on an explicit answer/resume, so an unanswered
+    /// `ask-user` or a never-resumed budget pause would otherwise sit forever
+    /// with its context, checkout and work item held. The bound is the task's own
+    /// `timeout` (the same effective value used for `Running`, so it already
+    /// honours `autonomous_mode.task_timeout_secs` and the preemption
+    /// multiplier): a task parked past its entire time budget is dead by its own
+    /// configured definition, and the escalation manager already auto-denies
+    /// unanswered prompts after 5 minutes, so anything still parked at `timeout`
+    /// is genuinely orphaned rather than merely waiting on a slow human.
     pub async fn check_timeouts(&self) -> Vec<TimedOutTask> {
         let mut timed_out = Vec::new();
         let mut changed_tasks = Vec::new();
         let mut tasks = self.tasks.write().await;
         let now = chrono::Utc::now();
         for task in tasks.values_mut() {
-            if task.state == TaskState::Running {
+            if matches!(
+                task.state,
+                TaskState::Running | TaskState::Waiting | TaskState::Suspended
+            ) {
                 let baseline = task.started_at.unwrap_or(task.created_at);
                 let elapsed = now
                     .signed_duration_since(baseline)
@@ -414,6 +853,7 @@ impl TaskScheduler {
                         agent_id: task.agent_id,
                         timeout_seconds: effective_timeout.as_secs(),
                         elapsed_seconds: elapsed.as_secs(),
+                        chain_depth: task.event_chain_depth(),
                     });
                 }
             }
@@ -422,6 +862,18 @@ impl TaskScheduler {
 
         for task in changed_tasks {
             self.persist_task_snapshot(task).await;
+        }
+        // The run loop also records this, but only for tasks it observes; a
+        // reason written here survives even if that path is skipped.
+        for t in &timed_out {
+            self.set_failure_reason(
+                &t.task_id,
+                format!(
+                    "Task timed out after {}s (limit {}s)",
+                    t.elapsed_seconds, t.timeout_seconds
+                ),
+            )
+            .await;
         }
 
         timed_out
@@ -447,6 +899,39 @@ impl TaskScheduler {
             .get(task_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Count children of `parent_id` that are not yet in a terminal state
+    /// (Queued/Running/Waiting/Suspended). Used to bound concurrent fan-out so
+    /// a single parent cannot enqueue an unbounded number of live children
+    /// (fork-bomb / queue-exhaustion protection). Sequential delegation is
+    /// unaffected — the count drops as children complete.
+    ///
+    /// Lock order: child_map guard is dropped before tasks is locked, so this
+    /// never nests the two locks.
+    pub async fn count_active_children(&self, parent_id: &TaskID) -> usize {
+        let children = {
+            let map = self.child_map.read().await;
+            match map.get(parent_id) {
+                Some(v) if !v.is_empty() => v.clone(),
+                _ => return 0,
+            }
+        };
+        let tasks = self.tasks.read().await;
+        children
+            .iter()
+            .filter(|id| {
+                tasks
+                    .get(id)
+                    .map(|t| {
+                        !matches!(
+                            t.state,
+                            TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .count()
     }
 
     /// Return a brief text summary of a completed task's original prompt (first 200 chars).
@@ -540,6 +1025,8 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
+            chain_depth: 0,
         }
     }
 
@@ -716,6 +1203,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_requeue_noops_for_running_task() {
+        // Regression: a still-Running task (e.g. a non-blocking delegating parent
+        // whose child just completed) must NOT be re-enqueued — doing so would
+        // spawn a second concurrent execution loop over the same task.
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "running parent");
+        task.state = TaskState::Running;
+        let task_id = task.id;
+        scheduler.enqueue(task).await;
+        // Drain the enqueue so the queue is empty before requeue.
+        let _ = scheduler.dequeue().await;
+
+        scheduler.requeue(&task_id).await.unwrap();
+
+        // Requeue must not have pushed anything back onto the queue.
+        assert!(
+            scheduler.dequeue().await.is_none(),
+            "Running task must not be re-enqueued"
+        );
+        let current = scheduler.get_task(&task_id).await.unwrap();
+        assert_eq!(current.state, TaskState::Running);
+    }
+
+    #[tokio::test]
     async fn test_check_timeouts_uses_started_at() {
         let scheduler = TaskScheduler::new(10);
         let mut task = make_task(5, "started recently");
@@ -760,6 +1271,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_timeouts_reaps_parked_tasks() {
+        let scheduler = TaskScheduler::new(10);
+        // Parked on an unanswered ask-user for far longer than its budget.
+        let mut waiting = make_task(5, "waiting on an answer that never came");
+        waiting.state = TaskState::Waiting;
+        waiting.timeout = Duration::from_secs(1);
+        waiting.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        let waiting_id = waiting.id;
+
+        // Budget-paused and never resumed.
+        let mut suspended = make_task(5, "suspended and never resumed");
+        suspended.state = TaskState::Suspended;
+        suspended.timeout = Duration::from_secs(1);
+        suspended.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        let suspended_id = suspended.id;
+
+        // Parked, but still inside its budget — must survive.
+        let mut fresh = make_task(5, "just parked");
+        fresh.state = TaskState::Waiting;
+        fresh.timeout = Duration::from_secs(600);
+        fresh.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+        let fresh_id = fresh.id;
+
+        scheduler.enqueue(waiting).await;
+        scheduler.enqueue(suspended).await;
+        scheduler.enqueue(fresh).await;
+
+        let timed_out = scheduler.check_timeouts().await;
+        let reaped: Vec<TaskID> = timed_out.iter().map(|t| t.task_id).collect();
+        assert_eq!(
+            reaped.len(),
+            2,
+            "both over-budget parked tasks must be reaped"
+        );
+        assert!(reaped.contains(&waiting_id));
+        assert!(reaped.contains(&suspended_id));
+
+        // Reaped tasks go terminal via the normal timeout path.
+        assert_eq!(
+            scheduler.get_task(&waiting_id).await.unwrap().state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            scheduler.get_task(&suspended_id).await.unwrap().state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            scheduler.get_task(&fresh_id).await.unwrap().state,
+            TaskState::Waiting,
+            "a task parked inside its budget must not be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_terminal_task_ids_excludes_terminal() {
+        let scheduler = TaskScheduler::new(10);
+        let mut live = make_task(5, "parked");
+        live.state = TaskState::Waiting;
+        let live_id = live.id;
+        let mut done = make_task(5, "finished");
+        done.state = TaskState::Complete;
+        let done_id = done.id;
+
+        scheduler.register_external(live).await;
+        scheduler.register_external(done).await;
+
+        let ids = scheduler.non_terminal_task_ids().await;
+        assert!(ids.contains(&live_id));
+        assert!(!ids.contains(&done_id));
+    }
+
+    #[tokio::test]
     async fn test_mark_started_sets_timestamp() {
         let scheduler = TaskScheduler::new(10);
         let task = make_task(5, "to be started");
@@ -773,6 +1356,110 @@ mod tests {
 
         let after = scheduler.get_task(&task_id).await.unwrap();
         assert!(after.started_at.is_some());
+    }
+
+    /// The failure-reason round-trip: recorded while Failed, reported by both
+    /// `failure_reason` and `list_tasks`, NOT reported once the task reaches a
+    /// non-failed state (a retried-then-succeeded task must not keep showing a
+    /// stale reason), and still there after a restart.
+    #[tokio::test]
+    async fn test_failure_reason_is_scoped_to_failed_state_and_survives_restart() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("kernel_state.db");
+        let store = Arc::new(
+            KernelStateStore::open(db_path)
+                .await
+                .expect("state store should open"),
+        );
+
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let task = make_task(5, "will fail");
+        let task_id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler
+            .update_state(&task_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&task_id, "LLM error: connection refused".to_string())
+            .await;
+
+        assert_eq!(
+            scheduler.failure_reason(&task_id).await.as_deref(),
+            Some("LLM error: connection refused")
+        );
+        let listed = scheduler.list_tasks().await;
+        let row = listed.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(row.error.as_deref(), Some("LLM error: connection refused"));
+
+        // Retried and succeeded: the reason must stop being reported.
+        scheduler
+            .update_state(&task_id, TaskState::Complete)
+            .await
+            .unwrap();
+        assert_eq!(
+            scheduler.failure_reason(&task_id).await,
+            None,
+            "a task that later completed must not report its old failure reason"
+        );
+        let listed = scheduler.list_tasks().await;
+        let row = listed.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(row.error, None);
+
+        // A task that stays failed keeps its reason across a restart.
+        let failed = make_task(5, "stays failed");
+        let failed_id = failed.id;
+        scheduler.enqueue(failed).await;
+        scheduler
+            .update_state(&failed_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&failed_id, "boom".to_string())
+            .await;
+
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let loaded = restored
+            .restore_terminal_history(100)
+            .await
+            .expect("history restore should succeed");
+        assert!(loaded >= 2, "both terminal tasks should be restored");
+        assert_eq!(
+            restored.failure_reason(&failed_id).await.as_deref(),
+            Some("boom")
+        );
+        assert_eq!(
+            restored.failure_reason(&task_id).await,
+            None,
+            "the completed task's stale reason must not come back from the DB"
+        );
+    }
+
+    /// `prune_failure_reasons` drops reasons for tasks the scheduler no longer
+    /// tracks, and keeps the ones it does.
+    #[tokio::test]
+    async fn test_prune_failure_reasons_drops_only_untracked() {
+        let scheduler = TaskScheduler::new(10);
+        let task = make_task(5, "tracked");
+        let tracked_id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler
+            .update_state(&tracked_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&tracked_id, "kept".to_string())
+            .await;
+        // A reason for a task the scheduler never had (e.g. already purged).
+        scheduler
+            .set_failure_reason(&TaskID::new(), "orphan".to_string())
+            .await;
+
+        assert_eq!(scheduler.prune_failure_reasons().await, 1);
+        assert_eq!(
+            scheduler.failure_reason(&tracked_id).await.as_deref(),
+            Some("kept")
+        );
     }
 
     #[tokio::test]
@@ -810,11 +1497,12 @@ mod tests {
 
         // Simulate restart by creating a fresh scheduler on the same DB.
         let restored = TaskScheduler::with_state_store(10, Some(store));
-        let restored_count = restored
-            .restore_from_store()
+        let (restored_count, stale) = restored
+            .restore_from_store(24, &HashSet::new())
             .await
             .expect("restore should succeed");
         assert_eq!(restored_count, 3);
+        assert_eq!(stale, 0, "fresh tasks are not stale");
 
         let restored_running = restored.get_task(&running_id).await.unwrap();
         assert_eq!(
@@ -838,5 +1526,317 @@ mod tests {
         assert!(dequeued.contains(&running_id));
         assert_ne!(first.id, waiting_id);
         assert_ne!(second.id, waiting_id);
+    }
+
+    /// Same agent for every task — the queue cap is per-agent, and `make_task`
+    /// mints a fresh `AgentID` each call.
+    fn make_task_for(agent_id: AgentID, priority: u8, prompt: &str) -> AgentTask {
+        let mut task = make_task(priority, prompt);
+        task.agent_id = agent_id;
+        task
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_rejects_past_agent_cap() {
+        let scheduler = TaskScheduler::with_limits(10, None, 3);
+        let agent = AgentID::new();
+
+        let ids: Vec<TaskID> = futures::future::join_all(
+            (0..5).map(|i| scheduler.enqueue(make_task_for(agent, 5, &format!("t{i}")))),
+        )
+        .await;
+
+        assert_eq!(scheduler.queued_count_for_agent(&agent).await, 3);
+        let failed = futures::future::join_all(ids.iter().map(|id| scheduler.get_task(id)))
+            .await
+            .into_iter()
+            .flatten()
+            .filter(|t| t.state == TaskState::Failed)
+            .count();
+        assert_eq!(failed, 2, "over-cap tasks are recorded as Failed");
+
+        // Only the 3 accepted tasks are actually runnable.
+        assert!(scheduler.dequeue().await.is_some());
+        assert!(scheduler.dequeue().await.is_some());
+        assert!(scheduler.dequeue().await.is_some());
+        assert!(scheduler.dequeue().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_cap_is_per_agent() {
+        let scheduler = TaskScheduler::with_limits(10, None, 2);
+        let a = AgentID::new();
+        let b = AgentID::new();
+
+        for i in 0..3 {
+            scheduler
+                .enqueue(make_task_for(a, 5, &format!("a{i}")))
+                .await;
+            scheduler
+                .enqueue(make_task_for(b, 5, &format!("b{i}")))
+                .await;
+        }
+
+        assert_eq!(scheduler.queued_count_for_agent(&a).await, 2);
+        assert_eq!(scheduler.queued_count_for_agent(&b).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_cap_zero_disables() {
+        let scheduler = TaskScheduler::with_limits(10, None, 0);
+        let agent = AgentID::new();
+        for i in 0..50 {
+            scheduler
+                .enqueue(make_task_for(agent, 5, &format!("t{i}")))
+                .await;
+        }
+        assert_eq!(scheduler.queued_count_for_agent(&agent).await, 50);
+    }
+
+    #[tokio::test]
+    async fn test_purge_agent_tasks_drops_queued_only() {
+        let scheduler = TaskScheduler::new(10);
+        let a = AgentID::new();
+        let b = AgentID::new();
+
+        for i in 0..3 {
+            scheduler
+                .enqueue(make_task_for(a, 5, &format!("a{i}")))
+                .await;
+        }
+        let running = make_task_for(a, 5, "a-running");
+        let running_id = running.id;
+        scheduler.enqueue(running).await;
+        scheduler
+            .update_state(&running_id, TaskState::Running)
+            .await
+            .unwrap();
+
+        for i in 0..2 {
+            scheduler
+                .enqueue(make_task_for(b, 5, &format!("b{i}")))
+                .await;
+        }
+
+        let purged = scheduler.purge_agent_tasks(&a, &[]).await;
+        assert_eq!(purged, 3, "only agent a's queued tasks are purged");
+        assert_eq!(scheduler.queued_count_for_agent(&a).await, 0);
+        assert_eq!(scheduler.queued_count_for_agent(&b).await, 2);
+        assert!(
+            scheduler.get_task(&running_id).await.is_some(),
+            "running tasks survive a purge — cancel those individually"
+        );
+
+        // The purged entries must not resurface through the heap.
+        let remaining = [
+            scheduler.dequeue().await,
+            scheduler.dequeue().await,
+            scheduler.dequeue().await,
+        ];
+        let popped: Vec<AgentID> = remaining.iter().flatten().map(|t| t.agent_id).collect();
+        assert_eq!(popped, vec![b, b], "only agent b's work remains queued");
+    }
+
+    #[tokio::test]
+    async fn test_purge_wakes_tasks_waiting_on_purged_dependencies() {
+        let scheduler = TaskScheduler::new(10);
+        let worker = AgentID::new();
+        let orchestrator = AgentID::new();
+
+        // Parent delegates to a child, then parks waiting on it.
+        let parent = make_task_for(orchestrator, 5, "parent");
+        let parent_id = parent.id;
+        scheduler.enqueue(parent).await;
+
+        let child = make_task_for(worker, 5, "child");
+        let child_id = child.id;
+        scheduler.enqueue(child).await;
+
+        scheduler.add_dependency(parent_id, child_id).await;
+        scheduler
+            .update_state(&parent_id, TaskState::Waiting)
+            .await
+            .unwrap();
+
+        // Operator drains the worker's backlog — the documented recovery.
+        assert_eq!(scheduler.purge_agent_tasks(&worker, &[]).await, 1);
+
+        // The child is gone, so `complete_dependency` will never fire for it.
+        // Without an explicit wake the parent stays parked until the
+        // `check_timeouts` reaper fails it a whole timeout budget later.
+        let parent_now = scheduler.get_task(&parent_id).await.unwrap();
+        assert_eq!(
+            parent_now.state,
+            TaskState::Queued,
+            "a task waiting on a purged dependency must be woken, not stranded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reenqueue_bypasses_the_cap() {
+        let scheduler = TaskScheduler::with_limits(10, None, 2);
+        let agent = AgentID::new();
+
+        let resumed = make_task_for(agent, 5, "resumed from checkpoint");
+        let resumed_id = resumed.id;
+        scheduler.enqueue(resumed.clone()).await;
+        scheduler.enqueue(make_task_for(agent, 5, "other")).await;
+        assert_eq!(scheduler.queued_count_for_agent(&agent).await, 2);
+
+        // Agent is now at cap. Re-enqueueing the *same* task (what
+        // `cmd_resume_task` does) must not flip it to Failed — it is already
+        // counted, and failing it here would burn a poison-pill boot-resume.
+        scheduler.enqueue(resumed).await;
+        let after = scheduler.get_task(&resumed_id).await.unwrap();
+        assert_eq!(
+            after.state,
+            TaskState::Queued,
+            "a re-enqueue must bypass the cap it is already counted against"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restore_exempts_checkpointed_tasks_from_cutoff() {
+        let dir = tempdir().expect("temp dir");
+        let store = Arc::new(
+            KernelStateStore::open(dir.path().join("kernel_state.db"))
+                .await
+                .expect("state store should open"),
+        );
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+
+        let mut old_with_checkpoint = make_task(5, "crashed mid-flight");
+        old_with_checkpoint.created_at = chrono::Utc::now() - chrono::Duration::hours(48);
+        let resumable_id = old_with_checkpoint.id;
+        scheduler.enqueue(old_with_checkpoint).await;
+
+        let mut old_storm_task = make_task(5, "storm backlog");
+        old_storm_task.created_at = chrono::Utc::now() - chrono::Duration::hours(48);
+        let storm_id = old_storm_task.id;
+        scheduler.enqueue(old_storm_task).await;
+
+        let resumable: HashSet<TaskID> = [resumable_id].into_iter().collect();
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let (count, dropped) = restored.restore_from_store(24, &resumable).await.unwrap();
+
+        assert_eq!((count, dropped), (1, 1));
+        assert!(
+            restored.get_task(&resumable_id).await.is_some(),
+            "a checkpointed task must survive the cutoff — recover_checkpointed_tasks \
+             looks it up in the scheduler map, so cancelling it drops the resume"
+        );
+        assert!(
+            restored.get_task(&storm_id).await.is_none(),
+            "an equally old task with no checkpoint is still culled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_purge_clears_persisted_rows() {
+        let dir = tempdir().expect("temp dir");
+        let store = Arc::new(
+            KernelStateStore::open(dir.path().join("kernel_state.db"))
+                .await
+                .expect("state store should open"),
+        );
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let agent = AgentID::new();
+        for i in 0..4 {
+            scheduler
+                .enqueue(make_task_for(agent, 5, &format!("t{i}")))
+                .await;
+        }
+
+        assert_eq!(scheduler.purge_agent_tasks(&agent, &[]).await, 4);
+
+        // A fresh kernel must not replay them.
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let (count, _) = restored
+            .restore_from_store(24, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "purged rows are gone from persistence too");
+    }
+
+    #[tokio::test]
+    async fn test_restore_cancels_stale_queued_tasks() {
+        let dir = tempdir().expect("temp dir");
+        let store = Arc::new(
+            KernelStateStore::open(dir.path().join("kernel_state.db"))
+                .await
+                .expect("state store should open"),
+        );
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+
+        let mut stale = make_task(5, "stale");
+        stale.created_at = chrono::Utc::now() - chrono::Duration::hours(48);
+        let stale_id = stale.id;
+        scheduler.enqueue(stale).await;
+
+        let fresh = make_task(5, "fresh");
+        let fresh_id = fresh.id;
+        scheduler.enqueue(fresh).await;
+
+        let restored = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let (count, dropped) = restored
+            .restore_from_store(24, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "only the fresh task is replayed");
+        assert_eq!(dropped, 1);
+        assert!(restored.get_task(&fresh_id).await.is_some());
+        assert!(restored.get_task(&stale_id).await.is_none());
+
+        // The cancellation is persisted, so the next boot sees nothing at all.
+        let again = TaskScheduler::with_state_store(10, Some(store));
+        let (count2, dropped2) = again.restore_from_store(24, &HashSet::new()).await.unwrap();
+        assert_eq!((count2, dropped2), (1, 0), "stale row is not reconsidered");
+    }
+
+    #[tokio::test]
+    async fn test_restore_cutoff_zero_replays_everything() {
+        let dir = tempdir().expect("temp dir");
+        let store = Arc::new(
+            KernelStateStore::open(dir.path().join("kernel_state.db"))
+                .await
+                .expect("state store should open"),
+        );
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let mut ancient = make_task(5, "ancient");
+        ancient.created_at = chrono::Utc::now() - chrono::Duration::days(30);
+        scheduler.enqueue(ancient).await;
+
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let (count, dropped) = restored
+            .restore_from_store(0, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!((count, dropped), (1, 0), "cutoff 0 disables the guard");
+    }
+
+    #[tokio::test]
+    async fn test_dequeue_skips_paused_agent() {
+        let scheduler = TaskScheduler::new(10);
+        let paused = AgentID::new();
+        let active = AgentID::new();
+
+        // Higher priority for the paused agent, so it would win without the filter.
+        let paused_task = make_task_for(paused, 9, "paused work");
+        let paused_id = paused_task.id;
+        scheduler.enqueue(paused_task).await;
+        scheduler
+            .enqueue(make_task_for(active, 1, "active work"))
+            .await;
+
+        let got = scheduler
+            .dequeue_runnable(|id| *id != paused)
+            .await
+            .expect("active agent's task should dequeue");
+        assert_eq!(got.agent_id, active);
+
+        // The paused agent's task is held, not lost.
+        assert_eq!(scheduler.queued_count_for_agent(&paused).await, 1);
+        let after_resume = scheduler.dequeue().await.expect("task survives the skip");
+        assert_eq!(after_resume.id, paused_id);
     }
 }

@@ -1,4 +1,5 @@
-tags = ["read", "meta"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name = "container-list"
@@ -17,6 +18,14 @@ outputs = ["containers"]
 [intent_schema]
 input = "ContainerListIntent"
 output = "ContainerListResult"
+
+[payload_schema]
+type = "object"
+additionalProperties = false
+
+[payload_schema.properties.agent_name]
+type        = "string"
+description = "Optional agent name filter; omit to list containers owned by the calling agent."
 
 [sandbox]
 network = false

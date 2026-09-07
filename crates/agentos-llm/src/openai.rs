@@ -28,7 +28,8 @@ pub struct OpenAICore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same `base_url`.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
@@ -57,10 +58,14 @@ impl OpenAICore {
                 input_per_1k: 0.0,
                 output_per_1k: 0.0,
             });
+        // Hoisted: `base_url` is moved into the struct literal below.
+        let concurrency = crate::retry::concurrency_limiter_for(&base_url);
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    crate::traits::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             api_key,
@@ -81,7 +86,7 @@ impl OpenAICore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            concurrency,
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -178,16 +183,17 @@ impl OpenAICore {
                                 }))
                             })
                             .collect();
-                        let content = if entry.text().is_empty() {
-                            Value::Null
-                        } else {
-                            Value::String(entry.text().clone())
-                        };
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": openai_tool_calls,
-                        }));
+                        // Some OpenAI-compat providers (Mistral, Azure, Together) reject
+                        // `"content": null` alongside `tool_calls`. Omit the content key
+                        // entirely when the assistant turn has no text — matches the
+                        // shape OpenAI's own spec recommends.
+                        let mut msg = serde_json::Map::new();
+                        msg.insert("role".into(), Value::String("assistant".into()));
+                        if !entry.text().is_empty() {
+                            msg.insert("content".into(), Value::String(entry.text().clone()));
+                        }
+                        msg.insert("tool_calls".into(), Value::Array(openai_tool_calls));
+                        messages.push(Value::Object(msg));
                     } else {
                         messages.push(json!({
                             "role": "assistant",
@@ -223,9 +229,20 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
-            let parameters =
-                tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref());
+            let mut parameters = tool_helpers::normalize_tool_input_schema_with_examples(
+                manifest.payload_schema.as_ref(),
+                &manifest.examples,
+            );
             let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
+            // OpenAI strict mode *requires* `additionalProperties: false` on
+            // every object. Only close the schema when we actually emit
+            // `strict: true` — non-strict OpenAI (and every other
+            // OpenAI-compatible host, via the shared normalizer) gets an open
+            // schema, since closed empty objects trip some guided-decoding
+            // backends. See the note in `normalize_tool_input_schema`.
+            if strict {
+                tool_helpers::add_object_additional_properties_false(&mut parameters);
+            }
 
             openai_tools.push(json!({
                 "type": "function",
@@ -455,6 +472,10 @@ impl OpenAICore {
 
 #[async_trait]
 impl LLMCore for OpenAICore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     fn supports_images(&self) -> bool {
         if !self.capabilities.supports_images {
             return false;
@@ -545,7 +566,9 @@ impl LLMCore for OpenAICore {
             body["seed"] = json!(seed);
         }
 
-        let res = crate::retry::send_with_retry(
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (res, _permit) = crate::retry::send_with_retry(
             "openai",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -662,32 +685,39 @@ impl LLMCore for OpenAICore {
             body["tool_choice"] = json!("auto");
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("OpenAI API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
+        let res = crate::retry::send_with_retry(
+            "openai",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", self.api_key.expose_secret()),
+                    )
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let (res, _permit) = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // State for accumulating the streamed response.
         let mut full_text = String::new();
@@ -701,6 +731,11 @@ impl LLMCore for OpenAICore {
         let mut cached_tokens: u64 = 0;
         let mut stop_reason = StopReason::EndTurn;
         let mut line_buffer = String::new();
+        // Diagnostics for a stream that yields nothing usable (see the
+        // empty-stream guard after the loop).
+        let mut non_sse_lines: u32 = 0;
+        let mut unparsed_lines: u32 = 0;
+        let mut first_offending_line = String::new();
 
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
 
@@ -730,17 +765,46 @@ impl LLMCore for OpenAICore {
                 if line.is_empty() || line.starts_with(':') {
                     continue;
                 }
-                let data = if let Some(d) = line.strip_prefix("data: ") {
+                // The SSE spec makes the space after `data:` optional; some
+                // OpenAI-compatible servers omit it.
+                let data = if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     d.trim()
                 } else {
+                    non_sse_lines += 1;
+                    if first_offending_line.is_empty() {
+                        first_offending_line = line.chars().take(300).collect();
+                    }
                     continue;
                 };
                 if data == "[DONE]" {
                     break 'outer;
                 }
                 let Ok(chunk_json) = serde_json::from_str::<Value>(data) else {
+                    unparsed_lines += 1;
+                    if first_offending_line.is_empty() {
+                        first_offending_line = data.chars().take(300).collect();
+                    }
                     continue;
                 };
+
+                // Mid-stream provider failure reported as an `error` payload on
+                // a 200 response. Without this the stream just ends and the
+                // caller gets a blank answer.
+                if let Some(err) = chunk_json.get("error").filter(|e| !e.is_null()) {
+                    let reason = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| err.to_string());
+                    let _ = tx.send(InferenceEvent::Error(reason.clone())).await;
+                    return Err(AgentOSError::LLMError {
+                        provider: "openai".to_string(),
+                        reason,
+                    });
+                }
 
                 // Extract finish_reason if present.
                 if let Some(reason) = chunk_json["choices"][0]["finish_reason"].as_str() {
@@ -877,6 +941,29 @@ impl LLMCore for OpenAICore {
             full_text = reasoning_text;
         }
 
+        // A 200 whose stream carried no text, no tool call and no usage is not
+        // a completion — it is a truncated or silently rejected request.
+        if full_text.trim().is_empty() && tool_calls.is_empty() && usage.total_tokens == 0 {
+            let reason = format!(
+                "provider stream ended with no content (stop_reason={:?}, non_sse_lines={}, \
+                 unparsed_lines={}, first_offending_line={})",
+                stop_reason,
+                non_sse_lines,
+                unparsed_lines,
+                if first_offending_line.is_empty() {
+                    "<none>"
+                } else {
+                    first_offending_line.as_str()
+                }
+            );
+            tracing::warn!(model = %self.model, %reason, "OpenAI stream produced no content");
+            let _ = tx.send(InferenceEvent::Error(reason.clone())).await;
+            return Err(AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason,
+            });
+        }
+
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let cost = calculate_inference_cost(&usage, &self.pricing);
 
@@ -974,10 +1061,12 @@ mod tests {
         name: &str,
         description: &str,
         permissions: Vec<&str>,
-        input_schema: Option<Value>,
+        payload_schema: Option<Value>,
     ) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 description: description.to_string(),
@@ -998,7 +1087,8 @@ mod tests {
                 input: "Input".to_string(),
                 output: "Output".to_string(),
             },
-            input_schema,
+            payload_schema,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -1513,5 +1603,71 @@ mod tests {
             .parse_response_json(&response, &HashMap::new(), 100)
             .unwrap();
         assert_eq!(result.text, "visible answer");
+    }
+
+    /// Golden-body assertion: OpenAI Chat Completions API requires each entry in
+    /// `tools[]` to have shape `{"type": "function", "function": {"name", "description", "parameters"}}`.
+    /// The `parameters` field carries the JSON Schema (mirrors Anthropic's
+    /// `input_schema` — same role, different key).
+    #[test]
+    fn test_build_openai_tools_payload_uses_parameters_key() {
+        use agentos_types::tool::{
+            ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSchema,
+        };
+        let manifest = ToolManifest {
+            manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
+                name: "file-reader".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Read a file".to_string(),
+                author: "core".to_string(),
+                checksum: None,
+                author_pubkey: None,
+                signature: None,
+                trust_tier: TrustTier::Core,
+                tags: None,
+                capability_tags: vec![],
+                group: String::new(),
+            },
+            capabilities_required: ToolCapabilities {
+                permissions: vec!["fs.user_data:r".to_string()],
+            },
+            capabilities_provided: ToolOutputs { outputs: vec![] },
+            intent_schema: ToolSchema {
+                input: "Input".to_string(),
+                output: "Output".to_string(),
+            },
+            payload_schema: Some(
+                json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+            examples: vec![],
+            sandbox: ToolSandbox {
+                network: false,
+                fs_write: false,
+                gpu: false,
+                max_memory_mb: 64,
+                max_cpu_ms: 1000,
+                syscalls: vec![],
+                weight: None,
+            },
+            executor: ToolExecutor::default(),
+            fallbacks: vec![],
+            risk_class: Default::default(),
+            usage_hints: None,
+            tags: vec![],
+        };
+
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let (tools, _) = adapter.build_openai_tools_payload(&[manifest]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "file-reader");
+        assert!(
+            tools[0]["function"].get("parameters").is_some(),
+            "OpenAI tool def must use `parameters` key for the JSON Schema; got: {}",
+            tools[0]
+        );
+        assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
     }
 }

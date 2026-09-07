@@ -156,7 +156,7 @@ Environment variables take precedence over values in `config/default.toml` or `c
 
 ## LLMCore Trait
 
-All five adapters implement the `LLMCore` trait defined in `crates/agentos-llm/src/traits.rs`. This is the interface the kernel uses to run inference. You do not need to implement it to use AgentOS, but understanding the contract helps when reading logs or debugging.
+All adapters implement the `LLMCore` trait defined in `crates/agentos-llm/src/traits.rs`. This is the interface the kernel uses to run inference. You do not need to implement it to use AgentOS, but understanding the contract helps when reading logs or debugging.
 
 | Method | Purpose |
 |---|---|
@@ -320,8 +320,8 @@ agentos agent connect --provider xai --model grok-3 --name grok-agent
 **Listing all available providers:**
 
 ```bash
-agentos provider list        # shows all adapters + catalog entries
-agentos provider show groq   # base URL, default model, env var
+agentos provider list         # shows all adapters + catalog entries
+agentos provider probe groq   # probe the endpoint and refresh its model list
 ```
 
 **Adding a custom provider to the catalog:**

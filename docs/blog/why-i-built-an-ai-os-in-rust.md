@@ -95,7 +95,7 @@ And it deploys as a single binary or a Docker container in two commands.
 ## Get Started
 
 ```bash
-git clone https://github.com/agentos/agentos.git
+git clone https://github.com/AjasMohammed/Agos.git
 cd agentos
 docker compose up -d
 open http://localhost:8080
@@ -107,4 +107,4 @@ I'd love to hear what you build with it. The project is Apache 2.0 licensed.
 
 ---
 
-*AgentOS is an open-source AI agent runtime written in Rust. GitHub: [agentos/agentos](https://github.com/agentos/agentos). If you work in a security-sensitive environment and need production-grade agent infrastructure, reach out.*
+*AgentOS is an open-source AI agent runtime written in Rust. GitHub: [AjasMohammed/Agos](https://github.com/AjasMohammed/Agos). If you work in a security-sensitive environment and need production-grade agent infrastructure, reach out.*

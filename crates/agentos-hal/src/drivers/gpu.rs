@@ -20,7 +20,7 @@ impl GpuDriver {
         Self
     }
 
-    fn list_gpus(&self) -> Vec<Value> {
+    fn list_gpus() -> Vec<Value> {
         let mut devices = Vec::new();
 
         // Detect via /sys/class/drm/card*/
@@ -117,7 +117,10 @@ impl HalDriver for GpuDriver {
 
         match action {
             "list" => {
-                let devices = self.list_gpus();
+                // sysfs reads are blocking I/O — keep them off the runtime.
+                let devices = tokio::task::spawn_blocking(Self::list_gpus)
+                    .await
+                    .map_err(|e| AgentOSError::HalError(format!("gpu list task panicked: {e}")))?;
                 Ok(json!({ "devices": devices }))
             }
             other => Err(AgentOSError::HalError(format!(

@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "list-once-jobs"
@@ -6,8 +7,8 @@ version     = "1.0.0"
 description = "List all pending once-jobs (one-shot scheduled tasks)."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "task"
 group       = "scheduling"
-risk_class  = "readonly_scoped"
 
 [capabilities_required]
 permissions = ["schedule.job:r"]
@@ -19,7 +20,7 @@ outputs = ["jobs", "count"]
 input  = "ListOnceJobsIntent"
 output = "ListOnceJobsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

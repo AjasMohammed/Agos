@@ -36,6 +36,8 @@ fn make_keypair() -> (ed25519_dalek::SigningKey, String) {
 fn make_blocked_manifest() -> ToolManifest {
     ToolManifest {
         manifest: ToolInfo {
+            category: None,
+            search_hints: vec![],
             name: "blocked-tool".to_string(),
             version: "0.1.0".to_string(),
             description: "A blocked tool for testing".to_string(),
@@ -56,7 +58,8 @@ fn make_blocked_manifest() -> ToolManifest {
             input: "None".to_string(),
             output: "None".to_string(),
         },
-        input_schema: None,
+        payload_schema: None,
+        examples: vec![],
         sandbox: ToolSandbox {
             network: false,
             fs_write: false,
@@ -77,6 +80,8 @@ fn make_blocked_manifest() -> ToolManifest {
 fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolManifest {
     ToolManifest {
         manifest: ToolInfo {
+            category: None,
+            search_hints: vec![],
             name: "community-tool".to_string(),
             version: "0.1.0".to_string(),
             description: "A community tool for testing".to_string(),
@@ -97,7 +102,8 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
             input: "None".to_string(),
             output: "None".to_string(),
         },
-        input_schema: None,
+        payload_schema: None,
+        examples: vec![],
         sandbox: ToolSandbox {
             network: false,
             fs_write: false,

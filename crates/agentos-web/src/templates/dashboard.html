@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="dashboard-shell">
+{% if pending_escalations and pending_escalations > 0 %}
+<aside class="attention-banner" role="alert" aria-live="polite">
+    <span class="attention-banner-icon" aria-hidden="true">!</span>
+    <div class="attention-banner-body">
+        <strong>{{ pending_escalations }} action{% if pending_escalations != 1 %}s{% endif %} need your approval</strong>
+        <span class="muted">Agents are blocked waiting on a decision.</span>
+    </div>
+    <a href="/escalations" role="button" class="attention-banner-cta">Review now</a>
+</aside>
+{% endif %}
 <section class="dashboard-hero" aria-labelledby="dashboard-title">
     <div>
         <h1 id="dashboard-title">Dashboard</h1>

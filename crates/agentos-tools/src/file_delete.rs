@@ -41,11 +41,14 @@ impl AgentTool for FileDelete {
 
         tracing::debug!(path = path_str, "file-delete: starting");
 
-        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
+        // SECURITY: file-delete writes — resolve against the *writable* workspace list.
         let resolved = crate::traits::resolve_tool_path(
             path_str,
-            &context.data_dir,
-            &context.workspace_paths,
+            &agent_root,
+            &context.workspace_paths_writable,
         )?;
 
         // canonicalize verifies the file actually exists and resolves symlinks.
@@ -56,9 +59,8 @@ impl AgentTool for FileDelete {
                 reason: format!("Path not found: {} ({})", path_str, e),
             })?;
 
-        let canonical_data_dir =
-            context
-                .data_dir
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-delete".into(),
@@ -66,7 +68,7 @@ impl AgentTool for FileDelete {
                 })?;
 
         let in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| canonical.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -75,7 +77,7 @@ impl AgentTool for FileDelete {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical))
             .unwrap_or(false);
-        if !canonical.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
+        if !canonical.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-delete: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),

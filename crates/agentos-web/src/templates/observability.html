@@ -199,7 +199,7 @@
             <td>{{ e.timestamp }}</td>
             <td>{{ e.event_type }}</td>
             <td>{{ e.severity }}</td>
-            <td><code>{{ e.details|pretty_json }}</code></td>
+            <td class="details-cell">{{ e.details|structured_data_html }}</td>
         </tr>
         {% endfor %}
         </tbody>

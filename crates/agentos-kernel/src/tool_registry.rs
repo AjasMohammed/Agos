@@ -35,6 +35,9 @@ pub struct ToolRegistry {
     crl: RevocationList,
     /// Optional channel for notifying the kernel of tool lifecycle changes.
     lifecycle_sender: Option<mpsc::Sender<ToolLifecycleEvent>>,
+    /// Monotonic counter bumped on every mutation (register/unregister/remove).
+    /// Consumers (semantic index, Tier-0 index) can detect stale state cheaply.
+    revision: u64,
 }
 
 fn schema_type_for_prompt(field_schema: &serde_json::Value) -> String {
@@ -117,6 +120,25 @@ fn compact_input_schema(schema: Option<&serde_json::Value>) -> Option<String> {
     Some(format!("{{{}}}", parts.join(", ")))
 }
 
+/// Separator variants of a tool name, in probe order (`_`→`-`, then `-`→`_`).
+///
+/// Registered names are kebab-case but LLMs routinely emit `notify_user` for a
+/// registered `notify-user`. Only the `_`/`-` separators are swapped — nothing
+/// is lowercased or stripped — so a variant can never resolve to an unrelated
+/// tool. Returns an empty vec when the name carries no separator, and never
+/// yields the input name itself. Mirrors `ToolRunner::resolve_tool_name`, which
+/// applies the same correction on the execution side.
+fn separator_variants(name: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+    if name.contains('_') {
+        variants.push(name.replace('_', "-"));
+    }
+    if name.contains('-') {
+        variants.push(name.replace('-', "_"));
+    }
+    variants
+}
+
 fn manifest_enabled_for_build(tool_name: &str) -> bool {
     match tool_name {
         "audio" => cfg!(feature = "audio"),
@@ -138,6 +160,7 @@ impl ToolRegistry {
             loaded: Vec::new(),
             crl: RevocationList::new(),
             lifecycle_sender: None,
+            revision: 0,
         }
     }
 
@@ -149,7 +172,14 @@ impl ToolRegistry {
             loaded: Vec::new(),
             crl,
             lifecycle_sender: None,
+            revision: 0,
         }
+    }
+
+    /// Monotonic counter, bumped on every mutation (register/unregister/remove).
+    /// Callers can cheaply detect stale cached state (semantic index, Tier-0 line).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Set the lifecycle notification sender. The kernel uses this to receive
@@ -240,6 +270,7 @@ impl ToolRegistry {
         };
         self.name_index.insert(name.clone(), tool_id);
         self.tools.insert(tool_id, tool);
+        self.revision += 1;
 
         if let Some(ref sender) = self.lifecycle_sender {
             if let Err(e) = sender.try_send(ToolLifecycleEvent::Installed {
@@ -260,12 +291,41 @@ impl ToolRegistry {
     pub fn unregister(&mut self, tool_id: &ToolID) {
         if let Some(tool) = self.tools.remove(tool_id) {
             self.name_index.remove(&tool.manifest.manifest.name);
+            self.revision += 1;
             tracing::debug!(tool_id = %tool_id, name = %tool.manifest.manifest.name, "Tool unregistered");
         }
     }
 
+    /// Resolve a tool by name.
+    ///
+    /// Exact match wins and is never overridden, so a registry holding both
+    /// `notify_user` and `notify-user` resolves each to its own tool. Only on
+    /// an exact miss are the `_`/`-` separator variants probed, which is where
+    /// the sole allocation happens — an exact hit stays allocation-free on this
+    /// per-dispatch hot path.
+    ///
+    /// The gate must agree with the executor: `ToolRunner::execute` already
+    /// auto-corrects `_`/`-` before running a tool, so a strict lookup here
+    /// rejected calls the runner would have happily served.
     pub fn get_by_name(&self, name: &str) -> Option<&RegisteredTool> {
-        self.name_index.get(name).and_then(|id| self.tools.get(id))
+        if let Some(tool) = self.name_index.get(name).and_then(|id| self.tools.get(id)) {
+            return Some(tool);
+        }
+        for variant in separator_variants(name) {
+            if let Some(tool) = self
+                .name_index
+                .get(variant.as_str())
+                .and_then(|id| self.tools.get(id))
+            {
+                tracing::debug!(
+                    requested = %name,
+                    resolved = %variant,
+                    "Tool name resolved via separator normalization"
+                );
+                return Some(tool);
+            }
+        }
+        None
     }
 
     pub fn get_by_id(&self, id: &ToolID) -> Option<&RegisteredTool> {
@@ -276,10 +336,15 @@ impl ToolRegistry {
         self.tools.values().collect()
     }
 
+    /// Remove a tool by name. Exact match only — deliberately asymmetric with
+    /// [`Self::get_by_name`], which accepts `_`/`-` variants: a lenient read is
+    /// a convenience, a lenient delete would let an agent remove a tool it did
+    /// not name.
     pub fn remove(&mut self, name: &str) -> Result<(), AgentOSError> {
         if let Some(id) = self.name_index.remove(name) {
             self.tools.remove(&id);
             self.loaded.retain(|lm| lm.manifest.manifest.name != name);
+            self.revision += 1;
 
             if let Some(ref sender) = self.lifecycle_sender {
                 if let Err(e) = sender.try_send(ToolLifecycleEvent::Removed {
@@ -300,11 +365,7 @@ impl ToolRegistry {
     pub fn category_counts(&self) -> std::collections::BTreeMap<String, usize> {
         let mut counts = std::collections::BTreeMap::new();
         for tool in self.tools.values() {
-            let cat = agentos_tools::agent_manual::AgentManualTool::infer_tool_category(
-                &tool.manifest.manifest.name,
-                &tool.manifest.manifest.capability_tags,
-                tool.manifest.manifest.tags.as_deref(),
-            );
+            let cat = agentos_tools::agent_manual::AgentManualTool::category_of(&tool.manifest);
             *counts.entry(cat).or_insert(0) += 1;
         }
         counts
@@ -322,6 +383,94 @@ impl ToolRegistry {
             "Tools ({total}): {counts}. Use list-tools(category=<name>|tag=<tag>|page=N) · search-tools(query=...) · describe-tool(name=...) to explore. Note: dynamic MCP tools may not appear; run `agentos mcp list` for all MCP servers.",
             total = total,
             counts = parts.join(" ")
+        )
+    }
+
+    /// Compact L0 tool catalogue with usage-ranked top-N names per category.
+    ///
+    /// `usage` maps tool-name -> decayed usage score (empty -> name-sorted). The
+    /// grouping reuses the same `infer_tool_category` logic as
+    /// [`Self::category_counts`], so the per-category counts here can never drift
+    /// from `category_counts`/`tools_for_prompt`.
+    ///
+    /// Bounded two ways: at most `max_names_per_category` names per category, and
+    /// a soft total budget of `max_tokens` (≈4 chars/token) over the names
+    /// portion — once exceeded, the remaining (alphabetically later) categories
+    /// degrade to counts-only so the line can never grow unbounded as the tool
+    /// set grows.
+    pub fn tools_for_prompt_ranked(
+        &self,
+        usage: &std::collections::HashMap<String, f64>,
+        max_names_per_category: usize,
+        max_tokens: usize,
+        permissions: &agentos_types::PermissionSet,
+    ) -> String {
+        if self.tools.is_empty() {
+            return "No tools available.".to_string();
+        }
+        let mut by_cat: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for tool in self.tools.values() {
+            // Same visibility rule as the native tool array: a tool the agent
+            // holds no permission for is not advertised, so the counts here
+            // cannot promise more than `list-tools` will show.
+            if !agentos_capability::any_permission_granted(
+                permissions,
+                &tool.manifest.capabilities_required.permissions,
+            ) {
+                continue;
+            }
+            let cat = agentos_tools::agent_manual::AgentManualTool::category_of(&tool.manifest);
+            by_cat
+                .entry(cat)
+                .or_default()
+                .push(tool.manifest.manifest.name.clone());
+        }
+        if by_cat.is_empty() {
+            // Distinguishable from the empty-registry case above: tools exist,
+            // this agent may call none of them. Says so, because the string is
+            // rendered verbatim into the system prompt.
+            return "No tools available: your permission set grants none of the registered tools. \
+                    Ask the operator for the permissions you need."
+                .to_string();
+        }
+        let total: usize = by_cat.values().map(Vec::len).sum();
+        let names_budget = max_tokens.saturating_mul(4);
+        let per_cat = max_names_per_category.max(1);
+
+        let mut parts: Vec<String> = Vec::with_capacity(by_cat.len());
+        let mut used = 0usize;
+        for (cat, mut names) in by_cat {
+            let count = names.len();
+            // Usage-ranked, with a name tie-break so the order is a deterministic
+            // total order even when a score is missing or NaN.
+            names.sort_by(|a, b| {
+                let ua = usage.get(a).copied().unwrap_or(0.0);
+                let ub = usage.get(b).copied().unwrap_or(0.0);
+                ub.partial_cmp(&ua)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(b))
+            });
+            let shown = names.len().min(per_cat);
+            let more = count.saturating_sub(shown);
+            let suffix = if more > 0 {
+                format!(" +{more}")
+            } else {
+                String::new()
+            };
+            let with_names = format!("{cat}({count}): {}{suffix}", names[..shown].join(", "));
+            // Degrade to counts-only once the names budget is spent.
+            let part = if used + with_names.len() <= names_budget {
+                used += with_names.len() + 2; // +2 ≈ "; " separator
+                with_names
+            } else {
+                format!("{cat}({count})")
+            };
+            parts.push(part);
+        }
+        format!(
+            "Tools ({total}): {}. Use list-tools(category=<name>|tag=<tag>|page=N) · search-tools(query=...) · describe-tool(name=...) to explore. Note: dynamic MCP tools may not appear; run `agentos mcp list` for all MCP servers.",
+            parts.join("; ")
         )
     }
 
@@ -355,7 +504,7 @@ impl ToolRegistry {
                 block.push(format!("Permissions: {}", perms.join(", ")));
             }
 
-            let input_line = match compact_input_schema(tool.manifest.input_schema.as_ref()) {
+            let input_line = match compact_input_schema(tool.manifest.payload_schema.as_ref()) {
                 Some(schema_summary) => format!("Input: {}", schema_summary),
                 None => "Input: (see agent-manual tool-detail)".to_string(),
             };
@@ -416,14 +565,26 @@ impl Default for ToolRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use agentos_types::tool::{ToolCapabilities, ToolInfo, ToolOutputs, ToolSchema};
     use tokio::sync::mpsc;
 
+    /// A permission set that grants everything, so tests exercising the L0
+    /// rendering are not also testing the visibility filter.
+    fn all_perms() -> agentos_types::PermissionSet {
+        let mut p = agentos_types::PermissionSet::new();
+        p.grant("*".to_string(), true, true, true, None);
+        p.grant_op("*".to_string(), agentos_types::PermissionOp::Query, None);
+        p.grant_op("*".to_string(), agentos_types::PermissionOp::Observe, None);
+        p
+    }
+
     fn make_community_manifest_bad_sig(name: &str) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: name.to_string(),
                 version: "0.1.0".to_string(),
                 description: format!("Test community tool {}", name),
@@ -444,7 +605,8 @@ mod tests {
                 input: "TestInput".to_string(),
                 output: "TestOutput".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -462,9 +624,11 @@ mod tests {
         }
     }
 
-    fn make_core_manifest(name: &str) -> ToolManifest {
+    pub(crate) fn make_core_manifest(name: &str) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: name.to_string(),
                 version: "0.1.0".to_string(),
                 description: format!("Test tool {}", name),
@@ -485,7 +649,8 @@ mod tests {
                 input: "TestInput".to_string(),
                 output: "TestOutput".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -592,6 +757,81 @@ mod tests {
     }
 
     #[test]
+    fn separator_variants_swaps_only_separators() {
+        assert_eq!(separator_variants("notify_user"), ["notify-user"]);
+        assert_eq!(separator_variants("notify-user"), ["notify_user"]);
+        // Mixed separators yield both fully-normalized forms, snake-to-kebab first.
+        assert_eq!(separator_variants("a_b-c"), ["a-b-c", "a_b_c"]);
+        // Nothing to swap → no allocation-worthy candidate, and never the input itself.
+        assert!(separator_variants("think").is_empty());
+        assert!(separator_variants("").is_empty());
+    }
+
+    #[test]
+    fn get_by_name_exact_match_wins_over_separator_variant() {
+        let mut registry = ToolRegistry::new();
+        let snake = registry
+            .register(make_core_manifest("notify_user"))
+            .unwrap();
+        let kebab = registry
+            .register(make_core_manifest("notify-user"))
+            .unwrap();
+        assert_ne!(snake, kebab);
+        // Each name must resolve to its own tool — the fallback never overrides a hit.
+        assert_eq!(registry.get_by_name("notify_user").unwrap().id, snake);
+        assert_eq!(registry.get_by_name("notify-user").unwrap().id, kebab);
+    }
+
+    #[test]
+    fn get_by_name_resolves_snake_case_to_kebab_tool() {
+        let mut registry = ToolRegistry::new();
+        let id = registry
+            .register(make_core_manifest("notify-user"))
+            .unwrap();
+        let tool = registry
+            .get_by_name("notify_user")
+            .expect("snake_case call should resolve to the kebab-case tool");
+        assert_eq!(tool.id, id);
+        assert_eq!(tool.manifest.manifest.name, "notify-user");
+    }
+
+    #[test]
+    fn get_by_name_resolves_kebab_case_to_snake_tool() {
+        let mut registry = ToolRegistry::new();
+        let id = registry.register(make_core_manifest("snake_tool")).unwrap();
+        let tool = registry
+            .get_by_name("snake-tool")
+            .expect("kebab call should resolve to the snake_case tool");
+        assert_eq!(tool.id, id);
+        assert_eq!(tool.manifest.manifest.name, "snake_tool");
+    }
+
+    #[test]
+    fn get_by_name_does_not_match_unrelated_names() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(make_core_manifest("notify-user"))
+            .unwrap();
+        // Only the separator may differ — no stripping, no prefixing, no suffixing.
+        assert!(registry.get_by_name("notifyuser").is_none());
+        assert!(registry.get_by_name("notify-user-2").is_none());
+        assert!(registry.get_by_name("notify_user_2").is_none());
+        assert!(registry.get_by_name("NOTIFY_USER").is_none());
+        assert!(registry.get_by_name("").is_none());
+    }
+
+    /// The mutating paths stay strict: a variant name must not delete a tool.
+    #[test]
+    fn remove_does_not_accept_separator_variants() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(make_core_manifest("notify-user"))
+            .unwrap();
+        assert!(registry.remove("notify_user").is_err());
+        assert!(registry.get_by_name("notify-user").is_some());
+    }
+
+    #[test]
     fn remove_nonexistent_tool_returns_error() {
         let mut registry = ToolRegistry::new();
         assert!(registry.remove("nonexistent").is_err());
@@ -648,7 +888,7 @@ mod tests {
         let mut manifest = make_core_manifest("file-reader");
         manifest.manifest.description = "Read files".into();
         manifest.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
-        manifest.input_schema = Some(serde_json::json!({
+        manifest.payload_schema = Some(serde_json::json!({
             "type": "object",
             "required": ["path"],
             "properties": {
@@ -716,6 +956,236 @@ mod tests {
     fn tools_for_prompt_returns_no_tools_message_when_empty() {
         let registry = ToolRegistry::new();
         assert_eq!(registry.tools_for_prompt_verbose(), "No tools available.");
+    }
+
+    /// The L0 catalogue advertises only what the agent can call.
+    #[test]
+    fn tools_for_prompt_ranked_hides_tools_without_a_grant() {
+        let mut registry = ToolRegistry::new();
+        let mut reader = make_core_manifest("file-reader");
+        reader.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        registry.register(reader).unwrap();
+        let mut shell = make_core_manifest("shell-runner");
+        shell.capabilities_required.permissions = vec!["process.exec:x".to_string()];
+        registry.register(shell).unwrap();
+
+        let mut fs_only = agentos_types::PermissionSet::new();
+        fs_only.grant("fs.user_data".to_string(), true, false, false, None);
+
+        let line =
+            registry.tools_for_prompt_ranked(&std::collections::HashMap::new(), 5, 200, &fs_only);
+        assert!(
+            line.contains("file-reader"),
+            "granted tool must be listed: {line}"
+        );
+        assert!(
+            !line.contains("shell-runner"),
+            "ungranted tool must not be advertised: {line}"
+        );
+
+        // And with nothing granted, the catalogue says so rather than lying.
+        let line = registry.tools_for_prompt_ranked(
+            &std::collections::HashMap::new(),
+            5,
+            200,
+            &agentos_types::PermissionSet::new(),
+        );
+        assert!(line.contains("permission set grants none"), "{line}");
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_empty_registry() {
+        let registry = ToolRegistry::new();
+        assert_eq!(
+            registry.tools_for_prompt_ranked(
+                &std::collections::HashMap::new(),
+                5,
+                200,
+                &all_perms()
+            ),
+            "No tools available."
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_total_matches_category_counts() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(make_core_manifest("memory-write"))
+            .unwrap();
+        registry
+            .register(make_core_manifest("memory-search"))
+            .unwrap();
+        registry.register(make_core_manifest("core-tool")).unwrap();
+        // Counts in the ranked line must equal category_counts (same grouping).
+        let total: usize = registry.category_counts().values().sum();
+        let line = registry.tools_for_prompt_ranked(
+            &std::collections::HashMap::new(),
+            5,
+            200,
+            &all_perms(),
+        );
+        assert_eq!(total, 3);
+        assert!(
+            line.starts_with(&format!("Tools ({total}):")),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_caps_names_and_marks_overflow() {
+        let mut registry = ToolRegistry::new();
+        for n in [
+            "memory-write",
+            "memory-search",
+            "memory-read",
+            "memory-delete",
+        ] {
+            registry.register(make_core_manifest(n)).unwrap();
+        }
+        // 4 memory tools, only 2 names shown → "+2" overflow marker.
+        let line = registry.tools_for_prompt_ranked(
+            &std::collections::HashMap::new(),
+            2,
+            200,
+            &all_perms(),
+        );
+        assert!(line.contains("memory(4):"), "got: {line}");
+        assert!(line.contains("+2"), "expected overflow marker, got: {line}");
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_surfaces_high_usage_name() {
+        let mut registry = ToolRegistry::new();
+        for n in ["memory-write", "memory-search", "memory-read"] {
+            registry.register(make_core_manifest(n)).unwrap();
+        }
+        let mut usage = std::collections::HashMap::new();
+        usage.insert("memory-read".to_string(), 99.0);
+        // max_names=1 → only the highest-usage memory tool is named.
+        let line = registry.tools_for_prompt_ranked(&usage, 1, 200, &all_perms());
+        assert!(line.contains("memory-read"), "got: {line}");
+        assert!(
+            !line.contains("memory-search"),
+            "low-usage tool must be hidden at max_names=1, got: {line}"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_is_deterministic() {
+        let mut registry = ToolRegistry::new();
+        for n in ["memory-write", "core-a", "core-b"] {
+            registry.register(make_core_manifest(n)).unwrap();
+        }
+        let usage = std::collections::HashMap::new();
+        let a = registry.tools_for_prompt_ranked(&usage, 5, 200, &all_perms());
+        let b = registry.tools_for_prompt_ranked(&usage, 5, 200, &all_perms());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_degrades_to_counts_only_past_budget() {
+        let mut registry = ToolRegistry::new();
+        for n in ["memory-write", "memory-search", "core-a", "core-b"] {
+            registry.register(make_core_manifest(n)).unwrap();
+        }
+        // max_tokens=1 → ~4-char names budget → no category's names fit → the
+        // line degrades to counts-only (no "category(N): names" colon form).
+        let line =
+            registry.tools_for_prompt_ranked(&std::collections::HashMap::new(), 5, 1, &all_perms());
+        assert!(line.contains("memory(2)"), "got: {line}");
+        assert!(line.contains("core(2)"), "got: {line}");
+        assert!(
+            !line.contains("memory(2):"),
+            "expected counts-only under a 0 budget, got: {line}"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_ranked_handles_nan_score_without_panic() {
+        let mut registry = ToolRegistry::new();
+        for n in ["memory-alpha", "memory-beta"] {
+            registry.register(make_core_manifest(n)).unwrap();
+        }
+        let mut usage = std::collections::HashMap::new();
+        usage.insert("memory-alpha".to_string(), f64::NAN);
+        usage.insert("memory-beta".to_string(), 1.0);
+        // NaN compares Equal in the comparator; the name tie-break keeps the sort
+        // a total order, so this must not panic and both names appear.
+        let line = registry.tools_for_prompt_ranked(&usage, 5, 200, &all_perms());
+        assert!(line.contains("memory-alpha"), "got: {line}");
+        assert!(line.contains("memory-beta"), "got: {line}");
+    }
+
+    #[test]
+    fn registry_revision_bumps_on_register_unregister_remove() {
+        let mut registry = ToolRegistry::new();
+        assert_eq!(registry.revision(), 0);
+        let id = registry.register(make_core_manifest("rev-tool-a")).unwrap();
+        assert_eq!(registry.revision(), 1);
+        registry.register(make_core_manifest("rev-tool-b")).unwrap();
+        assert_eq!(registry.revision(), 2);
+        registry.unregister(&id);
+        assert_eq!(registry.revision(), 3);
+        registry.register(make_core_manifest("rev-tool-c")).unwrap();
+        registry.remove("rev-tool-c").unwrap();
+        assert_eq!(registry.revision(), 5);
+        // No-op unregister doesn't bump.
+        registry.unregister(&id);
+        assert_eq!(registry.revision(), 5);
+    }
+
+    #[test]
+    fn core_manifests_have_taxonomy_tag_and_meta_tools_keep_meta() {
+        // Loads the shipped tools/core manifests and enforces the Phase-4 tag
+        // contract: every manifest's top-level `tags` must carry AT LEAST ONE
+        // MANIFEST_TAG_TAXONOMY_V1 value (extra free-form tags like "control" /
+        // "privileged" are allowed), and the meta-tagged discovery/coordination
+        // tools must keep `meta` (the Phase-3 scoping escape hatch).
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+        let user = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/__none__");
+        let registry = ToolRegistry::load_from_dirs(&core, &user).expect("core manifests load");
+        let taxonomy = agentos_types::tool::MANIFEST_TAG_TAXONOMY_V1;
+        for tool in registry.list_all() {
+            let name = &tool.manifest.manifest.name;
+            let tags = &tool.manifest.tags;
+            assert!(
+                !tags.is_empty(),
+                "core manifest '{name}' has empty top-level tags"
+            );
+            assert!(
+                tags.iter().any(|t| taxonomy.contains(&t.as_str())),
+                "core manifest '{name}' has no MANIFEST_TAG_TAXONOMY_V1 tag (has {tags:?})"
+            );
+        }
+        const META: &[&str] = &[
+            "search-tools",
+            "describe-tool",
+            "list-tools",
+            "agent-manual",
+            "tool-result-page",
+            "think",
+        ];
+        // `meta` = "always in the native array"; it must not regrow beyond the
+        // escape hatch (it was on 66 manifests before deferred tool loading).
+        for tool in registry.list_all() {
+            let n = tool.manifest.manifest.name.as_str();
+            assert!(
+                !tool.manifest.tags.iter().any(|t| t == "meta") || META.contains(&n),
+                "unexpected `meta` tag on '{n}'"
+            );
+        }
+        for name in META {
+            let tool = registry
+                .get_by_name(name)
+                .unwrap_or_else(|| panic!("meta tool '{name}' missing from tools/core"));
+            {
+                assert!(
+                    tool.manifest.tags.iter().any(|t| t == "meta"),
+                    "meta tool '{name}' lost its `meta` tag"
+                );
+            }
+        }
     }
 
     #[test]

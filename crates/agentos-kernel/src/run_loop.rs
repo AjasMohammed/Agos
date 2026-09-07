@@ -18,6 +18,8 @@ enum TaskKind {
     ArbiterNotificationListener,
     HealthMonitor,
     Consolidation,
+    InterestAggregator,
+    RecommendationEngine,
     ChannelInboundListener,
 }
 
@@ -35,6 +37,8 @@ impl std::fmt::Display for TaskKind {
             TaskKind::ArbiterNotificationListener => write!(f, "ArbiterNotificationListener"),
             TaskKind::HealthMonitor => write!(f, "HealthMonitor"),
             TaskKind::Consolidation => write!(f, "Consolidation"),
+            TaskKind::InterestAggregator => write!(f, "InterestAggregator"),
+            TaskKind::RecommendationEngine => write!(f, "RecommendationEngine"),
             TaskKind::ChannelInboundListener => write!(f, "ChannelInboundListener"),
         }
     }
@@ -252,7 +256,7 @@ impl Kernel {
                                                 "timeout_seconds": timed_out.timeout_seconds,
                                                 "elapsed_seconds": timed_out.elapsed_seconds,
                                             }),
-                                            0,
+                                            timed_out.chain_depth,
                                         )
                                         .await;
                                     kernel
@@ -270,18 +274,22 @@ impl Kernel {
                                                     timed_out.timeout_seconds
                                                 ),
                                             }),
-                                            0,
+                                            timed_out.chain_depth,
                                         )
                                         .await;
+                                    let timeout_reason = format!(
+                                        "Task timed out after {}s (limit {}s)",
+                                        timed_out.elapsed_seconds, timed_out.timeout_seconds
+                                    );
                                     kernel
                                         .background_pool
-                                        .fail(
-                                            &timed_out.task_id,
-                                            format!(
-                                                "Task timed out after {}s (limit {}s)",
-                                                timed_out.elapsed_seconds, timed_out.timeout_seconds
-                                            ),
-                                        )
+                                        .fail(&timed_out.task_id, timeout_reason.clone())
+                                        .await;
+                                    // The scheduler is what the task detail view reads;
+                                    // without this a timed-out task shows no reason at all.
+                                    kernel
+                                        .scheduler
+                                        .set_failure_reason(&timed_out.task_id, timeout_reason)
                                         .await;
                                     let waiters = kernel
                                         .scheduler
@@ -295,21 +303,30 @@ impl Kernel {
                                     // Send timeout notification to user inbox (root tasks only).
                                     if kernel.config.notifications.notify_on_task_failed {
                                         if let Some(task) = kernel.scheduler.get_task(&timed_out.task_id).await {
-                                            if task.parent_task.is_none() {
+                                            if crate::kernel::Kernel::is_root_task(&task) {
                                                 let summary = format!(
                                                     "Task timed out after {}s (limit {}s)",
                                                     timed_out.elapsed_seconds,
                                                     timed_out.timeout_seconds
                                                 );
+                                                let (last_tool, last_iter, obs_iter, obs_tools) =
+                                                    kernel.gather_task_progress(&timed_out.task_id).await;
+                                                let failure = crate::task_completion::FailureDetails {
+                                                    reason: "timeout".to_string(),
+                                                    error_chain: vec![summary.clone()],
+                                                    last_tool,
+                                                    last_iteration: last_iter,
+                                                };
                                                 kernel
                                                     .send_completion_notification(
                                                         &task,
                                                         agentos_types::TaskOutcome::TimedOut,
                                                         &summary,
-                                                        None,
-                                                        None,
+                                                        obs_tools,
+                                                        obs_iter,
                                                         timed_out.elapsed_seconds * 1000,
                                                         agentos_types::TraceID::new(),
+                                                        Some(failure),
                                                     )
                                                     .await;
                                             }
@@ -323,6 +340,11 @@ impl Kernel {
                                     kernel.context_manager.remove_context(&timed_out.task_id).await;
                                     kernel.intent_validator.remove_task(&timed_out.task_id).await;
                                     kernel.resource_arbiter.release_all_for_agent(timed_out.agent_id).await;
+                                    // Close any work item this timed-out task was driving (Failed)
+                                    // and release its dispatch claim, so it isn't stranded until the
+                                    // work-lock TTL expires. Both are idempotent no-ops otherwise.
+                                    kernel.complete_work_item_for_task(&timed_out.task_id, false).await;
+                                    kernel.release_task_checkout(&timed_out.task_id, &timed_out.agent_id).await;
                                 }
 
                                 // Sweep expired RPC calls (Phase 7)
@@ -345,8 +367,223 @@ impl Kernel {
                                 // Sweep expired resource locks (Spec §8)
                                 kernel.resource_arbiter.sweep_expired().await;
 
+                                // Reclaim expired task checkouts — a crashed owner's
+                                // lease expires and the task becomes claimable again.
+                                match kernel.task_checkout_store.sweep_expired().await {
+                                    Ok(0) => {}
+                                    Ok(n) => {
+                                        tracing::info!(reclaimed = n, "Reclaimed {} expired task checkouts", n);
+                                        kernel.audit_log(agentos_audit::AuditEntry {
+                                            timestamp: chrono::Utc::now(),
+                                            trace_id: agentos_types::TraceID::new(),
+                                            event_type: agentos_audit::AuditEventType::TaskCheckoutReclaimed,
+                                            agent_id: None,
+                                            task_id: None,
+                                            tool_id: None,
+                                            details: serde_json::json!({ "reclaimed": n }),
+                                            severity: agentos_audit::AuditSeverity::Info,
+                                            reversible: false,
+                                            rollback_ref: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Task checkout sweep failed");
+                                    }
+                                }
+
+                                // Agent heartbeat: wake idle agents that actually have
+                                // work (unread inbox or owned schedules). Opt-in
+                                // (default_interval_secs = 0 disables). Reuses the
+                                // normal background-task path — not a second scheduler.
+                                {
+                                    let hb = kernel.config.agent_heartbeat.clone();
+                                    if hb.default_interval_secs > 0 {
+                                        let now = chrono::Utc::now();
+                                        let due = {
+                                            let registry = kernel.agent_registry.read().await;
+                                            crate::heartbeat::HeartbeatRunner::due_agents(
+                                                registry.list_all(),
+                                                now,
+                                                hb.default_interval_secs,
+                                                hb.jitter,
+                                            )
+                                        };
+                                        let mut woken = 0usize;
+                                        for agent_id in due {
+                                            if woken >= hb.max_wakes_per_tick {
+                                                break;
+                                            }
+                                            // Resolve the agent name once — needed
+                                            // for both the work-queue claim and the
+                                            // task enqueue below.
+                                            let agent_name = {
+                                                let registry = kernel.agent_registry.read().await;
+                                                registry.get_by_id(&agent_id).map(|a| a.name.clone())
+                                            };
+                                            let Some(agent_name) = agent_name else {
+                                                continue;
+                                            };
+
+                                            // Wake signal #1 (priority): a claimable
+                                            // work item. Atomically claim one; if we
+                                            // win it, run it as a background task and
+                                            // link the task so completion closes the
+                                            // item (see task_completion). Lock TTL must
+                                            // comfortably outlast a typical task.
+                                            let claimed = if let Some(wq) = &kernel.work_queue {
+                                                wq.checkout(
+                                                    &agent_name,
+                                                    std::time::Duration::from_secs(900),
+                                                )
+                                                .await
+                                                .unwrap_or(None)
+                                            } else {
+                                                None
+                                            };
+
+                                            if let Some(item) = claimed {
+                                                let prompt = match &item.goal_ancestry {
+                                                    Some(why) => format!(
+                                                        "{}\n\nContext (why this matters): {}",
+                                                        item.prompt, why
+                                                    ),
+                                                    None => item.prompt.clone(),
+                                                };
+                                                // Include the item id so the task
+                                                // name is unique even if an agent
+                                                // claims multiple items within one
+                                                // second (create_background_task
+                                                // rejects duplicate names).
+                                                let task_name = format!(
+                                                    "work-{}-{}",
+                                                    agent_name,
+                                                    item.item_id
+                                                );
+                                                match kernel
+                                                    .create_background_task(
+                                                        task_name,
+                                                        agent_name.clone(),
+                                                        prompt,
+                                                        true,
+                                                        true,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(task_id) => {
+                                                        if let Some(wq) = &kernel.work_queue {
+                                                            if let Err(e) = wq
+                                                                .set_task(
+                                                                    &item.item_id,
+                                                                    &task_id.to_string(),
+                                                                )
+                                                                .await
+                                                            {
+                                                                tracing::warn!(item_id = %item.item_id, error = %e, "Failed to link work item to task");
+                                                            }
+                                                        }
+                                                        kernel
+                                                            .agent_registry
+                                                            .write()
+                                                            .await
+                                                            .touch_last_active(&agent_id);
+                                                        woken += 1;
+                                                        kernel.audit_log(agentos_audit::AuditEntry {
+                                                            timestamp: chrono::Utc::now(),
+                                                            trace_id: agentos_types::TraceID::new(),
+                                                            event_type:
+                                                                agentos_audit::AuditEventType::AgentHeartbeatFired,
+                                                            agent_id: Some(agent_id),
+                                                            task_id: None,
+                                                            tool_id: None,
+                                                            details: serde_json::json!({
+                                                                "work_item": item.item_id,
+                                                            }),
+                                                            severity: agentos_audit::AuditSeverity::Info,
+                                                            reversible: false,
+                                                            rollback_ref: None,
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        // Couldn't enqueue — release the
+                                                        // claim so the item isn't stranded
+                                                        // until its lock expires.
+                                                        tracing::warn!(agent_id = %agent_id, error = %e, "Heartbeat work-item enqueue failed");
+                                                        if let Some(wq) = &kernel.work_queue {
+                                                            let _ = wq.release(&item.item_id).await;
+                                                        }
+                                                    }
+                                                }
+                                                continue;
+                                            }
+
+                                            // Wake signal #2: unread inbox notifications.
+                                            // (Owned schedules are NOT a wake signal — the
+                                            // schedule manager fires DUE schedules on its
+                                            // own tick.)
+                                            let unread = kernel
+                                                .agent_inbox
+                                                .unread_count(agent_id)
+                                                .await
+                                                .unwrap_or(0);
+                                            if unread == 0 {
+                                                continue;
+                                            }
+                                            let prompt = format!(
+                                                "Heartbeat wakeup: you have {unread} unread inbox \
+                                                 notification(s). Review your inbox and act on \
+                                                 anything that needs attention. If nothing \
+                                                 requires action, simply stop."
+                                            );
+                                            let task_name = format!(
+                                                "heartbeat-{}-{}",
+                                                agent_name,
+                                                now.timestamp()
+                                            );
+                                            match kernel
+                                                .create_background_task(
+                                                    task_name,
+                                                    agent_name,
+                                                    prompt,
+                                                    true,
+                                                    true,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    // Restart the interval so we don't re-fire.
+                                                    kernel
+                                                        .agent_registry
+                                                        .write()
+                                                        .await
+                                                        .touch_last_active(&agent_id);
+                                                    woken += 1;
+                                                    kernel.audit_log(agentos_audit::AuditEntry {
+                                                        timestamp: chrono::Utc::now(),
+                                                        trace_id: agentos_types::TraceID::new(),
+                                                        event_type:
+                                                            agentos_audit::AuditEventType::AgentHeartbeatFired,
+                                                        agent_id: Some(agent_id),
+                                                        task_id: None,
+                                                        tool_id: None,
+                                                        details: serde_json::json!({
+                                                            "unread": unread,
+                                                        }),
+                                                        severity: agentos_audit::AuditSeverity::Info,
+                                                        reversible: false,
+                                                        rollback_ref: None,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(agent_id = %agent_id, error = %e, "Heartbeat task enqueue failed");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Sweep expired vault proxy tokens (Spec §3)
                                 kernel.vault.sweep_expired_proxy_tokens().await;
+                                kernel.pairing_manager.sweep_expired().await;
 
                                 // Sweep expired agent inbox items
                                 if let Err(e) = kernel.agent_inbox.sweep_expired().await {
@@ -467,6 +704,13 @@ impl Kernel {
                                                                     .fail(task_id, "Escalation auto-approve requeue failed".to_string())
                                                                     .await;
                                                                 kernel
+                                                                    .scheduler
+                                                                    .set_failure_reason(
+                                                                        task_id,
+                                                                        "Escalation auto-approve requeue failed".to_string(),
+                                                                    )
+                                                                    .await;
+                                                                kernel
                                                                     .emit_event(
                                                                         agentos_types::EventType::TaskFailed,
                                                                         agentos_types::EventSource::TaskScheduler,
@@ -493,6 +737,16 @@ impl Kernel {
                                                 }
                                             }
                                             crate::escalation::AutoAction::Deny => {
+                                                // A `Running` task is parked inline in
+                                                // `enforce_tool_pre` and receives `Expired`
+                                                // on the resolution channel itself; failing
+                                                // it here too tore down its context under
+                                                // a live executor ("Task not found" cascade).
+                                                // Only tasks suspended for a requeue
+                                                // (`Waiting`) have nobody else to end them.
+                                                // If the executor's waiter is already gone
+                                                // (crash/cancel), the TimeoutChecker ends the
+                                                // task — do not re-add a teardown here.
                                                 let can_transition_failed = kernel
                                                     .scheduler
                                                     .get_task(task_id)
@@ -503,6 +757,7 @@ impl Kernel {
                                                             agentos_types::TaskState::Complete
                                                                 | agentos_types::TaskState::Failed
                                                                 | agentos_types::TaskState::Cancelled
+                                                                | agentos_types::TaskState::Running
                                                         )
                                                     })
                                                     .unwrap_or(false);
@@ -523,6 +778,13 @@ impl Kernel {
                                                         kernel
                                                             .background_pool
                                                             .fail(task_id, "Escalation expired and auto-denied".to_string())
+                                                            .await;
+                                                        kernel
+                                                            .scheduler
+                                                            .set_failure_reason(
+                                                                task_id,
+                                                                "Escalation expired and auto-denied".to_string(),
+                                                            )
                                                             .await;
                                                         kernel
                                                             .emit_event(
@@ -601,11 +863,15 @@ impl Kernel {
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );
 
-                                    // Prune checkpoints older than 72h.
+                                    // Prune checkpoints older than 72h, except those
+                                    // of tasks the scheduler still considers live —
+                                    // a checkpoint IS the recovery point, and a task
+                                    // parked on an unanswered question outlives 72h.
                                     {
                                         let cp_store = kernel.checkpoint_store.clone();
+                                        let keep_alive = kernel.scheduler.non_terminal_task_ids().await;
                                         tokio::spawn(async move {
-                                            match cp_store.prune_older_than(chrono::Duration::hours(72)).await {
+                                            match cp_store.prune_older_than(chrono::Duration::hours(72), &keep_alive).await {
                                                 Ok(0) => {}
                                                 Ok(n) => {
                                                     tracing::info!(pruned = n, "Pruned {} expired checkpoints", n);
@@ -615,6 +881,140 @@ impl Kernel {
                                                 }
                                             }
                                         });
+                                    }
+
+                                    // Prune terminal scheduler rows. They are already excluded
+                                    // from boot restore, but nothing ever deleted them — the
+                                    // 2026-07-26 trigger-loop incident left 99,963 failed rows
+                                    // behind and grew kernel_state.db to 1.6 GB.
+                                    {
+                                        let retention_days = kernel.config.kernel.task_retention_days;
+                                        if retention_days > 0 {
+                                            let scheduler = kernel.scheduler.clone();
+                                            tokio::spawn(async move {
+                                                let max_age = chrono::Duration::days(i64::from(retention_days));
+                                                match scheduler.prune_terminal_persisted(max_age).await {
+                                                    Ok(0) => {}
+                                                    Ok(n) => {
+                                                        tracing::info!(pruned = n, retention_days, "Pruned {} terminal scheduler rows", n);
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(error = %e, "Scheduler row pruning failed");
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    // Prune claude-code resume sessions older than 72h. The
+                                    // success path deletes eagerly on task completion; this
+                                    // reclaims rows from tasks that failed and were never resumed.
+                                    if let Some(lookup) = kernel.claude_session_lookup.clone() {
+                                        tokio::spawn(async move {
+                                            match lookup.prune_older_than(chrono::Duration::hours(72)).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(pruned = n, "Pruned {} expired claude sessions", n);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "Claude session pruning failed");
+                                                }
+                                            }
+                                        });
+                                    }
+
+                                    // Prune scheduled-run history older than the configured
+                                    // retention window so the run store does not grow without
+                                    // bound (0 days disables pruning).
+                                    {
+                                        let retention_days = kernel.config.scheduler.run_retention_days;
+                                        if retention_days > 0 {
+                                            if let Some(run_store) = kernel.schedule_manager.store().cloned() {
+                                                tokio::spawn(async move {
+                                                    let max_age = chrono::Duration::days(i64::from(retention_days));
+                                                    match run_store.prune_runs_older_than(max_age).await {
+                                                        Ok(0) => {}
+                                                        Ok(n) => {
+                                                            tracing::info!(pruned = n, retention_days, "Pruned {} expired scheduled runs", n);
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(error = %e, "Scheduled-run pruning failed");
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    // Prune memory-tier entries older than the configured
+                                    // retention window (0 days disables — unbounded growth).
+                                    // Episodic auto-writes on every task completion, so without
+                                    // this the three memory DBs grow without bound (W5).
+                                    // Curator lifecycle pass runs BEFORE the age
+                                    // sweep: unused procedures decay
+                                    // active -> stale -> archived, and only
+                                    // archived rows are ever deleted below.
+                                    {
+                                        let lifecycle = &kernel.config.memory.lifecycle;
+                                        let (stale_days, archive_days) =
+                                            (lifecycle.stale_after_days, lifecycle.archive_after_days);
+                                        if stale_days > 0 && archive_days > 0 {
+                                            let day = std::time::Duration::from_secs(24 * 60 * 60);
+                                            let procedural = kernel.procedural_memory.clone();
+                                            tokio::spawn(async move {
+                                                match procedural
+                                                    .curate(day * stale_days, day * archive_days)
+                                                    .await
+                                                {
+                                                    Ok(r) if r.stale == 0 && r.archived == 0 => {}
+                                                    Ok(r) => tracing::info!(
+                                                        stale = r.stale,
+                                                        archived = r.archived,
+                                                        stale_after_days = stale_days,
+                                                        archive_after_days = archive_days,
+                                                        "Procedure curator sweep"
+                                                    ),
+                                                    Err(e) => tracing::warn!(error = %e, "Procedure curator sweep failed"),
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    {
+                                        let retention_days = kernel.config.memory.retention_days;
+                                        if retention_days > 0 {
+                                            let max_age = std::time::Duration::from_secs(
+                                                u64::from(retention_days) * 24 * 60 * 60,
+                                            );
+                                            let episodic = kernel.episodic_memory.clone();
+                                            let semantic = kernel.semantic_memory.clone();
+                                            let procedural = kernel.procedural_memory.clone();
+                                            // With the curator on, only archived
+                                            // procedures may be deleted. With it off
+                                            // nothing ever becomes archived, so fall
+                                            // back to the age-only sweep rather than
+                                            // silently pruning nothing at all.
+                                            let curator_on = kernel.config.memory.lifecycle.stale_after_days > 0
+                                                && kernel.config.memory.lifecycle.archive_after_days > 0;
+                                            tokio::spawn(async move {
+                                                for (tier, result) in [
+                                                    ("episodic", episodic.sweep_old_entries(max_age).await),
+                                                    ("semantic", semantic.sweep_old_entries(max_age).await),
+                                                    (
+                                                        "procedural",
+                                                        procedural
+                                                            .sweep_old_entries_scoped(max_age, curator_on)
+                                                            .await,
+                                                    ),
+                                                ] {
+                                                    match result {
+                                                        Ok(0) => {}
+                                                        Ok(n) => tracing::info!(tier, pruned = n, retention_days, "Pruned {} expired {} memory entries", n, tier),
+                                                        Err(e) => tracing::warn!(tier, error = %e, "Memory retention sweep failed"),
+                                                    }
+                                                }
+                                            });
+                                        }
                                     }
 
                                     // Sweep expired OAuth pending flows (10min TTL)
@@ -631,6 +1031,47 @@ impl Kernel {
                                     // prevent unbounded pool growth for long-running kernels.
                                     kernel.background_pool.evict_terminal(3600).await;
 
+                                    // Auto-expire stale user-pref proposals (UPDATE status='expired',
+                                    // not DELETE — review history is preserved). Only runs when
+                                    // user adaptation is enabled.
+                                    if kernel.config.user_adaptation.enabled {
+                                        let store = Arc::clone(&kernel.user_pref_proposal_store);
+                                        let audit = Arc::clone(&kernel.audit);
+                                        let ttl_days = kernel.config.user_adaptation.proposal_ttl_days;
+                                        tokio::spawn(async move {
+                                            match store.mark_expired_older_than_days(ttl_days).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(
+                                                        expired = n,
+                                                        ttl_days,
+                                                        "Auto-expired stale user-pref proposals"
+                                                    );
+                                                    audit
+                                                        .append(agentos_audit::AuditEntry {
+                                                            timestamp: chrono::Utc::now(),
+                                                            trace_id: agentos_types::TraceID::new(),
+                                                            event_type: agentos_audit::AuditEventType::ProposalExpired,
+                                                            agent_id: None,
+                                                            task_id: None,
+                                                            tool_id: None,
+                                                            details: serde_json::json!({
+                                                                "expired_count": n,
+                                                                "ttl_days": ttl_days,
+                                                            }),
+                                                            severity: agentos_audit::AuditSeverity::Info,
+                                                            reversible: false,
+                                                            rollback_ref: None,
+                                                        })
+                                                        .ok();
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "user-pref proposal expiry sweep failed");
+                                                }
+                                            }
+                                        });
+                                    }
+
                                     // Drop chat-session dedup caches untouched for >24h.
                                     let evicted = kernel
                                         .sweep_chat_session_dedup(Duration::from_secs(24 * 3600))
@@ -640,6 +1081,47 @@ impl Kernel {
                                             evicted,
                                             "Pruned {evicted} idle chat-session dedup caches"
                                         );
+                                    }
+
+                                    // Phase 5: decay pin_rank + archive stale profile
+                                    // entries. Cadence-gated to ~hourly so the 10s loop
+                                    // doesn't do decay work on every tick.
+                                    if kernel.config.personalization.enabled
+                                        && kernel.feedback_processor.should_run_decay()
+                                    {
+                                        let fp = Arc::clone(&kernel.feedback_processor);
+                                        tokio::spawn(async move {
+                                            if let Err(e) = fp.decay_and_archive().await {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "personalization decay/archive failed"
+                                                );
+                                            }
+                                        });
+                                    }
+
+                                    // Prune recommendations older than 30 days.
+                                    if kernel.config.personalization.enabled {
+                                        let rec_store = kernel.recommendation_engine.store().clone();
+                                        let cutoff = chrono::Utc::now().timestamp()
+                                            - (30 * 24 * 3600);
+                                        tokio::spawn(async move {
+                                            match rec_store.prune_older_than(cutoff).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(
+                                                        pruned = n,
+                                                        "Pruned {n} old recommendations"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        "Recommendation pruning failed"
+                                                    );
+                                                }
+                                            }
+                                        });
                                     }
 
                                     // Prune old audit log entries if a rotation limit is set
@@ -808,6 +1290,7 @@ impl Kernel {
                                             patterns = report.patterns_found,
                                             created = report.created,
                                             skipped = report.skipped_existing,
+                                            skipped_low_information = report.skipped_low_information,
                                             "Consolidation cycle completed"
                                         );
                                     }
@@ -822,6 +1305,75 @@ impl Kernel {
                         }
                     }
                     TaskKind::Consolidation
+                })
+            }
+            TaskKind::InterestAggregator => {
+                // Proactive personalization — periodic interest aggregation
+                // (Phase 3). Covers idle periods; the per-completion count
+                // trigger in task_completion fires sooner on bursts. Non-critical:
+                // its failure must never shut down the kernel.
+                let token = kernel.cancellation_token.clone();
+                let model = kernel.interest_model.clone();
+                join_set.spawn(async move {
+                    // If personalization is disabled, idle until shutdown.
+                    if !model.is_enabled() {
+                        token.cancelled().await;
+                        return TaskKind::InterestAggregator;
+                    }
+                    // Defer the first tick a full period so boot finishes first
+                    // (interval_at also avoids a spurious tick on restart).
+                    let start = tokio::time::Instant::now() + Duration::from_secs(1800);
+                    let mut interval = tokio::time::interval_at(start, Duration::from_secs(1800));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = interval.tick() => {
+                                if let Err(e) = model.run_cycle().await {
+                                    tracing::warn!(error = %e, "Interest aggregation cycle failed");
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::InterestAggregator
+                })
+            }
+            TaskKind::RecommendationEngine => {
+                // Proactive recommendation engine (Phase 4). Periodic 1-hour tick
+                // so the engine can deliver tips during idle periods. The engine's
+                // own opt-in gate + rate-limit early-returns make frequent retries
+                // harmless. Non-critical: failure must never shut down the kernel.
+                let token = kernel.cancellation_token.clone();
+                let engine = kernel.recommendation_engine.clone();
+                join_set.spawn(async move {
+                    // If the base personalization flag is off, idle until shutdown.
+                    if !engine.is_enabled() {
+                        token.cancelled().await;
+                        return TaskKind::RecommendationEngine;
+                    }
+                    // Defer the first tick a full period so boot finishes first.
+                    let start = tokio::time::Instant::now() + Duration::from_secs(3600);
+                    let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = interval.tick() => {
+                                match engine.run_cycle().await {
+                                    Ok(true) => {
+                                        tracing::info!("RecommendationEngine: proactive tip delivered");
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!("RecommendationEngine: cycle skipped");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "RecommendationEngine cycle failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::RecommendationEngine
                 })
             }
             TaskKind::ChannelInboundListener => {
@@ -839,8 +1391,56 @@ impl Kernel {
                                             instance_id = %inbound.channel_instance_id,
                                             "Inbound channel message received"
                                         );
-                                        // TODO: Route to bound agent based on
-                                        // channel_instance_id -> agent mapping.
+                                        let channel_instance_id = match inbound.channel_instance_id.parse() {
+                                            Ok(id) => id,
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    channel_type = %inbound.channel_type,
+                                                    instance_id = %inbound.channel_instance_id,
+                                                    "Dropping inbound channel-manager message with invalid channel instance id"
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                        // Extract any media URLs from the channel's
+                                        // content so the InboundRouter can download +
+                                        // store them (SSRF-guarded). Empty until the
+                                        // per-adapter inbound parsing emits Image/File.
+                                        let mut pending_media: Vec<crate::notification_router::InboundMediaUrl> =
+                                            Vec::new();
+                                        for url in inbound.content.image_urls() {
+                                            pending_media.push(
+                                                crate::notification_router::InboundMediaUrl {
+                                                    url,
+                                                    filename: None,
+                                                    mime: None,
+                                                },
+                                            );
+                                        }
+                                        for (url, filename, mime) in inbound.content.files() {
+                                            pending_media.push(
+                                                crate::notification_router::InboundMediaUrl {
+                                                    url,
+                                                    filename: Some(filename),
+                                                    mime: Some(mime),
+                                                },
+                                            );
+                                        }
+                                        let routed = crate::notification_router::InboundMessage {
+                                            channel: agentos_types::DeliveryChannel::custom(inbound.channel_type.clone()),
+                                            channel_instance_id,
+                                            external_sender_id: inbound.sender.platform_id,
+                                            text: inbound.content.as_text(),
+                                            reply_to_notification_id: None,
+                                            received_at: inbound.timestamp,
+                                            raw: inbound.raw,
+                                            media_file_ids: Vec::new(),
+                                            pending_media,
+                                        };
+                                        if kernel.inbound_tx.send(routed).await.is_err() {
+                                            tracing::warn!("Inbound router channel closed; dropping channel-manager message");
+                                            break;
+                                        }
                                     }
                                     None => {
                                         tracing::warn!("Channel inbound channel closed");
@@ -875,7 +1475,101 @@ impl Kernel {
     /// panics or exits unexpectedly, it is restarted automatically. If a task exceeds
     /// MAX_RESTARTS within RESTART_WINDOW_SECS, the kernel logs a degraded status and shuts
     /// down so the container orchestrator can restart the process cleanly.
+    /// Resume every in-flight task that has a checkpoint, instead of re-running
+    /// it from iteration 0.
+    ///
+    /// `scheduler.restore_from_store()` re-queues non-terminal tasks with their
+    /// ORIGINAL (now likely expired) capability token and an EMPTY context. For
+    /// any task that ran ≥1 tool call (and therefore has a checkpoint), that
+    /// blind re-run would re-execute every already-completed side effect —
+    /// re-sending emails, re-writing files — and then have every tool call
+    /// denied once the stale token's expiry is hit. `cmd_resume_task` instead
+    /// reissues a fresh token and restores the checkpointed context, so
+    /// execution continues from where the crash interrupted it. (A1)
+    ///
+    /// MUST run before the Executor task is spawned so a task cannot be
+    /// dequeued and re-run from scratch before its checkpoint is applied.
+    async fn recover_checkpointed_tasks(self: &Arc<Self>) {
+        let summaries = match self.checkpoint_store.list_checkpoints().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Boot: checkpoint recovery skipped — cannot list checkpoints");
+                return;
+            }
+        };
+        if summaries.is_empty() {
+            return;
+        }
+        let mut resumed = 0usize;
+        for summary in &summaries {
+            let task_id = summary.task_id;
+            // Only resume tasks the scheduler restored as non-terminal. A leftover
+            // checkpoint for an already-finished task (checkpoints are deleted on
+            // success, but a crash can leave one) is pruned by the 72h sweeper.
+            match self.scheduler.get_task(&task_id).await {
+                Some(t)
+                    if matches!(
+                        t.state,
+                        agentos_types::TaskState::Complete
+                            | agentos_types::TaskState::Failed
+                            | agentos_types::TaskState::Cancelled
+                    ) =>
+                {
+                    continue
+                }
+                None => continue,
+                Some(_) => {}
+            }
+            // Poison-pill guard: a task whose execution crashes the kernel gets
+            // auto-resumed on every boot and crashes it again — an unbounded
+            // crash loop across systemd restarts. Cap boot-resumes per
+            // checkpoint; past the cap, drop the checkpoint and fail the task.
+            const MAX_BOOT_RESUMES: u32 = 3;
+            match self.checkpoint_store.increment_resume_count(&task_id).await {
+                Ok(count) if count > MAX_BOOT_RESUMES => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        resume_count = count,
+                        "Boot: checkpoint exceeded max boot-resumes — dropping it (possible kernel-crashing task)"
+                    );
+                    if let Err(e) = self.checkpoint_store.delete_for_task(&task_id).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Boot: failed to delete poison checkpoint");
+                    }
+                    let _ = self
+                        .scheduler
+                        .update_state_if_not_terminal(&task_id, agentos_types::TaskState::Failed)
+                        .await;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "Boot: failed to bump checkpoint resume counter — resuming anyway");
+                }
+            }
+            match self.cmd_resume_task(task_id).await {
+                agentos_bus::KernelResponse::Error { message } => {
+                    tracing::warn!(task_id = %task_id, message, "Boot: failed to resume checkpointed task — it stays queued for a from-scratch retry");
+                }
+                _ => {
+                    resumed += 1;
+                    tracing::info!(task_id = %task_id, "Boot: resumed checkpointed task from saved context");
+                }
+            }
+        }
+        if resumed > 0 {
+            tracing::info!(
+                resumed,
+                "Boot: auto-resumed in-flight tasks from checkpoints (A1)"
+            );
+        }
+    }
+
     pub async fn run(self: Arc<Self>) -> Result<(), anyhow::Error> {
+        // Recover in-flight tasks from checkpoints BEFORE spawning the executor,
+        // so a crashed task continues from its saved context instead of
+        // re-running (and re-triggering side effects) from iteration 0. (A1)
+        self.recover_checkpointed_tasks().await;
+
         let mut join_set = JoinSet::new();
         // Map tokio task IDs to TaskKind for targeted panic recovery
         let mut task_id_map: std::collections::HashMap<tokio::task::Id, TaskKind> =
@@ -901,6 +1595,8 @@ impl Kernel {
             TaskKind::ArbiterNotificationListener,
             TaskKind::HealthMonitor,
             TaskKind::Consolidation,
+            TaskKind::InterestAggregator,
+            TaskKind::RecommendationEngine,
             TaskKind::ChannelInboundListener,
         ];
 
@@ -927,7 +1623,12 @@ impl Kernel {
         // Install Prometheus metrics recorder and start health/readiness/metrics HTTP server
         if let Some(prom_handle) = crate::health::install_prometheus_recorder() {
             if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
-                tracing::warn!(error = %e, "Failed to start health server, continuing without it");
+                tracing::warn!(
+                    error = %e,
+                    health_port = self.config.kernel.health_port,
+                    health_bind = %self.config.kernel.health_bind,
+                    "Health/metrics server failed to start — /healthz, /readyz and /metrics are UNAVAILABLE for this instance. Either [kernel] health_bind is not a valid IP address, or the port is in use by another kernel (set a distinct [kernel] health_port). External health probes will fail or hit the other instance."
+                );
             }
         }
 
@@ -1003,6 +1704,25 @@ impl Kernel {
                     // allowlist in place after the operator removes a package
                     // would be a security gap.
                     self.reload_host_package_policy().await;
+
+                    // Hot-reload the `[approval]` block. Re-parse the on-disk
+                    // config and replace the resolver's snapshot. Failures
+                    // here are logged but do not abort the reload — the
+                    // currently-installed approval policy keeps running.
+                    if let Some(resolver) = self.approval_mode_resolver.as_ref() {
+                        match crate::config::load_config(&self.config_path) {
+                            Ok(reloaded) => {
+                                resolver.reload(reloaded.approval);
+                                tracing::info!("Approval mode hot-reloaded from config");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Approval mode hot-reload skipped: config re-parse failed"
+                                );
+                            }
+                        }
+                    }
 
                     // Fire ConfigReloaded hook — lets hooks (audit, metrics) observe the change.
                     self.hook_registry
@@ -1454,6 +2174,7 @@ impl Kernel {
     }
 
     /// Route a KernelCommand to the appropriate handler.
+    #[tracing::instrument(skip_all)]
     async fn handle_command(&self, cmd: agentos_bus::KernelCommand) -> agentos_bus::KernelResponse {
         use agentos_bus::KernelCommand;
 
@@ -1533,9 +2254,9 @@ impl Kernel {
                 scope,
                 scope_raw,
             } => {
-                // Intentionally calls cmd_set_secret directly (not api_set_secret):
-                // the bus command carries scope_raw (raw CLI string scope) which
-                // api_set_secret hard-codes to None.
+                // Calls cmd_set_secret directly: the bus command already carries
+                // scope_raw (the raw CLI scope string), which cmd_set_secret
+                // resolves server-side.
                 self.cmd_set_secret(name, value, scope, scope_raw).await
             }
             KernelCommand::ListSecrets => self.cmd_list_secrets().await,
@@ -1548,6 +2269,9 @@ impl Kernel {
             },
             KernelCommand::GetTaskLogs { task_id } => self.cmd_get_task_logs(task_id).await,
             KernelCommand::CancelTask { task_id } => self.cmd_cancel_task(task_id).await,
+            KernelCommand::PurgeTasks { agent_id, states } => {
+                self.cmd_purge_tasks(agent_id, states).await
+            }
             KernelCommand::TaskGetTrace { task_id } => self.cmd_get_task_trace(task_id).await,
             KernelCommand::TaskListTraces { agent_id, limit } => {
                 self.cmd_list_task_traces(agent_id, limit).await
@@ -1555,7 +2279,9 @@ impl Kernel {
             KernelCommand::ListTools => self.cmd_list_tools().await,
             KernelCommand::InstallTool { manifest_path } => {
                 match self.api_install_tool(manifest_path).await {
-                    Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                    Ok(id) => agentos_bus::KernelResponse::Success {
+                        data: Some(serde_json::json!({ "tool_id": id.to_string() })),
+                    },
                     Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
                 }
             }
@@ -1677,6 +2403,8 @@ impl Kernel {
                     .await
             }
             KernelCommand::ListSchedules => self.cmd_list_schedules().await,
+            KernelCommand::ListOnceJobs => self.cmd_list_once_jobs().await,
+            KernelCommand::ListTimers => self.cmd_list_timers().await,
             KernelCommand::PauseSchedule { name } => self.cmd_pause_schedule(name).await,
             KernelCommand::ResumeSchedule { name } => self.cmd_resume_schedule(name).await,
             KernelCommand::DeleteSchedule { name } => self.cmd_delete_schedule(name).await,
@@ -1706,8 +2434,13 @@ impl Kernel {
                 self.cmd_list_escalations(pending_only).await
             }
             KernelCommand::GetEscalation { id } => self.cmd_get_escalation(id).await,
-            KernelCommand::ResolveEscalation { id, decision } => {
-                self.cmd_resolve_escalation(id, decision).await
+            KernelCommand::ResolveEscalation {
+                id,
+                decision,
+                remember,
+            } => {
+                self.cmd_resolve_escalation(id, decision, remember, "local-cli")
+                    .await
             }
 
             // Pipeline management
@@ -1760,6 +2493,20 @@ impl Kernel {
             // Checkpoint recovery
             KernelCommand::ResumeTask { task_id } => self.cmd_resume_task(task_id).await,
             KernelCommand::ListCheckpoints => self.cmd_list_checkpoints().await,
+
+            // Agent org chart
+            KernelCommand::OrgAddNode {
+                org_id,
+                agent_name,
+                manager_node_id,
+                role,
+                title,
+                scope,
+            } => {
+                self.cmd_org_add_node(org_id, agent_name, manager_node_id, role, title, scope)
+                    .await
+            }
+            KernelCommand::OrgShow { org_id } => self.cmd_org_show(org_id).await,
 
             // Event system
             KernelCommand::EventSubscribe {
@@ -1907,10 +2654,43 @@ impl Kernel {
             }
             KernelCommand::ListChannels => self.cmd_list_channels().await,
             KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
+            KernelCommand::ListPairings => self.cmd_list_pairings().await,
+            KernelCommand::ApprovePairing { code } => self.cmd_approve_pairing(code).await,
+            KernelCommand::ApprovePendingPairing {
+                channel_id,
+                sender_id,
+            } => {
+                self.cmd_approve_pending_pairing(channel_id, sender_id)
+                    .await
+            }
+            KernelCommand::RevokePairing {
+                channel_id,
+                sender_id,
+            } => self.cmd_revoke_pairing(channel_id, sender_id).await,
             KernelCommand::ListPlugins => self.cmd_list_plugins().await,
             KernelCommand::EnablePlugin { plugin_id } => self.cmd_enable_plugin(plugin_id).await,
             KernelCommand::DisablePlugin { plugin_id } => self.cmd_disable_plugin(plugin_id).await,
             KernelCommand::McpStatus => self.cmd_mcp_status().await,
+            KernelCommand::McpCatalogList => self.cmd_mcp_catalog_list().await,
+            KernelCommand::McpCatalogSearch { query } => self.cmd_mcp_catalog_search(query).await,
+            KernelCommand::McpCatalogInfo { id } => self.cmd_mcp_catalog_info(id).await,
+            KernelCommand::McpInstall {
+                id,
+                assume_yes,
+                allow_community,
+                runtime_binary_override,
+                no_auth,
+            } => {
+                self.cmd_mcp_install(
+                    id,
+                    assume_yes,
+                    allow_community,
+                    runtime_binary_override,
+                    no_auth,
+                )
+                .await
+            }
+            KernelCommand::McpUninstall { id, purge } => self.cmd_mcp_uninstall(id, purge).await,
             KernelCommand::McpAttach {
                 name,
                 command,
@@ -1982,6 +2762,39 @@ impl Kernel {
             }
             KernelCommand::ContextMemorySet { agent_id, content } => {
                 self.cmd_context_memory_set(agent_id, content).await
+            }
+            KernelCommand::UserPrefsListPending { limit } => {
+                self.cmd_user_prefs_list_pending(limit).await
+            }
+            KernelCommand::UserPrefsAccept { proposal_id } => {
+                self.cmd_user_prefs_accept(proposal_id).await
+            }
+            KernelCommand::UserPrefsReject { proposal_id } => {
+                self.cmd_user_prefs_reject(proposal_id).await
+            }
+            KernelCommand::UserPrefsStats => self.cmd_user_prefs_stats().await,
+            KernelCommand::ProfileList { limit } => self.cmd_profile_list(limit).await,
+            KernelCommand::ProfileShow { id } => self.cmd_profile_show(id).await,
+            KernelCommand::ProfileEdit {
+                id,
+                value,
+                confidence,
+                category,
+            } => self.cmd_profile_edit(id, value, confidence, category).await,
+            KernelCommand::ProfileForget { id } => self.cmd_profile_forget(id).await,
+
+            // Proactive recommendations (Phase 4 / Phase 5 feedback)
+            KernelCommand::RecommendationList { limit } => {
+                self.cmd_recommendation_list(limit).await
+            }
+            KernelCommand::RecommendationAccept { id } => self.cmd_recommendation_accept(id).await,
+            KernelCommand::RecommendationDismiss { id } => {
+                self.cmd_recommendation_dismiss(id).await
+            }
+
+            // Proactive personalization governance (Phase 6)
+            KernelCommand::PersonalizationGovernance { action } => {
+                self.cmd_personalization(action).await
             }
 
             KernelCommand::ScratchListPages { agent_id } => {
@@ -2112,11 +2925,47 @@ impl Kernel {
             KernelCommand::ContainerList { agent_name } => {
                 self.cmd_container_list(agent_name).await
             }
+            KernelCommand::GrantWorkspace {
+                path,
+                agent_name,
+                mode,
+            } => {
+                self.cmd_grant_workspace(path, agent_name, mode, "bus", "local-cli")
+                    .await
+            }
+            KernelCommand::RevokeWorkspace { path, agent_name } => {
+                self.cmd_revoke_workspace(path, agent_name, "local-cli")
+                    .await
+            }
+            KernelCommand::ListWorkspaceGrants { agent_name } => {
+                self.cmd_list_workspace_grants(agent_name).await
+            }
+            KernelCommand::GetApprovalConfig => self.cmd_get_approval_config().await,
+            KernelCommand::SetApprovalMode { mode } => self.cmd_set_approval_mode(mode).await,
+            KernelCommand::SetApprovalAgentOverride { agent_name, mode } => {
+                self.cmd_set_approval_agent_override(agent_name, mode).await
+            }
+            KernelCommand::ClearApprovalAgentOverride { agent_name } => {
+                self.cmd_clear_approval_agent_override(agent_name).await
+            }
+            KernelCommand::AddApprovalPolicy {
+                tool_name,
+                path_glob,
+                agent_name,
+            } => {
+                self.cmd_add_approval_policy(tool_name, path_glob, agent_name)
+                    .await
+            }
+            KernelCommand::ListApprovalPolicies => self.cmd_list_approval_policies().await,
+            KernelCommand::RevokeApprovalPolicy { id } => self.cmd_revoke_approval_policy(id).await,
         }
     }
 
     /// The agentd scheduler loop — checks for due scheduled jobs and fires them.
-    pub(crate) async fn agentd_loop(&self) {
+    ///
+    /// Takes `Arc<Self>` so a `RunTool` fire can be spawned off the tick instead
+    /// of blocking it (see `spawn_scheduled_tool_fire`).
+    pub(crate) async fn agentd_loop(self: Arc<Self>) {
         loop {
             tokio::select! {
                 _ = self.cancellation_token.cancelled() => break,
@@ -2159,17 +3008,23 @@ impl Kernel {
                 // action outcome.
                 let run_id = RunID::new();
                 let run_started = chrono::Utc::now();
-                let mk_run = |state: RunState,
-                              task_id: Option<agentos_types::TaskID>,
-                              error: Option<String>,
-                              completed_at: Option<chrono::DateTime<chrono::Utc>>|
-                 -> ScheduledRun {
+                // Owned captures so the closure is `'static` and can move into the
+                // spawned `RunTool` fire below.
+                let run_job_id = job.id;
+                let run_job_name = job.name.clone();
+                let run_job_creator = job.creator_agent_id;
+                let run_job_delivery = job.delivery.clone();
+                let mk_run = move |state: RunState,
+                                   task_id: Option<agentos_types::TaskID>,
+                                   error: Option<String>,
+                                   completed_at: Option<chrono::DateTime<chrono::Utc>>|
+                      -> ScheduledRun {
                     ScheduledRun {
                         run_id,
                         parent_kind: RunParentKind::Schedule,
-                        parent_id: job.id,
-                        parent_name: Some(job.name.clone()),
-                        creator_agent_id: job.creator_agent_id,
+                        parent_id: run_job_id,
+                        parent_name: Some(run_job_name.clone()),
+                        creator_agent_id: run_job_creator,
                         task_id,
                         state,
                         started_at: run_started,
@@ -2177,7 +3032,7 @@ impl Kernel {
                         result: None,
                         error,
                         tool_calls: vec![],
-                        delivery: job.delivery.clone(),
+                        delivery: run_job_delivery.clone(),
                         delivered: false,
                         delivered_at: None,
                         delivery_error: None,
@@ -2232,7 +3087,13 @@ impl Kernel {
                                         Some("target agent not registered".into()),
                                         Some(now),
                                     );
-                                    let _ = store.upsert_run(run).await;
+                                    // A schedule whose agent was renamed or
+                                    // never reconnected is the most likely
+                                    // week-long silent failure; without this it
+                                    // is only discoverable by asking.
+                                    if store.upsert_run(run).await.is_ok() {
+                                        self.dispatch_scheduled_delivery(run_id).await;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -2252,7 +3113,12 @@ impl Kernel {
                                         Some(e.to_string()),
                                         Some(now),
                                     );
-                                    let _ = store.upsert_run(run).await;
+                                    // Launch failures never reach the task
+                                    // completion path, so this is their only
+                                    // route to the operator.
+                                    if store.upsert_run(run).await.is_ok() {
+                                        self.dispatch_scheduled_delivery(run_id).await;
+                                    }
                                 }
                             }
                         }
@@ -2285,6 +3151,7 @@ impl Kernel {
                             read: false,
                             thread_id: None,
                             reply_to_external_id: None,
+                            attachment: None,
                         };
                         let now = chrono::Utc::now();
                         if let Err(e) = self.notification_router.deliver(msg).await {
@@ -2307,17 +3174,19 @@ impl Kernel {
                         }
                     }
                     OnceJobAction::RunTool { tool, args } => {
-                        self.fire_scheduled_tool(job.agent_name.clone(), tool, args, trace_id)
-                            .await;
-                        // Tool fires synchronously in `fire_scheduled_tool`; record
-                        // a Complete run + dispatch its DeliveryMode.
-                        if let Some(store) = self.schedule_manager.store() {
-                            let run =
-                                mk_run(RunState::Complete, None, None, Some(chrono::Utc::now()));
-                            if store.upsert_run(run).await.is_ok() {
-                                self.dispatch_scheduled_delivery(run_id).await;
-                            }
-                        }
+                        // Spawned, not awaited: an inline fire can park on an
+                        // approval escalation and stall every other cron/timer
+                        // job on this 1s tick. The spawned fire opens and closes
+                        // the run row itself.
+                        spawn_scheduled_tool_fire(
+                            Arc::clone(&self),
+                            job.agent_name.clone(),
+                            tool,
+                            args,
+                            trace_id,
+                            run_id,
+                            mk_run,
+                        );
                     }
                 }
             }
@@ -2326,7 +3195,7 @@ impl Kernel {
             let due_timers = self.schedule_manager.check_due_timers().await;
             for timer in due_timers {
                 tracing::info!(timer_name = %timer.name, "Firing timer");
-                self.fire_timer(timer).await;
+                Arc::clone(&self).fire_timer(timer).await;
             }
 
             // Fire due once-jobs.
@@ -2364,11 +3233,11 @@ impl Kernel {
                 let job_id = job.id;
                 let job_name = job.name.clone();
                 let job_delivery = job.delivery.clone();
-                let mk_once_run = |state: RunState,
-                                   task_id: Option<agentos_types::TaskID>,
-                                   error: Option<String>,
-                                   completed_at: Option<chrono::DateTime<chrono::Utc>>|
-                 -> ScheduledRun {
+                let mk_once_run = move |state: RunState,
+                                        task_id: Option<agentos_types::TaskID>,
+                                        error: Option<String>,
+                                        completed_at: Option<chrono::DateTime<chrono::Utc>>|
+                      -> ScheduledRun {
                     ScheduledRun {
                         run_id,
                         parent_kind: RunParentKind::Once,
@@ -2462,6 +3331,7 @@ impl Kernel {
                             read: false,
                             thread_id: None,
                             reply_to_external_id: None,
+                            attachment: None,
                         };
                         let now = chrono::Utc::now();
                         if let Err(e) = self.notification_router.deliver(msg).await {
@@ -2485,19 +3355,15 @@ impl Kernel {
                         }
                     }
                     OnceJobAction::RunTool { tool, args } => {
-                        self.fire_scheduled_tool(job.agent_name.clone(), tool, args, trace_id)
-                            .await;
-                        if let Some(store) = self.schedule_manager.store() {
-                            let run = mk_once_run(
-                                RunState::Complete,
-                                None,
-                                None,
-                                Some(chrono::Utc::now()),
-                            );
-                            if store.upsert_run(run).await.is_ok() {
-                                self.dispatch_scheduled_delivery(run_id).await;
-                            }
-                        }
+                        spawn_scheduled_tool_fire(
+                            Arc::clone(&self),
+                            job.agent_name.clone(),
+                            tool,
+                            args,
+                            trace_id,
+                            run_id,
+                            mk_once_run,
+                        );
                     }
                 }
             }
@@ -2505,7 +3371,9 @@ impl Kernel {
     }
 
     /// Dispatch a fired timer action: deliver notification and/or launch a background task.
-    async fn fire_timer(&self, timer: agentos_types::schedule::TimerEntry) {
+    ///
+    /// Takes `Arc<Self>` so a `RunTool` timer can be spawned off the tick.
+    async fn fire_timer(self: Arc<Self>, timer: agentos_types::schedule::TimerEntry) {
         use agentos_types::schedule::{RunParentKind, RunState, ScheduledRun, TimerAction};
         use agentos_types::{
             NotificationID, NotificationPriority, NotificationSource, RunID, TraceID, UserMessage,
@@ -2540,11 +3408,11 @@ impl Kernel {
         let timer_name = timer.name.clone();
         let timer_creator = timer.creator_agent_id;
         let timer_delivery = timer.delivery.clone();
-        let mk_timer_run = |state: RunState,
-                            task_id: Option<agentos_types::TaskID>,
-                            error: Option<String>,
-                            completed_at: Option<chrono::DateTime<chrono::Utc>>|
-         -> ScheduledRun {
+        let mk_timer_run = move |state: RunState,
+                                 task_id: Option<agentos_types::TaskID>,
+                                 error: Option<String>,
+                                 completed_at: Option<chrono::DateTime<chrono::Utc>>|
+              -> ScheduledRun {
             ScheduledRun {
                 run_id,
                 parent_kind: RunParentKind::Timer,
@@ -2590,6 +3458,7 @@ impl Kernel {
                 read: false,
                 thread_id: None,
                 reply_to_external_id: None,
+                attachment: None,
             }
         };
 
@@ -2728,15 +3597,15 @@ impl Kernel {
                 }
             }
             TimerAction::RunTool { tool, args } => {
-                self.fire_scheduled_tool(timer.agent_name.clone(), tool, args, trace_id)
-                    .await;
-                if let Some(store) = self.schedule_manager.store() {
-                    let run =
-                        mk_timer_run(RunState::Complete, None, None, Some(chrono::Utc::now()));
-                    if store.upsert_run(run).await.is_ok() {
-                        self.dispatch_scheduled_delivery(run_id).await;
-                    }
-                }
+                spawn_scheduled_tool_fire(
+                    Arc::clone(&self),
+                    timer.agent_name.clone(),
+                    tool,
+                    args,
+                    trace_id,
+                    run_id,
+                    mk_timer_run,
+                );
             }
         }
     }
@@ -2759,6 +3628,16 @@ impl Kernel {
             )));
         }
 
+        // Resolve the `_`/`-` spelling ONCE, before anything gates on the name:
+        // `ToolRunner::execute` auto-corrects it at dispatch, so validating,
+        // approval-gating and auditing the raw name would cover a name that
+        // never runs while a differently-spelled tool executes. A name that
+        // matches nothing stays as given and fails in the runner.
+        let tool_name = self
+            .tool_runner
+            .resolve_tool_name(&tool_name)
+            .unwrap_or(tool_name);
+
         let agent = {
             let registry = self.agent_registry.read().await;
             registry
@@ -2772,19 +3651,94 @@ impl Kernel {
             registry.compute_effective_permissions(&agent.id)
         };
 
+        let ws_sched = self.workspace_paths_for_agent(&agent.id);
+        let trace_id = TraceID::new();
+        let task_id = TaskID::new();
+
+        // A scheduled fire has no task and so had no capability token: it handed
+        // the tool runner a bare `PermissionSet`, skipping `validate_intent`
+        // altogether. Mint a token scoped to exactly these permissions (no
+        // widening) and to this one tool, and validate before anything runs —
+        // ahead of the approval gate so a refused call never prompts the
+        // operator. The token is reused for the kernel-action dispatch below.
+        let tool_id = self
+            .tool_registry
+            .read()
+            .await
+            .get_by_name(&tool_name)
+            .map(|t| t.id);
+        let capability_token = crate::commands::pipeline::authorize_synthetic_tool_call(
+            &self.capability_engine,
+            &self.audit,
+            &self.event_sender,
+            agent.id,
+            task_id,
+            trace_id,
+            &tool_name,
+            tool_id,
+            &args,
+            &self
+                .tool_runner
+                .get_required_permissions_for(&tool_name, &args)
+                .unwrap_or_default(),
+            permissions.clone(),
+            std::time::Duration::from_secs(
+                self.config.kernel.tool_execution.default_timeout_seconds,
+            ),
+            "schedule",
+        )?;
+
+        // Gate the scheduled fire through the ApprovalHook/ToolPre chain, exactly
+        // like the interactive task and chat paths. The tool runner fires no
+        // hooks, so without this a scheduled ExecCapable/ControlPlane tool would
+        // run with no risk-class gating or approval-mode enforcement.
+        crate::task_executor::enforce_tool_pre(
+            &self.hook_registry,
+            &self.escalation_manager,
+            agent.id,
+            task_id,
+            &tool_name,
+            &args,
+        )
+        .await
+        .map_err(|reason| AgentOSError::ToolExecutionFailed {
+            tool_name: tool_name.clone(),
+            reason,
+        })?;
+
+        // The snapshot is what resolves the agent's file-tool home
+        // (`ToolExecutionContext::agent_files_dir`); without it a scheduled run
+        // would land in an ID-named directory instead of the agent's own.
+        let agent_snapshot: std::sync::Arc<dyn agentos_types::AgentRegistryQuery> = {
+            let registry = self.agent_registry.read().await;
+            let agents: Vec<agentos_types::AgentSummary> = registry
+                .list_all()
+                .into_iter()
+                .map(|p| agentos_types::AgentSummary {
+                    id: p.id,
+                    name: p.name.clone(),
+                    status: format!("{:?}", p.status).to_lowercase(),
+                    registered_at: p.created_at,
+                })
+                .collect();
+            std::sync::Arc::new(agentos_types::AgentRegistrySnapshot::new(agents))
+        };
+
         let exec_ctx = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
-            task_id: TaskID::new(),
+            task_id,
             agent_id: agent.id,
-            trace_id: TraceID::new(),
+            trace_id,
             permissions,
             vault: None,
             hal: Some(self.hal.clone()),
             file_lock_registry: None,
-            agent_registry: None,
+            agent_registry: Some(agent_snapshot),
             task_registry: None,
             escalation_query: None,
-            workspace_paths: self.workspace_paths.clone(),
+            workspace_paths: ws_sched.read,
+            workspace_paths_writable: ws_sched.writable,
+            workspace_paths_executable: ws_sched.executable,
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -2792,18 +3746,64 @@ impl Kernel {
             tool_categories: None,
         };
 
-        self.tool_runner.execute(&tool_name, args, exec_ctx).await
+        let result = self.tool_runner.execute(&tool_name, args, exec_ctx).await?;
+
+        // Kernel-action tools (notify-user, channel-send, memory-block-*, …)
+        // return a `_kernel_action` marker instead of doing the work. Dispatch
+        // it here — otherwise the scheduled fire records the raw marker in run
+        // history and the action never actually executes.
+        if let Some(action) = crate::kernel_action::KernelAction::from_tool_result(&result) {
+            if let Some(reject) = crate::kernel::chat_incompatible_action_error(&action) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name,
+                    reason: format!(
+                        "kernel action not allowed from a scheduled fire: {}",
+                        reject
+                    ),
+                });
+            }
+            // Carries the signed token minted above rather than a hand-built
+            // one (which had an empty signature and an already-elapsed
+            // `expires_at`). Its TTL may itself have elapsed by now — the
+            // approval gate above can block on an operator escalation for
+            // minutes — so this is a real, signed token, not a guaranteed-valid
+            // one. Nothing on this path re-validates it today; anything added
+            // here that does must re-mint first. Permissions are identical
+            // either way.
+            let synthetic_task = agentos_types::AgentTask {
+                id: task_id,
+                agent_id: agent.id,
+                capability_token,
+                ..Default::default()
+            };
+            let outcome = self
+                .dispatch_kernel_action(&synthetic_task, action, trace_id)
+                .await;
+            if !outcome.success {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name,
+                    reason: outcome.result.to_string(),
+                });
+            }
+            return Ok(outcome.result);
+        }
+
+        Ok(result)
     }
 
     /// Fire a scheduled `RunTool` action: invoke the tool with a synthetic
     /// per-fire capability scoped to the scheduling agent. No LLM in the loop.
+    ///
+    /// Returns the outcome so the caller can record `Complete`/`Failed` on the
+    /// run row. Swallowing errors into an audit entry alone made a schedule that
+    /// failed on every fire show a clean run history.
     pub(crate) async fn fire_scheduled_tool(
         &self,
         agent_name: String,
         tool_name: String,
         args: serde_json::Value,
         trace_id: agentos_types::TraceID,
-    ) {
+    ) -> Result<(), agentos_types::AgentOSError> {
         // Defense in depth: re-check the tool name against the schedule denylist
         // even though Phase 4 validates at schedule time.
         if crate::schedule_action_policy::is_tool_blocked_for_schedule(&tool_name) {
@@ -2827,7 +3827,10 @@ impl Kernel {
                 reversible: false,
                 rollback_ref: None,
             });
-            return;
+            return Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                tool_name,
+                reason: "tool blocked from scheduling".to_string(),
+            });
         }
 
         match self
@@ -2851,6 +3854,7 @@ impl Kernel {
                     reversible: false,
                     rollback_ref: None,
                 });
+                Ok(())
             }
             Err(e) => {
                 tracing::warn!(tool = %tool_name, error = %e, "Scheduled run_tool failed");
@@ -2870,9 +3874,109 @@ impl Kernel {
                     reversible: false,
                     rollback_ref: None,
                 });
+                Err(e)
             }
         }
     }
+}
+
+/// Ceiling for one spawned scheduled `RunTool` fire: the worst-case operator
+/// approval wait (escalations auto-deny after `DEFAULT_ESCALATION_TIMEOUT_SECS`)
+/// plus the in-process tool timeout. Derived from existing settings rather than
+/// a new knob — it must not cut short a legitimately approved long tool, but a
+/// fire that outlives both is hung and its run row must say so.
+fn scheduled_tool_fire_budget(config: &crate::config::KernelConfig) -> Duration {
+    Duration::from_secs(
+        crate::escalation::DEFAULT_ESCALATION_TIMEOUT_SECS.unsigned_abs()
+            + config.kernel.tool_execution.default_timeout_seconds,
+    )
+}
+
+/// Map a scheduled fire's outcome onto its run row state.
+fn scheduled_fire_run_state(
+    outcome: &Result<(), agentos_types::AgentOSError>,
+) -> (agentos_types::schedule::RunState, Option<String>) {
+    match outcome {
+        Ok(()) => (agentos_types::schedule::RunState::Complete, None),
+        Err(e) => (
+            agentos_types::schedule::RunState::Failed,
+            Some(e.to_string()),
+        ),
+    }
+}
+
+/// Run one scheduled `RunTool` fire off the scheduler tick and record its
+/// outcome on the run row built by `mk_run`.
+///
+/// Fired inline, a single `RunTool` stalls every cron, timer and once-job for as
+/// long as its approval escalation plus the tool take — `check_due_jobs` is not
+/// even called, so intermediate slots of a `* * * * *` job are silently
+/// collapsed. Spawning keeps the 1s tick honest. The spawned fire opens its run
+/// row as `Running` first, so an in-flight fire is visible in run history, and
+/// closes it as `Complete`/`Failed`; a kernel shutdown closes it as `Failed`
+/// rather than vanishing.
+fn spawn_scheduled_tool_fire<F>(
+    kernel: Arc<Kernel>,
+    agent_name: String,
+    tool_name: String,
+    args: serde_json::Value,
+    trace_id: agentos_types::TraceID,
+    run_id: agentos_types::RunID,
+    mk_run: F,
+) where
+    F: Fn(
+            agentos_types::schedule::RunState,
+            Option<agentos_types::TaskID>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) -> agentos_types::schedule::ScheduledRun
+        + Send
+        + 'static,
+{
+    use agentos_types::schedule::RunState;
+    let token = kernel.cancellation_token.clone();
+    let budget = scheduled_tool_fire_budget(&kernel.config);
+    tokio::spawn(async move {
+        if let Some(store) = kernel.schedule_manager.store() {
+            if let Err(e) = store
+                .upsert_run(mk_run(RunState::Running, None, None, None))
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to persist running scheduled-tool run");
+            }
+        }
+
+        let outcome = tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(agentos_types::AgentOSError::KernelError {
+                reason: "kernel shut down before the scheduled tool finished".to_string(),
+            }),
+            fired = tokio::time::timeout(
+                budget,
+                kernel.fire_scheduled_tool(agent_name, tool_name.clone(), args, trace_id),
+            ) => match fired {
+                Ok(result) => result,
+                Err(_) => Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                    tool_name: tool_name.clone(),
+                    reason: format!(
+                        "scheduled fire exceeded its {}s budget (approval wait + tool timeout)",
+                        budget.as_secs()
+                    ),
+                }),
+            },
+        };
+
+        let (state, error) = scheduled_fire_run_state(&outcome);
+        if let Some(reason) = &error {
+            tracing::warn!(tool = %tool_name, error = %reason, "Scheduled tool fire recorded as Failed");
+        }
+        if let Some(store) = kernel.schedule_manager.store() {
+            let run = mk_run(state, None, error, Some(chrono::Utc::now()));
+            if store.upsert_run(run).await.is_ok() {
+                kernel.dispatch_scheduled_delivery(run_id).await;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -2903,6 +4007,43 @@ mod tests {
         assert_ne!(
             d_a, d_b,
             "jitter should differ per task to avoid thundering herd"
+        );
+    }
+
+    #[test]
+    fn failing_scheduled_tool_records_failed() {
+        use agentos_types::schedule::RunState;
+
+        let (state, error) = scheduled_fire_run_state(&Ok(()));
+        assert_eq!(state, RunState::Complete);
+        assert!(error.is_none());
+
+        let (state, error) =
+            scheduled_fire_run_state(&Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                tool_name: "http-client".into(),
+                reason: "connection refused".into(),
+            }));
+        assert_eq!(
+            state,
+            RunState::Failed,
+            "a schedule failing on every fire must not show a clean run history"
+        );
+        assert!(error.unwrap().contains("connection refused"));
+    }
+
+    #[test]
+    fn scheduled_fire_budget_covers_approval_wait_plus_tool_timeout() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/default.toml");
+        let content = std::fs::read_to_string(&path).expect("config/default.toml must exist");
+        let cfg: crate::config::KernelConfig =
+            toml::from_str(&content).expect("config/default.toml must parse");
+        let budget = scheduled_tool_fire_budget(&cfg);
+        assert_eq!(
+            budget.as_secs(),
+            crate::escalation::DEFAULT_ESCALATION_TIMEOUT_SECS.unsigned_abs()
+                + cfg.kernel.tool_execution.default_timeout_seconds,
+            "a spawned fire must outlast a full operator approval window plus the tool timeout"
         );
     }
 

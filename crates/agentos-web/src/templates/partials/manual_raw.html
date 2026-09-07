@@ -1,12 +1,12 @@
 <article>
     <header style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem;">
-        <strong>Section: <code>{{ section }}</code>{% if name %} — <code>{{ name }}</code>{% endif %} (raw)</strong>
+        <strong>Section: <code>{{ section }}</code>{% if name %} — <code>{{ name }}</code>{% endif %}</strong>
         <a href="#"
            hx-get="/manual/view?section={{ section }}{% if name %}&name={{ name }}{% endif %}"
            hx-target="#manual-content"
            hx-swap="innerHTML"
            class="outline">Rendered</a>
     </header>
-    <p class="muted">Exactly the JSON the agent receives from <code>agent-manual</code>.</p>
-    <pre style="max-height:75vh; overflow:auto; font-size:.85rem;"><code>{{ pretty }}</code></pre>
+    <p class="muted">Structured view of the payload the agent receives from <code>agent-manual</code>.</p>
+    <div class="data-panel">{{ pretty|structured_data_html }}</div>
 </article>

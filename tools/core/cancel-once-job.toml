@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "cancel-once-job"
@@ -6,8 +7,8 @@ version     = "1.0.0"
 description = "Cancel a pending once-job by name before it fires."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "task"
 group       = "scheduling"
-risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["schedule.job:w"]
@@ -19,11 +20,11 @@ outputs = ["cancelled", "job_name"]
 input  = "CancelOnceJobIntent"
 output = "CancelOnceJobResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Name of the once-job to cancel"
 

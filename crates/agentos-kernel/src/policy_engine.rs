@@ -5,8 +5,19 @@
 //! priority checked first) and support domain, action, and resource
 //! pattern matching.
 
-use crate::capability_broker::PolicyEffect;
 use serde::{Deserialize, Serialize};
+
+/// What the policy engine decides for a capability request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyEffect {
+    /// Auto-allow without human approval.
+    Allow,
+    /// Always deny (no escalation, no override).
+    Deny,
+    /// Require human approval via escalation.
+    Escalate,
+}
 
 // ---------------------------------------------------------------------------
 // Policy rules
@@ -179,6 +190,34 @@ impl PolicyEngine {
             priority: 100,
         }];
         Self::new(rules, PolicyEffect::Escalate)
+    }
+
+    /// Permissive "off" profile: no rules, default `Allow`. The dynamic policy
+    /// layer is wired but inert — it allows everything, exactly matching the
+    /// behavior of a kernel that never consulted a policy engine. This is the
+    /// safe default so enabling policy enforcement is an explicit operator
+    /// opt-in (`[security] policy_profile`), not a silent behavior change.
+    pub fn off_profile() -> Self {
+        Self::new(vec![], PolicyEffect::Allow)
+    }
+
+    /// Build a policy engine from a profile name (`off` | `development` |
+    /// `production` | `restricted`). Unknown names fall back to `off` with a
+    /// warning so a typo can never accidentally lock down or open up the host.
+    pub fn from_profile_name(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "off" | "" => Self::off_profile(),
+            "development" | "dev" => Self::development_profile(),
+            "production" | "prod" => Self::production_profile(),
+            "restricted" => Self::restricted_profile(),
+            other => {
+                tracing::warn!(
+                    profile = other,
+                    "Unknown security.policy_profile; falling back to 'off' (permissive)"
+                );
+                Self::off_profile()
+            }
+        }
     }
 
     /// Evaluate a capability request against all rules.

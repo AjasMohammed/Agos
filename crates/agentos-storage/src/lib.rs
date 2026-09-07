@@ -103,6 +103,22 @@ pub async fn open_store(path: &Path, migrations: Migrations) -> Result<StoreHand
 
         let conn = rusqlite::Connection::open(&path)?;
 
+        // Restrict the DB file to owner read/write. These stores hold task,
+        // schedule, workspace, and other operational state in plaintext;
+        // without this they inherit the process umask (often world-readable).
+        // Best-effort — a permissions failure must not block opening the store.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                eprintln!(
+                    "warning: failed to set 0600 on store {}: {e}",
+                    path.display()
+                );
+            }
+        }
+
         // Configure connection-level PRAGMAs.
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;

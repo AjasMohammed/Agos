@@ -216,6 +216,7 @@ impl PipelineEngine {
                         }
                         self.store.record_step_execution(&run.id, &step_result)?;
                         run.step_results.insert(step.id.clone(), step_result);
+                        self.store.update_run(&run)?;
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
@@ -233,6 +234,7 @@ impl PipelineEngine {
                                 };
                                 self.store.record_step_execution(&run.id, &failed_result)?;
                                 run.step_results.insert(step.id.clone(), failed_result);
+                                self.store.update_run(&run)?;
                                 run.status = PipelineRunStatus::Failed;
                                 run.error = Some(error_msg);
                                 run.completed_at = Some(Utc::now());
@@ -254,6 +256,7 @@ impl PipelineEngine {
                                 };
                                 self.store.record_step_execution(&run.id, &skipped_result)?;
                                 run.step_results.insert(step.id.clone(), skipped_result);
+                                self.store.update_run(&run)?;
                             }
                             OnFailure::UseDefault => {
                                 let default_val = step.default_value.clone().unwrap_or_default();
@@ -277,6 +280,7 @@ impl PipelineEngine {
                                 };
                                 self.store.record_step_execution(&run.id, &default_result)?;
                                 run.step_results.insert(step.id.clone(), default_result);
+                                self.store.update_run(&run)?;
                             }
                         }
                     }

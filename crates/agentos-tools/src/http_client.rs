@@ -1,6 +1,6 @@
 use crate::ssrf::is_private_ip;
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp};
+use agentos_types::{AgentOSError, PermissionOp, PermissionSet};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::StreamExt;
@@ -44,6 +44,7 @@ impl HttpClientTool {
                 // Materialize any error message before consuming `attempt`.
                 let block_reason: Option<String> = {
                     let url = attempt.url();
+                    let port = url.port_or_known_default().unwrap_or(0);
                     url.host_str().and_then(|host| {
                         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                             if is_private_ip(&ip) {
@@ -62,6 +63,25 @@ impl HttpClientTool {
                                     "SSRF: redirect to local hostname blocked: {}",
                                     host
                                 ));
+                            }
+                            // DNS-rebinding defense (W12): a redirect to a
+                            // hostname that resolves to a private/loopback IP
+                            // must be blocked. The redirect policy is sync, so
+                            // resolve synchronously here and reject if ANY
+                            // resolved address is private. Resolution failures
+                            // are not treated as SSRF (the request will simply
+                            // fail to connect).
+                            if let Ok(addrs) =
+                                std::net::ToSocketAddrs::to_socket_addrs(&(lower.as_str(), port))
+                            {
+                                for addr in addrs {
+                                    if is_private_ip(&addr.ip()) {
+                                        return Some(format!(
+                                            "SSRF: redirect host {host} resolves to private IP {} (blocked)",
+                                            addr.ip()
+                                        ));
+                                    }
+                                }
                             }
                         }
                         None
@@ -260,47 +280,49 @@ impl AgentTool for HttpClientTool {
         // Require fs.user_data:Write when writing to disk. The trait cannot
         // declare this statically since it depends on the payload, so we check
         // it here at runtime (defense-in-depth on top of the kernel's pre-check).
-        let dest_path: Option<PathBuf> =
-            if let Some(rel_path) = save_to {
-                if !context
-                    .permissions
-                    .check("fs.user_data", PermissionOp::Write)
-                {
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "fs.user_data".into(),
-                        operation: "Write (required by save_to parameter)".into(),
-                    });
-                }
+        let dest_path: Option<PathBuf> = if let Some(rel_path) = save_to {
+            if !context
+                .permissions
+                .check("fs.user_data", PermissionOp::Write)
+            {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "fs.user_data".into(),
+                    operation: "Write (required by save_to parameter)".into(),
+                });
+            }
 
-                // Resolve relative to data_dir; strip leading `/` so absolute
-                // paths don't escape data_dir via PathBuf::join semantics.
-                let requested = Path::new(rel_path);
-                let resolved = if requested.is_absolute() {
-                    let stripped = requested.strip_prefix("/").unwrap_or(requested);
-                    context.data_dir.join(stripped)
-                } else {
-                    context.data_dir.join(requested)
-                };
-
-                // Lexical normalization (file may not exist yet, can't canonicalize).
-                let normalized = normalize_path(&resolved);
-                let canonical_data_dir = context.data_dir.canonicalize().map_err(|e| {
-                    AgentOSError::ToolExecutionFailed {
-                        tool_name: "http-client".into(),
-                        reason: format!("Data directory error: {}", e),
-                    }
-                })?;
-
-                if !normalized.starts_with(&canonical_data_dir) {
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "fs.user_data".into(),
-                        operation: format!("Path traversal denied in save_to: {}", rel_path),
-                    });
-                }
-                Some(normalized)
+            // Resolve relative to the agent's own home (NOT the kernel state
+            // dir); strip leading `/` so absolute paths don't escape it via
+            // PathBuf::join semantics.
+            let agent_root = context.agent_files_dir()?;
+            let requested = Path::new(rel_path);
+            let resolved = if requested.is_absolute() {
+                let stripped = requested.strip_prefix("/").unwrap_or(requested);
+                agent_root.join(stripped)
             } else {
-                None
+                agent_root.join(requested)
             };
+
+            // Lexical normalization (file may not exist yet, can't canonicalize).
+            let normalized = normalize_path(&resolved);
+            let canonical_agent_root =
+                agent_root
+                    .canonicalize()
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "http-client".into(),
+                        reason: format!("Agent home directory error: {}", e),
+                    })?;
+
+            if !normalized.starts_with(&canonical_agent_root) {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "fs.user_data".into(),
+                    operation: format!("Path traversal denied in save_to: {}", rel_path),
+                });
+            }
+            Some(normalized)
+        } else {
+            None
+        };
 
         // ── 5. Build request ──────────────────────────────────────────────────
         let active_client = if follow_redirects {
@@ -344,6 +366,7 @@ impl AgentTool for HttpClientTool {
                         for part in parts {
                             if part.starts_with('$') && part.len() > 1 {
                                 let secret_name = &part[1..];
+                                check_secret_permission(&context.permissions, secret_name)?;
                                 let secret_val =
                                     vault.get(secret_name, agent_id).await.map_err(|e| {
                                         AgentOSError::ToolExecutionFailed {
@@ -359,6 +382,7 @@ impl AgentTool for HttpClientTool {
                             }
                         }
                     } else {
+                        check_secret_permission(&context.permissions, v_str)?;
                         let secret_val = vault.get(v_str, agent_id).await.map_err(|e| {
                             AgentOSError::ToolExecutionFailed {
                                 tool_name: "http-client".into(),
@@ -741,6 +765,41 @@ fn parse_sse_text(text: &str, max_events: usize) -> Vec<Value> {
     events
 }
 
+/// Gate one `secret_headers` name behind an explicit per-secret grant.
+///
+/// SECURITY (SEC-05): `secret_headers` lets the payload name *any* secret, and
+/// `ProxyVault`'s scope check allows every agent to read `SecretScope::Global`
+/// entries. Without this gate a single `readonly_external` (auto-approved) call
+/// can exfiltrate the whole vault to an attacker-chosen URL. Fail closed: the
+/// agent's own `PermissionSet` must grant `secret.<NAME>:r` before we resolve.
+fn check_secret_permission(
+    permissions: &PermissionSet,
+    secret_name: &str,
+) -> Result<(), AgentOSError> {
+    let resource = format!("secret.{}", secret_name);
+    // Exact match only. `PermissionSet::check` prefix-matches grants without a
+    // '/', so `secret.GITHUB_TOKEN` would also unlock `secret.GITHUB_TOKEN_ADMIN`
+    // and a bare `secret`/`secret.` grant would unlock the whole vault. Deny
+    // entries, expiry and the `*` wildcard are still honoured.
+    let now = chrono::Utc::now();
+    let granted = !permissions.is_denied(&resource)
+        && permissions.entries().iter().any(|e| {
+            (e.resource == "*" || e.resource == resource)
+                && e.read
+                && e.expires_at.is_none_or(|exp| now < exp)
+        });
+    if granted {
+        return Ok(());
+    }
+    Err(AgentOSError::PermissionDenied {
+        operation: format!(
+            "agent lacks permission to read secret '{}' (grant: {}:r)",
+            secret_name, resource
+        ),
+        resource,
+    })
+}
+
 /// Lexically normalize a path by resolving `.` and `..` without touching
 /// the filesystem. Mirrors the same helper in `file_writer.rs`.
 fn normalize_path(path: &Path) -> PathBuf {
@@ -840,6 +899,74 @@ mod tests {
         let requested = base.join("../../etc/passwd");
         let normalized = normalize_path(&requested);
         assert!(!normalized.starts_with(&base));
+    }
+
+    #[test]
+    fn test_secret_header_denied_without_grant() {
+        // No grants at all: resolving `$MY_TOKEN` must fail closed.
+        let perms = PermissionSet::new();
+        let err = check_secret_permission(&perms, "MY_TOKEN").unwrap_err();
+        match err {
+            AgentOSError::PermissionDenied {
+                resource,
+                operation,
+            } => {
+                assert_eq!(resource, "secret.MY_TOKEN");
+                assert!(operation.contains("secret.MY_TOKEN:r"), "{operation}");
+            }
+            other => panic!("Expected PermissionDenied, got {other:?}"),
+        }
+
+        // A grant for a *different* secret must not unlock this one.
+        let mut perms = PermissionSet::new();
+        perms.grant("secret.OTHER_TOKEN".to_string(), true, false, false, None);
+        assert!(check_secret_permission(&perms, "MY_TOKEN").is_err());
+
+        // network.outbound alone (what the tool statically requires) is not enough.
+        let mut perms = PermissionSet::new();
+        perms.grant("network.outbound".to_string(), false, false, true, None);
+        assert!(check_secret_permission(&perms, "MY_TOKEN").is_err());
+
+        // Prefix siblings must NOT be unlocked: secret names conventionally share
+        // prefixes, so `PermissionSet::check`'s prefix matching would silently
+        // widen a narrow-looking grant.
+        let mut perms = PermissionSet::new();
+        perms.grant("secret.GITHUB_TOKEN".to_string(), true, false, false, None);
+        assert!(check_secret_permission(&perms, "GITHUB_TOKEN").is_ok());
+        assert!(check_secret_permission(&perms, "GITHUB_TOKEN_ADMIN").is_err());
+
+        // A bare `secret` / `secret.` grant must not unlock the whole vault.
+        for broad in ["secret", "secret."] {
+            let mut perms = PermissionSet::new();
+            perms.grant(broad.to_string(), true, false, false, None);
+            assert!(
+                check_secret_permission(&perms, "MY_TOKEN").is_err(),
+                "grant '{broad}' must not match every secret"
+            );
+        }
+
+        // An expired grant confers nothing.
+        let mut perms = PermissionSet::new();
+        perms.grant(
+            "secret.MY_TOKEN".to_string(),
+            true,
+            false,
+            false,
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        );
+        assert!(check_secret_permission(&perms, "MY_TOKEN").is_err());
+    }
+
+    #[test]
+    fn test_secret_header_allowed_with_grant() {
+        let mut perms = PermissionSet::new();
+        perms.grant("secret.MY_TOKEN".to_string(), true, false, false, None);
+        assert!(check_secret_permission(&perms, "MY_TOKEN").is_ok());
+
+        // Write-only on the same secret is not a read grant.
+        let mut perms = PermissionSet::new();
+        perms.grant("secret.MY_TOKEN".to_string(), false, true, false, None);
+        assert!(check_secret_permission(&perms, "MY_TOKEN").is_err());
     }
 
     #[test]

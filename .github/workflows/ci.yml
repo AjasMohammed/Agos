@@ -39,6 +39,37 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: OpenAPI spec is in sync with handlers
+        run: |
+          set -euo pipefail
+          cargo run -p agentos-api --bin gen-openapi -- /tmp/openapi.json
+          if ! diff -u crates/agentos-api/openapi.json /tmp/openapi.json; then
+            echo "::error::openapi.json is stale. Regenerate it with:"
+            echo "  cargo run -p agentos-api --bin gen-openapi -- crates/agentos-api/openapi.json"
+            exit 1
+          fi
+          echo "OpenAPI spec in sync with handlers ✓"
+
+      - name: Lint OpenAPI contract (Spectral)
+        run: npx --yes @stoplight/spectral-cli@6 lint crates/agentos-api/openapi.json --ruleset .spectral.yaml --fail-severity error
+
+      - name: No silent .ok() swallows in the task-executor hot path
+        run: |
+          set -euo pipefail
+          # The 27 silent error swallows in task_executor.rs were removed; keep
+          # them out. Best-effort metric sinks (counter/gauge/histogram .ok())
+          # are legitimately allowed. (run_loop.rs has one allowed best-effort
+          # audit write at the proposal-expiry sweep — not in scope here.)
+          hits=$(grep -rn '\.ok();' \
+                   crates/agentos-kernel/src/task_executor.rs \
+                 | grep -vE 'metrics|counter|gauge|histogram' || true)
+          if [ -n "$hits" ]; then
+            echo "Silent .ok() error swallow reintroduced in task_executor.rs:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "No silent .ok() swallows in task_executor.rs ✓"
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -63,3 +94,11 @@ jobs:
           --ignore RUSTSEC-2026-0098
           --ignore RUSTSEC-2026-0099
           --ignore RUSTSEC-2026-0104
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo-deny (advisories, bans, licenses, sources)
+        # Supply-chain policy in deny.toml. Advisory ignores are kept in lockstep
+        # with audit.toml / the cargo-audit step above.
+        run: cargo deny check

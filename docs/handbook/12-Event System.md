@@ -34,7 +34,7 @@ The `EventBus` (`crates/agentos-kernel/src/event_bus.rs`) is a pure subscription
 
 > **Note:** Event types (`EventType`) are what agents subscribe to at runtime. These are distinct from audit event types (`AuditEventType` in the audit log), which track internal kernel operations. See [[14-Audit Log]] for the audit event types.
 
-The `EventType` enum (`agentos-types/src/event.rs`) defines **86 event types** across **11 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
+The `EventType` enum (`agentos-types/src/event.rs`) defines **94 event types** across **10 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
 
 ### AgentLifecycle
 
@@ -139,6 +139,9 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **86 event types** a
 | `ToolRegistryUpdated` | The tool registry was updated (e.g., new manifests loaded). |
 | `ToolCallStarted` | A tool invocation began. |
 | `ToolCallCompleted` | A tool invocation completed successfully. |
+| `ToolFallbackAttempted` | A fallback tool was attempted after a primary tool failed. |
+| `ToolFallbackSucceeded` | A fallback tool succeeded after the primary tool failed. |
+| `ToolFallbackExhausted` | All fallback tools were exhausted without success. |
 
 ### AgentCommunication
 
@@ -150,14 +153,12 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **86 event types** a
 | `DelegationResponseReceived` | A response to a delegation request was received. |
 | `MessageDeliveryFailed` | A message could not be delivered to the target agent. |
 | `AgentUnreachable` | The target agent is not connected or not responding. |
-
-### AgentRPC
-
-| Event | Description |
-|-------|-------------|
 | `AgentRpcCallStarted` | An inter-agent RPC call was initiated. |
 | `AgentRpcCallCompleted` | An inter-agent RPC call completed successfully. |
 | `AgentRpcCallTimedOut` | An inter-agent RPC call exceeded its timeout. |
+| `SubAgentProgress` | A sub-agent reported progress on a delegated task. |
+| `SubAgentCompleted` | A sub-agent completed its delegated task. |
+| `SubAgentFailed` | A sub-agent failed its delegated task. |
 
 ### ScheduleEvents
 
@@ -167,6 +168,8 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **86 event types** a
 | `ScheduledTaskMissed` | A scheduled task missed its execution window. |
 | `ScheduledTaskCompleted` | A scheduled task completed successfully. |
 | `ScheduledTaskFailed` | A scheduled task failed. |
+| `ScheduledTaskDelivered` | A scheduled task's result was delivered to its destination. |
+| `ScheduledTaskDeliveryFailed` | A scheduled task's result failed to deliver. |
 
 ### ExternalEvents
 

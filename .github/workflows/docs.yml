@@ -1,0 +1,57 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; cancel in-progress runs on new pushes.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install mdBook + linkcheck
+        run: |
+          cargo install mdbook --locked
+          cargo install mdbook-linkcheck --locked
+      # NOTE: a clap-generated CLI reference (docs/book/src/cli.md) is planned —
+      # see Phase 07. Until then cli.md is maintained by hand.
+      - name: Build book (internal link-check via mdbook-linkcheck)
+        run: mdbook build docs/book
+      - name: External link check (lychee)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --max-concurrency 4 'docs/book/src/**/*.md'
+          fail: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book/book/html
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

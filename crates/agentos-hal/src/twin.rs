@@ -106,6 +106,20 @@ impl TwinRegistry {
         })
     }
 
+    /// Reconciliation predicate: the twin is reconciled when the reported
+    /// state *satisfies* the desired state — every desired key is present
+    /// and equal (recursively) in the reported state. Devices routinely
+    /// report supersets (extra telemetry like rssi/brightness), so exact
+    /// equality would never reconcile a healthy device.
+    fn state_satisfies(desired: &Value, reported: &Value) -> bool {
+        match (desired, reported) {
+            (Value::Object(d), Value::Object(r)) => d
+                .iter()
+                .all(|(k, v)| r.get(k).is_some_and(|rv| Self::state_satisfies(v, rv))),
+            (d, r) => d == r,
+        }
+    }
+
     /// Set the desired state for a device (agent-initiated).
     pub async fn set_desired(
         &self,
@@ -120,14 +134,17 @@ impl TwinRegistry {
         let agent_json = serde_json::to_string(agent_id)
             .map_err(|e| AgentOSError::HalError(format!("Agent ID serialize failed: {e}")))?;
 
-        // Check reconciliation: compare with current reported state
-        let reconciled = {
-            let twins = self.twins.read().await;
-            twins
-                .get(device_id)
-                .map(|t| t.reported_state == state)
-                .unwrap_or(false)
-        };
+        // One write-lock critical section covering reconciliation, the DB
+        // write, and the cache mutation: no concurrent update_reported can
+        // slip between the read and write (stale-flag race), and a DB failure
+        // leaves the cache untouched (no cache/disk divergence). Lock order
+        // is always twins → db, in both update paths.
+        let mut twins = self.twins.write().await;
+        let reported = twins
+            .get(device_id)
+            .map(|t| t.reported_state.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let reconciled = Self::state_satisfies(&state, &reported);
 
         {
             let db = self.db.lock().await;
@@ -151,8 +168,6 @@ impl TwinRegistry {
             .map_err(|e| AgentOSError::HalError(format!("Twin desired update failed: {e}")))?;
         }
 
-        // Update in-memory cache
-        let mut twins = self.twins.write().await;
         let twin = twins.entry(device_id.to_string()).or_insert(DeviceTwin {
             device_id: device_id.to_string(),
             device_type: device_type.to_string(),
@@ -182,13 +197,14 @@ impl TwinRegistry {
         let state_json = serde_json::to_string(&state)
             .map_err(|e| AgentOSError::HalError(format!("JSON serialize failed: {e}")))?;
 
-        let reconciled = {
-            let twins = self.twins.read().await;
-            twins
-                .get(device_id)
-                .map(|t| t.desired_state == state)
-                .unwrap_or(true)
-        };
+        // Same single-critical-section, DB-before-cache discipline as
+        // set_desired (lock order: twins → db).
+        let mut twins = self.twins.write().await;
+        let desired = twins
+            .get(device_id)
+            .map(|t| t.desired_state.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let reconciled = Self::state_satisfies(&desired, &state);
 
         {
             let db = self.db.lock().await;
@@ -210,7 +226,6 @@ impl TwinRegistry {
             .map_err(|e| AgentOSError::HalError(format!("Twin reported update failed: {e}")))?;
         }
 
-        let mut twins = self.twins.write().await;
         let twin = twins.entry(device_id.to_string()).or_insert(DeviceTwin {
             device_id: device_id.to_string(),
             device_type: device_type.to_string(),
@@ -330,6 +345,68 @@ mod tests {
 
         let twin = reg.get_twin("light.kitchen").await.unwrap();
         assert!(twin.reconciled);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_subset() {
+        let (reg, _tmp) = setup();
+        let agent = AgentID::new();
+
+        reg.set_desired("light.kitchen", "light", json!({"on": true}), &agent)
+            .await
+            .unwrap();
+        // Device reports a superset (extra telemetry) — still reconciled.
+        reg.update_reported(
+            "light.kitchen",
+            "light",
+            json!({"on": true, "brightness": 80, "rssi": -40}),
+        )
+        .await
+        .unwrap();
+
+        let twin = reg.get_twin("light.kitchen").await.unwrap();
+        assert!(twin.reconciled, "superset reported state must reconcile");
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_mismatch() {
+        let (reg, _tmp) = setup();
+        let agent = AgentID::new();
+
+        reg.set_desired("light.kitchen", "light", json!({"on": true}), &agent)
+            .await
+            .unwrap();
+        reg.update_reported("light.kitchen", "light", json!({"on": false, "rssi": -40}))
+            .await
+            .unwrap();
+
+        let twin = reg.get_twin("light.kitchen").await.unwrap();
+        assert!(
+            !twin.reconciled,
+            "mismatched desired key must not reconcile"
+        );
+    }
+
+    #[test]
+    fn test_state_satisfies_nested() {
+        // Nested objects match recursively; scalars compare by equality.
+        assert!(TwinRegistry::state_satisfies(
+            &json!({"hvac": {"mode": "heat"}}),
+            &json!({"hvac": {"mode": "heat", "fan": "auto"}, "extra": 1}),
+        ));
+        assert!(!TwinRegistry::state_satisfies(
+            &json!({"hvac": {"mode": "heat"}}),
+            &json!({"hvac": {"mode": "cool"}}),
+        ));
+        assert!(!TwinRegistry::state_satisfies(
+            &json!({"on": true}),
+            &json!({})
+        ));
+        // Empty desired is satisfied by anything.
+        assert!(TwinRegistry::state_satisfies(
+            &json!({}),
+            &json!({"on": false})
+        ));
     }
 
     #[tokio::test]

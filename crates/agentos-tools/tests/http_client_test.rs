@@ -19,6 +19,14 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutionContext {
     let mut permissions = PermissionSet::new();
     permissions.grant("network.outbound".to_string(), false, false, true, None);
+    // secret_headers is gated per-secret (SEC-05); the fixture's secret is MY_ACTUAL_TOKEN.
+    permissions.grant(
+        "secret.MY_ACTUAL_TOKEN".to_string(),
+        true,
+        false,
+        false,
+        None,
+    );
     ToolExecutionContext {
         data_dir: data_dir.to_path_buf(),
         task_id: TaskID::new(),
@@ -32,6 +40,8 @@ fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutio
         task_registry: None,
         escalation_query: None,
         workspace_paths: vec![],
+        workspace_paths_writable: vec![],
+        workspace_paths_executable: vec![],
         capability_registry: None,
         capability_dispatcher: None,
         storage_zone_query: None,
@@ -155,6 +165,64 @@ async fn test_secret_header_injected_not_returned() {
     assert!(
         !result_str.contains("TOP_SECRET_123"),
         "Secret leaked into tool output!"
+    );
+}
+
+/// SEC-05 deny path, end-to-end through `execute()`: an agent holding only
+/// `network.outbound` must not be able to resolve a vault secret — and the
+/// request must never leave the process, so the gate can't be "fixed" later by
+/// moving it after the send.
+#[tokio::test]
+#[serial]
+async fn test_secret_header_denied_without_grant_sends_nothing() {
+    std::env::set_var("AGENTOS_TEST_ALLOW_LOCAL", "1");
+    let mock_server = MockServer::start().await;
+
+    // Permissive mock: if the gate regressed, the call would succeed here and
+    // the received-requests assertion below is what catches it.
+    Mock::given(method("POST"))
+        .and(path("/api/secure"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})))
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let vault = setup_temp_vault(&dir, "MY_ACTUAL_TOKEN", "TOP_SECRET_123").await;
+    let mut ctx = make_context(dir.path(), Some(vault));
+    // Strip the fixture's `secret.MY_ACTUAL_TOKEN` grant: network access only.
+    let mut permissions = PermissionSet::new();
+    permissions.grant("network.outbound".to_string(), false, false, true, None);
+    ctx.permissions = permissions;
+
+    let tool = HttpClientTool::new().unwrap();
+    let payload = serde_json::json!({
+        "url": format!("{}/api/secure", mock_server.uri()),
+        "method": "POST",
+        "secret_headers": {
+            "Authorization": "Bearer $MY_ACTUAL_TOKEN"
+        }
+    });
+
+    let err = tool.execute(payload, ctx).await.unwrap_err();
+    match err {
+        AgentOSError::PermissionDenied {
+            resource,
+            operation,
+        } => {
+            assert_eq!(resource, "secret.MY_ACTUAL_TOKEN");
+            assert!(
+                operation.contains("secret.MY_ACTUAL_TOKEN:r"),
+                "{operation}"
+            );
+        }
+        other => panic!("Expected PermissionDenied, got {other:?}"),
+    }
+
+    let received = mock_server.received_requests().await.unwrap_or_default();
+    assert!(
+        received.is_empty(),
+        "denied secret_headers call still hit the network ({} request(s))",
+        received.len()
     );
 }
 

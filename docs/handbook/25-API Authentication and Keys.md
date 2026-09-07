@@ -108,6 +108,7 @@ Each key carries a list of permission scopes. An empty permissions list is treat
 | `costs:r` | Read cost summaries |
 | `notifications:r` | Read notifications |
 | `notifications:w` | Respond to notifications |
+| `chat:w` | OpenAI-compatible chat completions |
 | `system:r` | Read system status |
 | `*:r` | Read access across all resources |
 | `*:w` | Write access across all resources |

@@ -1,32 +1,66 @@
 use agentos_types::AgentOSError;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-/// Default per-provider in-flight request cap. Set to 8 — enough for
+/// Default per-*endpoint* in-flight request cap. Set to 8 — enough for
 /// reasonable parallelism (batch tasks, multiple chat sessions) while
 /// preventing one runaway loop from saturating an upstream that's
 /// already rate-limiting (observed in 2026-05-08 logs: a single
 /// `provider="custom"` endpoint returned 5 distinct 429 storms within
 /// 30 minutes once two chat sessions ran concurrently).
+///
+/// The cap is per upstream endpoint, not per adapter instance: on
+/// 2026-08-31 five agents pointed at the same local Ollama each built
+/// their own limiter through `OllamaCore::new` (one call per agent
+/// connect), so 5 × 8 = 40 requests went in flight against a server
+/// sized for 8 and produced a sustained 429 storm. See
+/// [`concurrency_limiter_for`].
 pub const DEFAULT_PROVIDER_CONCURRENCY: usize = 8;
 
-/// Max time a caller will block waiting for a permit before giving up
-/// with a typed error. Bounded so a long `Retry-After: 60s` storm
-/// cannot stall an entire chat session indefinitely — the queued
-/// caller surfaces a clear "provider saturated" message after this
-/// window and the user/loop can fall through to a different provider.
-pub const CONCURRENCY_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+/// Process-wide registry of concurrency limiters, one per upstream
+/// endpoint. Never pruned — an entry is a `String` key plus an 8-permit
+/// semaphore, and the set of distinct endpoints a process talks to is
+/// bounded by its configured providers.
+// ponytail: `std::sync::Mutex` — the critical section is one map lookup
+// with no await inside; a `tokio::sync::Mutex` would only add a yield.
+static ENDPOINT_LIMITERS: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
 
-/// Construct a fresh per-provider concurrency limiter. Adapters should
-/// store one of these per instance and pass `&self.concurrency` to
-/// every [`send_with_retry`] call so retries hold the permit and other
-/// callers wait their turn instead of stacking up additional 429s.
-pub fn default_concurrency_limiter() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(DEFAULT_PROVIDER_CONCURRENCY))
+/// Normalise an upstream base URL into a registry key.
+///
+/// Trims surrounding whitespace, drops trailing `/` (so `.../v1` and
+/// `.../v1/` are one endpoint), and lowercases the scheme + authority,
+/// which are case-insensitive per RFC 3986 §3.1/§3.2.2. The path is
+/// left alone because it is case-*sensitive*; folding it could merge
+/// two genuinely distinct endpoints. A scheme-less `host:port/path`
+/// splits at the same place, so its path is preserved too.
+fn endpoint_key(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let authority_start = trimmed.find("://").map_or(0, |i| i + 3);
+    let authority_end = trimmed[authority_start..]
+        .find('/')
+        .map_or(trimmed.len(), |j| authority_start + j);
+    let (authority, path) = trimmed.split_at(authority_end);
+    format!("{}{}", authority.to_ascii_lowercase(), path)
+}
+
+/// Get the shared concurrency limiter for `base_url`, creating it on
+/// first use. Adapters must call this in their constructor and pass
+/// `&self.concurrency` to every [`send_with_retry`] call, so retries
+/// hold the permit and *every* adapter instance aimed at the same
+/// upstream queues behind the same 8 permits instead of stacking up
+/// additional 429s (the 2026-08-31 five-agents-one-Ollama storm).
+pub fn concurrency_limiter_for(base_url: &str) -> Arc<Semaphore> {
+    let registry = ENDPOINT_LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+    let limiter = guard
+        .entry(endpoint_key(base_url))
+        .or_insert_with(|| Arc::new(Semaphore::new(DEFAULT_PROVIDER_CONCURRENCY)));
+    Arc::clone(limiter)
 }
 
 /// Configuration for retry behavior.
@@ -83,6 +117,28 @@ fn rand_jitter(max_ms: f64) -> f64 {
     let hash = hasher.finish();
 
     (hash % 1000) as f64 / 1000.0 * max_ms
+}
+
+/// Turn a non-retryable HTTP failure into an actionable message.
+///
+/// Groq (and other OpenAI-compatible gateways) answer a request whose token
+/// count exceeds the *account's* per-minute budget with `413 Payload Too
+/// Large` + `code: rate_limit_exceeded`. That is not a malformed request and
+/// not a transient 429: when the single request is larger than the whole TPM
+/// allowance, no backoff window will ever admit it, so 413 stays out of
+/// `is_retryable_status` and the operator needs to be told to raise the tier
+/// or move the agent, not to wait. The raw body is kept verbatim on the end
+/// so the provider's own detail is never lost.
+fn friendly_reason(status: u16, body: &str) -> String {
+    let raw = format!("API error {}: {}", status, body);
+    if status == 413 && body.contains("rate_limit_exceeded") {
+        return format!(
+            "Provider token-per-minute limit is smaller than a single AgentOS request \
+             (a turn carries the system prompt plus tool schemas). Raise the account tier \
+             or point this agent at a provider with a larger TPM budget. (raw: {raw})"
+        );
+    }
+    raw
 }
 
 /// Whether an HTTP status code is retryable.
@@ -209,50 +265,73 @@ impl Default for CircuitBreaker {
 /// Send an HTTP request with retry and circuit breaker logic.
 ///
 /// The `build_request` closure is called for each attempt (since `reqwest::RequestBuilder`
-/// is not cloneable). Returns the successful `reqwest::Response` or the last error.
+/// is not cloneable). Returns the successful `reqwest::Response` **and the
+/// concurrency permit it was fetched under**, or the last error.
 ///
 /// Without a `concurrency` limiter, parallel callers all race against
 /// the same upstream and any rate-limit response is multiplied by the
-/// number of in-flight requests. Pass an `Arc<Semaphore>` shared across
-/// the adapter instance so retries inherit the permit and other callers
-/// queue rather than pile on. See [`default_concurrency_limiter`].
+/// number of in-flight requests. Pass the `Arc<Semaphore>` shared by
+/// every adapter aimed at that endpoint so retries inherit the permit
+/// and other callers queue rather than pile on. See
+/// [`concurrency_limiter_for`].
+///
+/// # Holding the permit
+///
+/// The permit is handed back rather than dropped on return because for a
+/// `stream: true` request the response headers arrive at the *first
+/// token* — dropping here would release the slot while the expensive part,
+/// token generation, is still running, and the cap would bound only
+/// non-streaming calls. Non-streaming callers bind it to `_permit` and let
+/// it drop at the end of their scope; streaming callers must keep that
+/// binding alive until the body stream is fully consumed.
 pub async fn send_with_retry(
     provider: &str,
     policy: &RetryPolicy,
     breaker: &CircuitBreaker,
     concurrency: Option<&Arc<Semaphore>>,
     build_request: impl Fn() -> reqwest::RequestBuilder,
-) -> Result<reqwest::Response, AgentOSError> {
+) -> Result<(reqwest::Response, Option<OwnedSemaphorePermit>), AgentOSError> {
     // Acquire an in-flight slot for this provider before checking the
     // breaker — if we are over the concurrency cap we'd rather queue
     // than race ahead and trip the breaker on a 429. The permit is
     // held across all retries, so per-call backoff is honoured but no
     // additional caller can stomp the same upstream window.
-    let _permit = if let Some(sem) = concurrency {
-        match tokio::time::timeout(
-            Duration::from_secs(CONCURRENCY_ACQUIRE_TIMEOUT_SECS),
-            Arc::clone(sem).acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(p)) => Some(p),
-            Ok(Err(e)) => {
+    //
+    // The wait is deliberately unbounded. The permits are shared by every
+    // adapter instance aimed at this endpoint, so on a local model — where
+    // a non-streaming generation holds its permit for the whole 20-90s
+    // generation — the 9th concurrent caller legitimately queues for
+    // minutes. A timeout here would turn that benign wait into a hard
+    // error, and the kernel's task executor treats an `LLMError` as fatal:
+    // it fails the task outright (a provider fallback chain exists but is
+    // opt-in and empty by default). Permits are released by the adapter's
+    // client request timeout on the non-streaming path, and the executor
+    // bounds the whole inference with its own hard timeout plus a watchdog.
+    //
+    // The one hole: on the STREAMING path the permit is held while the
+    // adapter awaits the consumer channel, which reqwest's timeout does not
+    // cover (a parked send means the body is never polled, so its deadline
+    // never fires). The kernel's chat consumer therefore bounds its own send
+    // (`STREAM_CONSUMER_SEND_TIMEOUT`) and treats a stalled reader as a
+    // dropped client — without that, a handful of stalled browsers would pin
+    // every permit on the endpoint. Any new consumer of a streaming adapter
+    // must do the same.
+    let permit = if let Some(sem) = concurrency {
+        if sem.available_permits() == 0 {
+            // Queued callers are invisible otherwise: the executor's watchdog
+            // cannot tell "waiting for a permit" from "slow inference" and
+            // escalates a healthy queued task as a runaway one.
+            debug!(
+                provider = provider,
+                "provider concurrency saturated — queueing for a permit"
+            );
+        }
+        match Arc::clone(sem).acquire_owned().await {
+            Ok(p) => Some(p),
+            Err(e) => {
                 return Err(AgentOSError::LLMError {
                     provider: provider.to_string(),
                     reason: format!("concurrency semaphore closed for provider {provider}: {e}"),
-                });
-            }
-            Err(_) => {
-                // Bounded queue prevents a slow upstream from stalling
-                // every caller indefinitely. Surface a typed error so
-                // the caller can log it and (eventually) fall through
-                // to a different provider in the fallback chain.
-                return Err(AgentOSError::LLMError {
-                    provider: provider.to_string(),
-                    reason: format!(
-                        "provider {provider} concurrency saturated — \
-                         no permit available within {CONCURRENCY_ACQUIRE_TIMEOUT_SECS}s"
-                    ),
                 });
             }
         }
@@ -273,7 +352,7 @@ pub async fn send_with_retry(
         match res {
             Ok(response) if response.status().is_success() => {
                 breaker.record_success();
-                return Ok(response);
+                return Ok((response, permit));
             }
             Ok(response) if is_retryable_status(response.status().as_u16()) => {
                 let status = response.status().as_u16();
@@ -313,7 +392,7 @@ pub async fn send_with_retry(
                 let body = response.text().await.unwrap_or_default();
                 return Err(AgentOSError::LLMError {
                     provider: provider.to_string(),
-                    reason: format!("API error {}: {}", status, body),
+                    reason: friendly_reason(status.as_u16(), &body),
                 });
             }
             Err(e) => {
@@ -344,6 +423,29 @@ pub async fn send_with_retry(
                     "other"
                 };
                 full_reason += &format!(" [kind={}]", kind);
+
+                // Read/idle timeouts (connection established, server stopped
+                // responding) take the full per-attempt timeout to surface —
+                // ~60s for the streaming clients — and rarely recover on retry.
+                // Retrying them `max_retries` times turned a single ~60s failure
+                // into a ~4min wait for interactive chat (observed in kernel logs
+                // against a flapping NVIDIA gateway). Fail fast on these. The
+                // failure is already recorded against the breaker above; connect
+                // -level timeouts (`is_connect`) are cheap (~10s) and stay
+                // retryable below.
+                if e.is_timeout() && !e.is_connect() {
+                    warn!(
+                        provider,
+                        kind,
+                        error = %e,
+                        "Read/idle timeout — not retrying (fail fast)"
+                    );
+                    return Err(AgentOSError::LLMError {
+                        provider: provider.to_string(),
+                        reason: full_reason,
+                    });
+                }
+
                 last_error = Some(full_reason);
 
                 if attempt < policy.max_retries {
@@ -432,6 +534,7 @@ mod tests {
     #[test]
     fn test_is_retryable_status() {
         assert!(is_retryable_status(429));
+        assert!(!is_retryable_status(413));
         assert!(is_retryable_status(500));
         assert!(is_retryable_status(502));
         assert!(is_retryable_status(503));
@@ -525,6 +628,65 @@ mod tests {
         assert!(is_retryable_status(504));
     }
 
+    /// A read/idle timeout (connection accepted, server never responds) must
+    /// NOT be retried — retrying a 60s-per-attempt timeout turned a single
+    /// failure into a ~4min wait for interactive chat. We assert by counting
+    /// accepted connections: fail-fast means exactly one, a retry loop would
+    /// produce `max_retries + 1`.
+    #[tokio::test]
+    async fn read_timeout_is_not_retried() {
+        use std::sync::atomic::AtomicU32;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_cl = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            // Accept connections and hold them open without ever responding,
+            // forcing the client's request to hit its read/overall timeout.
+            let mut held = Vec::new();
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    accepts_cl.fetch_add(1, Ordering::SeqCst);
+                    held.push(stream);
+                }
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let url = format!("http://{addr}/");
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(50),
+            backoff_factor: 2.0,
+        };
+        let breaker = CircuitBreaker::default();
+
+        let start = Instant::now();
+        let res = send_with_retry("test", &policy, &breaker, None, || client.get(&url)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            res.is_err(),
+            "hanging server should produce a timeout error"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "read/idle timeout must not be retried (expected exactly one connection)"
+        );
+        // And it should fail fast — far under 4 × the per-attempt timeout.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout fail-fast took too long: {elapsed:?}"
+        );
+    }
+
     /// Regression test for the per-provider concurrency cap. Two
     /// `acquire_owned` calls on a 1-permit semaphore must serialise:
     /// the second waits until the first releases. Proves
@@ -546,5 +708,210 @@ mod tests {
             .await
             .expect("p2 acquired after p1 released")
             .expect("join ok");
+    }
+
+    // The registry is process-global and tests share a process, so every
+    // test below uses its own `.invalid` host to stay independent.
+
+    /// Regression test for the 2026-08-31 storm: five `OllamaCore::new`
+    /// calls against one host must hand back one limiter, not five.
+    #[test]
+    fn endpoint_limiter_is_shared_per_endpoint() {
+        let a = concurrency_limiter_for("http://shared.invalid:11434");
+        let b = concurrency_limiter_for("http://shared.invalid:11434");
+        assert!(Arc::ptr_eq(&a, &b), "same endpoint must share one limiter");
+
+        let other_port = concurrency_limiter_for("http://shared.invalid:11435");
+        let other_host = concurrency_limiter_for("http://elsewhere.invalid:11434");
+        assert!(!Arc::ptr_eq(&a, &other_port), "port must key separately");
+        assert!(!Arc::ptr_eq(&a, &other_host), "host must key separately");
+    }
+
+    #[test]
+    fn endpoint_key_normalises_slash_whitespace_and_scheme_case() {
+        let canonical = endpoint_key("http://localhost:11434");
+        assert_eq!(endpoint_key("http://localhost:11434/"), canonical);
+        assert_eq!(endpoint_key("  http://localhost:11434  "), canonical);
+        assert_eq!(endpoint_key("HTTP://LocalHost:11434"), canonical);
+        // Distinct upstreams stay distinct.
+        assert_ne!(endpoint_key("http://localhost:11435"), canonical);
+        assert_ne!(endpoint_key("http://127.0.0.1:11434"), canonical);
+        // Paths are case-sensitive per RFC 3986 and must not be folded —
+        // including when there is no scheme to anchor the authority on.
+        assert_ne!(endpoint_key("http://h/V1"), endpoint_key("http://h/v1"));
+        assert_ne!(
+            endpoint_key("localhost:11434/V1"),
+            endpoint_key("localhost:11434/v1")
+        );
+        // The scheme-less authority is still folded.
+        assert_eq!(
+            endpoint_key("LocalHost:11434/v1"),
+            endpoint_key("localhost:11434/v1")
+        );
+
+        // And the normalisation actually collapses to one limiter.
+        let plain = concurrency_limiter_for("http://norm.invalid:11434");
+        let slash = concurrency_limiter_for("http://norm.invalid:11434/");
+        let padded = concurrency_limiter_for("  http://norm.invalid:11434  ");
+        assert!(Arc::ptr_eq(&plain, &slash), "trailing slash must collapse");
+        assert!(Arc::ptr_eq(&plain, &padded), "whitespace must collapse");
+    }
+
+    /// Sharing the `Arc` is not enough — the permits themselves must be
+    /// the same pool, which is what the buggy per-instance limiter broke.
+    #[test]
+    fn endpoint_limiter_shares_permits_across_handles() {
+        let url = "http://permits.invalid:11434";
+        let first = concurrency_limiter_for(url);
+        let held: Vec<_> = (0..DEFAULT_PROVIDER_CONCURRENCY)
+            .map(|_| Arc::clone(&first).try_acquire_owned().expect("within cap"))
+            .collect();
+
+        let second = concurrency_limiter_for(url);
+        assert!(
+            Arc::clone(&second).try_acquire_owned().is_err(),
+            "a second handle must see the first handle's permits as taken"
+        );
+        drop(held);
+        assert!(
+            Arc::clone(&second).try_acquire_owned().is_ok(),
+            "permit must be available again once released"
+        );
+    }
+
+    /// The cap must bound *streaming* generations, not just non-streaming
+    /// ones. A `stream: true` response's headers land at the first token, so
+    /// a `send_with_retry` that dropped its permit on return would leave the
+    /// whole of token generation — the expensive part, and the load the cap
+    /// exists for — outside the limit. Serve headers, keep the chunked body
+    /// open, and assert the permit survives the return.
+    #[tokio::test]
+    async fn streaming_response_keeps_permit_until_caller_drops_it() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Status line, headers and one chunk — a complete 200 as far as the
+        // client is concerned — with the chunked body deliberately unfinished.
+        const HEAD_AND_CHUNK: &[u8] = b"HTTP/1.1 200 OK\r\n\
+            Content-Type: text/event-stream\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            5\r\nhello\r\n";
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Hold every accepted socket open so the body keeps streaming.
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(HEAD_AND_CHUNK).await;
+                let _ = sock.flush().await;
+                held.push(sock);
+            }
+        });
+
+        let sem = Arc::new(Semaphore::new(1));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let url = format!("http://{addr}/");
+        let (response, permit) = send_with_retry(
+            "test",
+            &RetryPolicy::default(),
+            &CircuitBreaker::default(),
+            Some(&sem),
+            || client.get(&url),
+        )
+        .await
+        .expect("headers arrive before the body completes");
+
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "permit must still be held while the body stream is unconsumed"
+        );
+        drop(response);
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "dropping the response must not release the caller's permit"
+        );
+        drop(permit);
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "permit must be released once the streaming caller drops it"
+        );
+    }
+
+    /// A saturated endpoint must make the caller *queue*, never fail it. With
+    /// permits shared per endpoint, a non-streaming local generation holds one
+    /// for its whole 20-90s run, and the kernel's task executor treats an
+    /// `LLMError` as fatal — the acquire timeout this used to carry turned
+    /// that benign wait into a dead task under exactly the load the cap exists
+    /// for. Real time, not a paused clock: this crate's tokio has no
+    /// `test-util` feature, so the assertion is "still queued after a beat"
+    /// rather than "still queued after the old 30s bound".
+    #[tokio::test]
+    async fn saturated_endpoint_queues_the_caller_instead_of_erroring() {
+        let sem = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&sem).acquire_owned().await.unwrap();
+
+        let sem_cl = Arc::clone(&sem);
+        let queued = tokio::spawn(async move {
+            send_with_retry(
+                "test",
+                &RetryPolicy::default(),
+                &CircuitBreaker::default(),
+                Some(&sem_cl),
+                // Never reached while the permit is held; an unroutable
+                // address keeps this honest if it somehow is.
+                || reqwest::Client::new().get("http://127.0.0.1:1/"),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !queued.is_finished(),
+            "a saturated endpoint must queue the caller, not fail it"
+        );
+
+        drop(held);
+        queued.abort();
+    }
+}
+
+#[cfg(test)]
+mod friendly_reason_tests {
+    use super::friendly_reason;
+
+    #[test]
+    fn tpm_413_gets_actionable_hint_and_keeps_raw() {
+        let body = r#"{"error":{"message":"Request too large ... tokens per minute (TPM): Limit 8000, Requested 15601","type":"tokens","code":"rate_limit_exceeded"}}"#;
+        let out = friendly_reason(413, body);
+        assert!(out.contains("token-per-minute limit"), "{out}");
+        assert!(
+            out.contains("Requested 15601"),
+            "raw body must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn other_errors_pass_through_unchanged() {
+        // A 413 that is a genuine oversized body, and an unrelated 400, must
+        // keep the exact `API error {status}: {body}` shape that
+        // `friendly_ollama_reason` and the log greps anchor on.
+        assert_eq!(
+            friendly_reason(413, "request entity too large"),
+            "API error 413: request entity too large"
+        );
+        assert_eq!(
+            friendly_reason(400, "bad model"),
+            "API error 400: bad model"
+        );
     }
 }

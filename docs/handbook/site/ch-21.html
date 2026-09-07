@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>User Notifications and Channels · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#message-structure" data-target="message-structure">Message Structure</a><a class="nav-sub" href="#the-notify-user-tool" data-target="the-notify-user-tool">The <code>notify-user</code> Tool</a><a class="nav-sub" href="#the-ask-user-tool" data-target="the-ask-user-tool">The <code>ask-user</code> Tool</a><a class="nav-sub" href="#responding-to-questions" data-target="responding-to-questions">Responding to Questions</a><a class="nav-sub" href="#notification-inbox-cli" data-target="notification-inbox-cli">Notification Inbox CLI</a><a class="nav-sub" href="#delivery-channels" data-target="delivery-channels">Delivery Channels</a><a class="nav-sub" href="#managing-channels" data-target="managing-channels">Managing Channels</a><a class="nav-sub" href="#end-to-end-workflow" data-target="end-to-end-workflow">End-to-End Workflow</a><a class="nav-sub" href="#permissions-required" data-target="permissions-required">Permissions Required</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 21 · User Notifications and Channels</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 21</div><h1 class="ch-title">User Notifications and Channels</h1><p class="ch-summary">Agent-to-operator messaging — `notify-user`, `ask-user`, delivery channels (Telegram, ntfy, email), notification inbox CLI</p></div>
+    <article class="prose"><h1 id="user-notifications-and-channels" class="anchored"><a class="hanchor" href="#user-notifications-and-channels" aria-label="link">#</a>User Notifications and Channels</h1>
+<blockquote><p>AgentOS agents can send messages directly to the operator via a structured notification inbox. Messages can be fire-and-forget notifications or interactive questions that pause the task until the user responds. Notifications are delivered to the CLI inbox, the web UI, and any registered external channels (Telegram, ntfy, email, webhook).</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>The notification system gives agents a first-class way to communicate with the human operator without relying on task logs or LLM output. There are two interaction modes:</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Description</th><th>Task behaviour</th></tr></thead><tbody><tr><td><strong>Notification</strong> (<code>notify-user</code>)</td><td>Fire-and-forget message</td><td>Task continues immediately</td></tr><tr><td><strong>Question</strong> (<code>ask-user</code>)</td><td>Blocking interactive question</td><td>Task pauses in <code>Waiting</code> state</td></tr></tbody></table></div>
+<p>All messages are stored in the <strong>user inbox</strong> — a kernel-managed queue that persists across task runs. Messages are delivered to all registered channels simultaneously.</p>
+<hr>
+<h2 id="message-structure" class="anchored"><a class="hanchor" href="#message-structure" aria-label="link">#</a>Message Structure</h2>
+<p>Every message (<code>UserMessage</code>) carries:</p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td>Unique <code>NotificationID</code> (UUID)</td></tr><tr><td><code>from</code></td><td>Source: <code>Agent(AgentID)</code>, <code>Kernel</code>, or <code>System</code></td></tr><tr><td><code>task_id</code></td><td>Optional — the task that generated the message</td></tr><tr><td><code>kind</code></td><td>Message kind (see below)</td></tr><tr><td><code>priority</code></td><td><code>info</code>, <code>warning</code>, <code>urgent</code>, or <code>critical</code></td></tr><tr><td><code>subject</code></td><td>Short summary ≤80 chars — used in CLI one-liners and email subjects</td></tr><tr><td><code>body</code></td><td>Full markdown body</td></tr><tr><td><code>interaction</code></td><td>Optional — present only for <code>Question</code> kind messages</td></tr><tr><td><code>delivery_status</code></td><td>Map of <code>channel_id → DeliveryStatus</code> (Pending / Delivered / Failed / Skipped)</td></tr><tr><td><code>response</code></td><td>Optional — populated when the user has responded to a Question</td></tr><tr><td><code>read</code></td><td>Whether the operator has read the message</td></tr><tr><td><code>thread_id</code></td><td>Optional — groups related messages from the same task</td></tr><tr><td><code>created_at</code></td><td>UTC timestamp</td></tr><tr><td><code>expires_at</code></td><td>Optional — after this time the message is auto-expired</td></tr></tbody></table></div>
+<h3 id="message-kinds" class="anchored"><a class="hanchor" href="#message-kinds" aria-label="link">#</a>Message Kinds</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>UserMessageKind::Notification
+  — Simple informational message.
+
+UserMessageKind::Question { question, options?, free_text_allowed }
+  — Interactive question. Task pauses until user responds.
+  — options: optional list of allowed string choices
+  — free_text_allowed: whether typed responses are accepted (default: true)
+
+UserMessageKind::TaskComplete { task_id, outcome, summary, duration_ms, iterations, cost_usd?, tool_calls }
+  — Emitted automatically by the kernel when a task finishes.
+  — outcome: success | failed | cancelled | timed_out
+
+UserMessageKind::StatusUpdate { task_id, old_state, new_state, detail? }
+  — Emitted when a task changes state.
+</pre></div>
+</div>
+<h3 id="priority-levels" class="anchored"><a class="hanchor" href="#priority-levels" aria-label="link">#</a>Priority Levels</h3>
+<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Use case</th></tr></thead><tbody><tr><td><code>info</code></td><td>Routine status, completed operations</td></tr><tr><td><code>warning</code></td><td>Unexpected conditions that do not block the task</td></tr><tr><td><code>urgent</code></td><td>Requires prompt attention</td></tr><tr><td><code>critical</code></td><td>Security or data-loss risk — sent to all channels regardless of filters</td></tr></tbody></table></div>
+<hr>
+<h2 id="the-notify-user-tool" class="anchored"><a class="hanchor" href="#the-notify-user-tool" aria-label="link">#</a>The <code>notify-user</code> Tool</h2>
+<p>Fire-and-forget notification. The agent calls this tool and immediately continues execution.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>user.notify:w</code></td></tr><tr><td><strong>Task blocked?</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>subject</code></td><td>string</td><td>Yes</td><td>—</td><td>≤80 chars; used as the email subject and CLI one-liner</td></tr><tr><td><code>body</code></td><td>string</td><td>Yes</td><td>—</td><td>Markdown-formatted message body</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td><code>info</code>, <code>warning</code>, <code>urgent</code>, or <code>critical</code></td></tr><tr><td><code>channels</code></td><td>array of strings</td><td>No</td><td>—</td><td>Restrict delivery to specific channel display-names/kinds (e.g. <code>telegram</code>, <code>ntfy</code>, <code>email</code>, <code>webhook</code>, <code>cli</code>, <code>web</code>). Omit to fan out to all configured channels; an empty array <code>[]</code> is rejected.</td></tr></tbody></table></div>
+<p><strong>Example agent usage:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Analysis complete&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Finished scanning 4,200 log lines. Found **3 anomalies** — see attached report.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;warning&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Result:</strong> Returns a <code>_kernel_action: &quot;notify_user&quot;</code> envelope. The kernel delivers the message to the inbox and all registered channels, then continues the task immediately.</p>
+<hr>
+<h2 id="the-ask-user-tool" class="anchored"><a class="hanchor" href="#the-ask-user-tool" aria-label="link">#</a>The <code>ask-user</code> Tool</h2>
+<p>Blocking interactive question. The task enters <code>Waiting</code> state until the operator responds (or the timeout fires).</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>user.interact:x</code></td></tr><tr><td><strong>Task blocked?</strong></td><td>Yes — until responded or timed out</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>question</code></td><td>string</td><td>Yes</td><td>—</td><td>The question to ask the user</td></tr><tr><td><code>options</code></td><td>array of strings</td><td>No</td><td>—</td><td>Optional list of allowed answer choices</td></tr><tr><td><code>timeout_secs</code></td><td>u64</td><td>No</td><td><code>300</code></td><td>Seconds before <code>auto_action</code> fires. Range 10–86400 seconds.</td></tr><tr><td><code>auto_action</code></td><td>string</td><td>No</td><td><code>&quot;auto_denied&quot;</code></td><td>Text injected as the answer if timeout fires with no response</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td>Notification priority level</td></tr></tbody></table></div>
+<p><strong>Example agent usage:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;question&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Should I delete the 847 duplicate records from the users table?&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Yes, delete them&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Archive instead&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;timeout_secs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;auto_action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;urgent&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Result:</strong> Returns a <code>_kernel_action: &quot;ask_user&quot;</code> envelope. The kernel:</p>
+<ol><li>Creates a <code>Question</code> notification in the inbox</li><li>Delivers it to all registered channels</li><li>Suspends the task in <code>Waiting</code> state</li><li>When the operator responds via <code>agentos notifications respond &lt;id&gt; --response &lt;text&gt;</code> or the web UI, the response text is injected into the agent's context window and the task resumes</li></ol>
+<p><strong>Timeout behaviour:</strong> If <code>timeout_secs</code> elapses with no user response, the kernel automatically injects <code>auto_action</code> as the answer and resumes the task. The default <code>&quot;auto_denied&quot;</code> is a safe fallback for destructive operations.</p>
+<p><strong>Concurrent limits:</strong> An agent can have at most 3 concurrent blocking questions (configurable via <code>InteractionRequest.max_concurrent</code>). Additional questions beyond this limit are delivered as non-blocking notifications instead.</p>
+<hr>
+<h2 id="responding-to-questions" class="anchored"><a class="hanchor" href="#responding-to-questions" aria-label="link">#</a>Responding to Questions</h2>
+<p>From the CLI:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List all notifications (including unread questions)</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>list<span class="w"> </span>--unread
+
+<span class="c1"># Show full question text and options</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span><span class="nb">read</span><span class="w"> </span>&lt;notification-id&gt;
+
+<span class="c1"># Submit your response</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, delete them&quot;</span>
+</pre></div>
+</div>
+<p>From the web UI: navigate to the <strong>Notifications</strong> section in the sidebar and click <strong>Reply</strong> on any pending question.</p>
+<hr>
+<h2 id="notification-inbox-cli" class="anchored"><a class="hanchor" href="#notification-inbox-cli" aria-label="link">#</a>Notification Inbox CLI</h2>
+<h3 id="notifications-list" class="anchored"><a class="hanchor" href="#notifications-list" aria-label="link">#</a><code>notifications list</code></h3>
+<p>List messages from the inbox. Defaults to the 50 most recent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--unread</code> / <code>-u</code></td><td>flag</td><td><code>false</code></td><td>Show only unread notifications</td></tr><tr><td><code>--limit</code> / <code>-n</code></td><td>u32</td><td><code>50</code></td><td>Maximum number of notifications to show</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>list
+agentos<span class="w"> </span>notifications<span class="w"> </span>list<span class="w"> </span>--unread<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
+</pre></div>
+</div>
+<p><strong>Output columns:</strong> <code>ID</code> (first 8 chars of UUID), <code>PRIORITY</code>, <code>READ</code>, <code>FROM</code>, <code>SUBJECT</code></p>
+<h3 id="notifications-read" class="anchored"><a class="hanchor" href="#notifications-read" aria-label="link">#</a><code>notifications read</code></h3>
+<p>Show the full body of a notification and mark it as read.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td>String</td><td>Full or partial notification UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span><span class="nb">read</span><span class="w"> </span>a3b2c1d0
+</pre></div>
+</div>
+<p>For <code>Question</code> messages, also shows the question text, options (if any), and the current response (if answered).</p>
+<h3 id="notifications-respond" class="anchored"><a class="hanchor" href="#notifications-respond" aria-label="link">#</a><code>notifications respond</code></h3>
+<p>Submit a response to an interactive <code>Question</code> notification. Unblocks the waiting task.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--response</code> / <code>-r</code></td><td>String</td><td>Your response text</td></tr><tr><td><code>id</code></td><td>String</td><td>Notification UUID (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>a3b2c1d0<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, proceed&quot;</span>
+</pre></div>
+</div>
+<h3 id="notifications-watch" class="anchored"><a class="hanchor" href="#notifications-watch" aria-label="link">#</a><code>notifications watch</code></h3>
+<p>Poll for new notifications every 5 seconds. Press Ctrl-C to stop. Silently skips existing unread notifications on first poll so the terminal is not flooded.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>watch
+</pre></div>
+</div>
+<hr>
+<h2 id="delivery-channels" class="anchored"><a class="hanchor" href="#delivery-channels" aria-label="link">#</a>Delivery Channels</h2>
+<p>Notifications are delivered in parallel to every registered channel. Built-in delivery targets:</p>
+<div class="table-wrap"><table><thead><tr><th>Channel ID</th><th>Description</th></tr></thead><tbody><tr><td><code>cli</code></td><td>Visible in <code>agentos notifications list</code> and <code>watch</code></td></tr><tr><td><code>web</code></td><td>Displayed in the web UI notification inbox</td></tr><tr><td><code>telegram</code></td><td>Delivered via Telegram Bot API</td></tr><tr><td><code>ntfy</code></td><td>Delivered via ntfy push notification</td></tr><tr><td><code>email</code></td><td>Sent as an email</td></tr><tr><td><code>webhook</code></td><td>HTTP POST to a custom URL</td></tr><tr><td><code>desktop</code></td><td>Native OS desktop notification (planned)</td></tr><tr><td><code>slack</code></td><td>Slack webhook or bot message (planned)</td></tr></tbody></table></div>
+<p>Each channel independently tracks its <code>DeliveryStatus</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td><code>Pending</code></td><td>Not yet attempted</td></tr><tr><td><code>Delivered { at }</code></td><td>Successfully delivered with timestamp</td></tr><tr><td><code>Failed { reason }</code></td><td>Delivery error (network issue, invalid credential, etc.)</td></tr><tr><td><code>Skipped</code></td><td>Channel filtered out the message (e.g. priority below threshold)</td></tr></tbody></table></div>
+<p>Delivery failures on one channel do not block delivery to others.</p>
+<hr>
+<h2 id="managing-channels" class="anchored"><a class="hanchor" href="#managing-channels" aria-label="link">#</a>Managing Channels</h2>
+<p>Channels are registered by the operator. Credentials (bot tokens, passwords) are stored in the vault and referenced by key name — never stored in plaintext in the channel record.</p>
+<h3 id="channel-connect" class="anchored"><a class="hanchor" href="#channel-connect" aria-label="link">#</a><code>channel connect</code></h3>
+<p>Register a new external delivery channel.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--kind</code> / <code>-k</code></td><td>String</td><td>Yes</td><td>—</td><td><code>telegram</code>, <code>ntfy</code>, <code>email</code>, or a custom string</td></tr><tr><td><code>--external-id</code> / <code>-e</code></td><td>String</td><td>Yes</td><td>—</td><td>Channel-specific target: Telegram chat_id, ntfy topic, email address</td></tr><tr><td><code>--display-name</code> / <code>-d</code></td><td>String</td><td>Yes</td><td>—</td><td>Human-readable label (e.g. <code>@johndoe</code>, <code>john@example.com</code>)</td></tr><tr><td><code>--credential-key</code> / <code>-c</code></td><td>String</td><td>No</td><td><code>&quot;&quot;</code></td><td>Vault key holding the bot token or password</td></tr><tr><td><code>--reply-topic</code></td><td>String</td><td>No</td><td>—</td><td>ntfy: topic to listen on for inbound replies</td></tr><tr><td><code>--server-url</code></td><td>String</td><td>No</td><td>—</td><td>ntfy: base server URL (default: <code>https://ntfy.sh</code>)</td></tr></tbody></table></div>
+<p><strong>Telegram example:</strong></p>
+<p>First store the bot token in the vault:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>TELEGRAM_BOT_TOKEN
+</pre></div>
+</div>
+<p>Then connect the channel (chat_id is your numeric Telegram chat ID):</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--kind<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;@myhandle&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--credential-key<span class="w"> </span>TELEGRAM_BOT_TOKEN
+</pre></div>
+</div>
+<p><strong>ntfy example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--kind<span class="w"> </span>ntfy<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;my-agentos-alerts&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;ntfy/my-agentos-alerts&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reply-topic<span class="w"> </span><span class="s2">&quot;my-agentos-replies&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--server-url<span class="w"> </span><span class="s2">&quot;https://ntfy.sh&quot;</span>
+</pre></div>
+</div>
+<p><strong>Email example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>EMAIL_PASSWORD
+agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--kind<span class="w"> </span>email<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;ops-team@example.com&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;ops-team@example.com&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--credential-key<span class="w"> </span>EMAIL_PASSWORD
+</pre></div>
+</div>
+<h3 id="channel-list" class="anchored"><a class="hanchor" href="#channel-list" aria-label="link">#</a><code>channel list</code></h3>
+<p>List all registered channels.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>list
+</pre></div>
+</div>
+<p><strong>Output columns:</strong> <code>CHANNEL ID</code> (full UUID), <code>KIND</code>, <code>DISPLAY NAME</code>, <code>EXTERNAL ID</code>, <code>CONNECTED</code></p>
+<h3 id="channel-test" class="anchored"><a class="hanchor" href="#channel-test" aria-label="link">#</a><code>channel test</code></h3>
+<p>Send a test notification to a registered channel to verify delivery.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td>String</td><td>Channel UUID (from <code>channel list</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="channel-disconnect" class="anchored"><a class="hanchor" href="#channel-disconnect" aria-label="link">#</a><code>channel disconnect</code></h3>
+<p>Remove a registered channel.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td>String</td><td>Channel UUID (from <code>channel list</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>disconnect<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<hr>
+<h2 id="end-to-end-workflow" class="anchored"><a class="hanchor" href="#end-to-end-workflow" aria-label="link">#</a>End-to-End Workflow</h2>
+<p>A typical agent notification workflow:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Store Telegram bot token in vault</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>TELEGRAM_BOT_TOKEN
+
+<span class="c1"># 2. Register the Telegram channel</span>
+agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--kind<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;@ops-handle&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--credential-key<span class="w"> </span>TELEGRAM_BOT_TOKEN
+
+<span class="c1"># 3. Verify the channel is working</span>
+agentos<span class="w"> </span>channel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>&lt;channel-id&gt;
+
+<span class="c1"># 4. Connect an agent with notify permission</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>anthropic<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>worker<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grant<span class="w"> </span>user.notify:w<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grant<span class="w"> </span>user.interact:x
+
+<span class="c1"># 5. Run a task — the agent sends notifications automatically</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>worker<span class="w"> </span><span class="s2">&quot;Audit the user database and ask me before deleting anything&quot;</span>
+
+<span class="c1"># 6. Watch for incoming questions in another terminal</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>watch
+
+<span class="c1"># 7. When a question arrives, respond to it</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, proceed&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="permissions-required" class="anchored"><a class="hanchor" href="#permissions-required" aria-label="link">#</a>Permissions Required</h2>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Format</th></tr></thead><tbody><tr><td><code>notify-user</code></td><td>Write to user inbox</td><td><code>user.notify:w</code></td></tr><tr><td><code>ask-user</code></td><td>Interactive user questions</td><td><code>user.interact:x</code></td></tr></tbody></table></div>
+<p>Grant at connect time:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2<span class="w"> </span>--name<span class="w"> </span>worker<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grant<span class="w"> </span>user.notify:w<span class="w"> </span>--grant<span class="w"> </span>user.interact:x
+</pre></div>
+</div>
+<p>Or after connection:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>worker<span class="w"> </span>user.notify:w
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>worker<span class="w"> </span>user.interact:x
+</pre></div>
+</div>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-04.html">CLI Reference Complete</a> — Full CLI reference including <code>notifications</code> and <code>channel</code> commands</li><li><a class="wikilink" href="ch-07.html">Tool System</a> — <code>ask-user</code> and <code>notify-user</code> tool details</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — Capability tokens and permission enforcement</li><li><a class="wikilink" href="ch-09.html">Secrets and Vault</a> — Storing channel credentials securely</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-20.html"><span class="pn-dir">← Previous</span><span class="pn-title">LLM Agent Testing</span></a><a class="pn pn-next" href="ch-22.html"><span class="pn-dir">Next →</span><span class="pn-title">MCP Integration</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#message-structure" data-target="message-structure">Message Structure</a></li><li class="toc-h3"><a href="#message-kinds" data-target="message-kinds">Message Kinds</a></li><li class="toc-h3"><a href="#priority-levels" data-target="priority-levels">Priority Levels</a></li><li class="toc-h2"><a href="#the-notify-user-tool" data-target="the-notify-user-tool">The <code>notify-user</code> Tool</a></li><li class="toc-h2"><a href="#the-ask-user-tool" data-target="the-ask-user-tool">The <code>ask-user</code> Tool</a></li><li class="toc-h2"><a href="#responding-to-questions" data-target="responding-to-questions">Responding to Questions</a></li><li class="toc-h2"><a href="#notification-inbox-cli" data-target="notification-inbox-cli">Notification Inbox CLI</a></li><li class="toc-h3"><a href="#notifications-list" data-target="notifications-list"><code>notifications list</code></a></li><li class="toc-h3"><a href="#notifications-read" data-target="notifications-read"><code>notifications read</code></a></li><li class="toc-h3"><a href="#notifications-respond" data-target="notifications-respond"><code>notifications respond</code></a></li><li class="toc-h3"><a href="#notifications-watch" data-target="notifications-watch"><code>notifications watch</code></a></li><li class="toc-h2"><a href="#delivery-channels" data-target="delivery-channels">Delivery Channels</a></li><li class="toc-h2"><a href="#managing-channels" data-target="managing-channels">Managing Channels</a></li><li class="toc-h3"><a href="#channel-connect" data-target="channel-connect"><code>channel connect</code></a></li><li class="toc-h3"><a href="#channel-list" data-target="channel-list"><code>channel list</code></a></li><li class="toc-h3"><a href="#channel-test" data-target="channel-test"><code>channel test</code></a></li><li class="toc-h3"><a href="#channel-disconnect" data-target="channel-disconnect"><code>channel disconnect</code></a></li><li class="toc-h2"><a href="#end-to-end-workflow" data-target="end-to-end-workflow">End-to-End Workflow</a></li><li class="toc-h2"><a href="#permissions-required" data-target="permissions-required">Permissions Required</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -306,7 +306,9 @@ impl AgentTool for ScriptTool {
         context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let input_json = payload.to_string();
-        let data_dir_str = context.data_dir.to_string_lossy().to_string();
+        // SECURITY: bind the agent's own home into the sandbox, never the kernel
+        // state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let data_dir_str = context.agent_files_dir()?.to_string_lossy().to_string();
         let script_str = self.script_path.to_string_lossy().to_string();
         let timeout = Duration::from_secs(self.annotations.timeout_secs);
         let tool_name = self.annotations.name.clone();

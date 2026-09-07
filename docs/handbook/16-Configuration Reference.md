@@ -38,6 +38,19 @@ Core kernel operational limits.
 | `health_port` | integer | _(absent)_ | `9091` | HTTP port for the health check endpoint (production only) |
 | `state_db_path` | string | `/tmp/agentos/data/kernel_state.db` | `/var/lib/agentos/data/kernel_state.db` | SQLite DB for persisted runtime state (tasks, escalations, cost snapshots) |
 | `sandbox_policy` | string | `trust_aware` | `trust_aware` | Sandbox enforcement mode: `trust_aware` (Core tools in-process, Community/Verified sandboxed), `always` (all sandbox-eligible tools sandboxed), `never` (no sandboxing — development only, NOT for production) |
+| `max_concurrent_sandbox_children` | integer | number of CPUs (min 2) | number of CPUs (min 2) | Maximum concurrent sandbox child processes. Defaults to the number of logical CPUs (minimum 2). Increase when running many Community/Verified tools in parallel. |
+
+---
+
+## `[kernel.context_compaction]`
+
+In-task context compaction. The compactor periodically merges older context entries into a rolling `[ROLLING TASK SUMMARY]` block to keep the working window small during long agentic runs.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cadence` | integer | `4` | Fire the compactor every N completed iterations (and only when enough compactable entries exist). Lower values compact more aggressively. |
+| `keep_recent_iterations` | integer | `2` | How many recent iterations' worth of entries to keep verbatim. Older entries are merged into the rolling summary. |
+| `enable_llm_summarization` | bool | `true` | When true, the compactor calls the agent's LLM for a coherent semantic summary, falling back to the extractive heuristic on any LLM error. Set false for tight-latency agents or unreliable local models. |
 
 ---
 
@@ -169,7 +182,41 @@ Additional directories agents can access beyond `data_dir`. Validated at startup
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `allowed_paths` | array of strings | `[]` | Absolute paths to project or shared directories. System roots (`/`, `/etc`, `/var`, `/root`, `/home`) are rejected. Each path must have at least one subdirectory component. |
+| `allowed_paths` | array of strings | `["/media", "/run/media"]` | Absolute paths to project or shared directories. System roots (`/`, `/etc`, `/var`, `/root`, `/home`) are rejected. Each path must have at least one subdirectory component. |
+
+---
+
+## `[tools.host_package]`
+
+Host OS package install tool (`host-package-install`). **Disabled by default** and gated by an operator-controlled allowlist. The tool runs *outside* the bwrap sandbox via `pkexec` or a setuid helper; every call requires explicit user approval (control-plane risk class) **and** the requested package must appear verbatim in `allowlist`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable the host package install tool. Disabled by default. |
+| `privilege_escalator` | string | `"auto"` | Escalation policy: `"auto"` (prefer pkexec, else none), `"pkexec"`, `"helper"` (invoke the setuid binary at `helper_path`), or `"none"` (disables the tool). |
+| `helper_path` | string | `/usr/local/libexec/agentos-pkg-helper` | Path to the setuid helper binary used when `privilege_escalator = "helper"`. |
+| `managers` | array of strings | `["apt-get", "dnf", "pacman", "zypper", "apk", "brew"]` | Package managers the tool may invoke. The first one found on `PATH` is used. |
+| `allowlist` | array of strings | `["python3", "python3-pip", "python3-venv", "nodejs", "npm", "git", "curl", "ca-certificates", "podman", "docker.io"]` | Operator-controlled allowlist. The agent can install only packages whose names match an entry verbatim, even after the user approves the call. |
+
+---
+
+## `[env]`
+
+Per-agent workspace package install (the Env Install Execution Bridge). Packages are installed into isolated per-agent workspaces at `{data_dir}/workspaces/{agent_id}/{name}/`, *not* the host. Network is permitted only for the install duration.
+
+Policy values: `"curated"` (package must be on the allowlist below — default), `"open"` (any package; dev/lab use only), `"locked"` (installation disabled).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `python_policy` | string | `"curated"` | Install policy for Python packages. |
+| `nodejs_policy` | string | `"curated"` | Install policy for Node.js packages. |
+| `rust_policy` | string | `"curated"` | Install policy for Rust crates. |
+| `system_policy` | string | `"locked"` | Install policy for system packages (host packages go through `host-package-install` instead). |
+| `default_quota_bytes` | integer | `2147483648` (2 GiB) | Per-workspace size quota (informational, not enforced). |
+| `install_timeout_secs` | integer | `120` | Timeout for a single install operation. |
+| `python_allowlist` | array of strings | _(curated list)_ | Allowed Python packages under the `curated` policy (e.g. `flask`, `requests`, `pytest`, `numpy`, `pandas`, `fastapi`, `pydantic`). |
+| `nodejs_allowlist` | array of strings | _(curated list)_ | Allowed Node.js packages under the `curated` policy (e.g. `express`, `jest`, `axios`, `lodash`, `zod`). |
+| `rust_allowlist` | array of strings | _(curated list)_ | Allowed Rust crates under the `curated` policy (e.g. `serde`, `tokio`, `anyhow`, `clap`, `tracing`). |
 
 ---
 
@@ -309,6 +356,17 @@ Rolling file and stderr log configuration. Logs rotate daily with up to 7 days r
 | `log_dir` | string | `"/tmp/agentos/logs"` | Directory where rolling log files are written. Set to `""` to disable file logging (stderr only). |
 | `log_level` | string | `"info"` | Minimum log level: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden at runtime with `RUST_LOG` or `agentos log set-level`. |
 | `log_format` | string | `"text"` | Output format: `"text"` (human-readable) or `"json"` (structured, for log aggregators like Loki, Datadog, or Elasticsearch). Use `"json"` in production. |
+
+---
+
+## `[preflight]`
+
+Boot pre-flight checks. These run before any subsystem starts so a misconfigured host fails fast with one precise diagnostic instead of crashing deep in init.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `min_free_disk_mb` | integer | `512` | Minimum free disk (MB) on the data-dir partition required to boot. Set to `0` to disable the disk check. (Production profiles raise this.) |
+| `check_db_writable` | bool | `true` | Probe that the audit/vault/state DB dirs, the log dir, and the bus-socket dir are writable before subsystem init. |
 
 ---
 
@@ -474,6 +532,57 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 ---
 
+## `[runtime]`
+
+Container runtime for sandboxed code execution. Agents can launch containers only from the pre-approved `allowed_images` list.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `backend` | string | `"docker"` | Container runtime backend: `"docker"` or `"none"` (disabled). |
+| `default_memory_limit_mb` | integer | `1024` | Default per-container memory limit (MB). |
+| `default_cpu_limit` | float | `1.0` | Default per-container CPU limit (cores). |
+| `default_pids_limit` | integer | `100` | Default per-container PID limit. |
+| `default_ttl_seconds` | integer | `3600` | Default container time-to-live before auto-removal. |
+| `max_concurrent_containers` | integer | `10` | Maximum number of containers running concurrently. |
+| `workspace_base_dir` | string | `/tmp/agentos/sandboxes` | Base directory for container workspace mounts. |
+| `allowed_images` | array of strings | `["python:3.11-slim", "python:3.12-slim", "node:20-alpine", "node:22-alpine", "ubuntu:22.04", "ubuntu:24.04", "rust:1.78-slim", "alpine:3.19"]` | Pre-approved Docker images. Agents can only use images on this list. |
+
+---
+
+## `[user_adaptation]`
+
+Deterministic post-task user preference proposal generator. Disabled by default; when enabled, proposals are queued for operator review rather than applied automatically.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable post-task user preference proposals. |
+| `model` | string | `"compact"` | Model used to generate proposals. |
+| `min_confidence` | float | `0.5` | Minimum confidence required to record a proposal. |
+| `max_proposals_per_task` | integer | `3` | Maximum proposals generated per task. |
+| `proposal_ttl_days` | integer | `30` | Pending proposals older than this are auto-expired (status `expired`, history preserved) by the TimeoutChecker sweep. |
+
+---
+
+## `[approval]`
+
+Tool-call approval mode. Controls when the kernel auto-approves a tool call versus escalating it for human review. ControlPlane operations (kernel admin: key rotation, audit truncation, agent shutdown) always prompt regardless of mode.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `"ask_edit"` | Approval mode: `"auto"` (auto-approve everything except ControlPlane), `"ask_edit"` (default — auto-approve readonly tools; prompt for writes, exec, and control-plane), `"ask_always"` (prompt for everything except trivially-cheap ReadonlyScoped tools), `"deny"` (hard-deny anything that would otherwise prompt). |
+
+### `[approval.agent_overrides]`
+
+Per-agent approval mode overrides, keyed by agent display name. Each value is one of the `mode` values above.
+
+```toml
+[approval.agent_overrides]
+research-bot = "auto"
+writer-bot   = "ask_always"
+```
+
+---
+
 ## Complete `config/default.toml`
 
 See `config/default.toml` in the repository for the complete, up-to-date configuration file with inline comments. The file includes all sections documented above.
@@ -482,57 +591,7 @@ See `config/default.toml` in the repository for the complete, up-to-date configu
 
 ## Complete `config/production.toml`
 
-```toml
-[kernel]
-max_concurrent_tasks = 8
-default_task_timeout_secs = 120
-context_window_max_entries = 200
-context_window_token_budget = 16000
-health_port = 9091
-
-[secrets]
-vault_path = "/var/lib/agentos/vault/secrets.db"
-
-[audit]
-log_path = "/var/lib/agentos/data/audit.db"
-# Retain at most 500,000 entries; older rows pruned on each 10-minute sweep.
-max_audit_entries = 500000
-
-[tools]
-core_tools_dir = "/var/lib/agentos/tools/core"
-user_tools_dir = "/var/lib/agentos/tools/user"
-data_dir = "/var/lib/agentos/data"
-
-[bus]
-socket_path = "/run/agentos/agentos.sock"
-
-[ollama]
-# AGENTOS_OLLAMA_HOST overrides this when set.
-host = "http://ollama.service.consul:11434"
-default_model = "llama3.2"
-
-[llm]
-# AGENTOS_LLM_URL overrides this when set.
-custom_base_url = "https://llm-gateway.internal/v1"
-# AGENTOS_OPENAI_BASE_URL overrides this when set.
-openai_base_url = "https://api.openai.com/v1"
-anthropic_base_url = "https://api.anthropic.com/v1"
-gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
-
-[memory]
-model_cache_dir = "/var/lib/agentos/data/models"
-
-[context_budget]
-total_tokens = 128000
-reserve_pct = 0.25
-system_pct = 0.15
-tools_pct = 0.18
-knowledge_pct = 0.30
-history_pct = 0.25
-task_pct = 0.12
-```
-
-> Note: `[memory.extraction]`, `[memory.consolidation]`, and `[health_monitor]` are not present in `production.toml` and fall back to development defaults.
+See `config/production.toml` in the repository for the current production profile.
 
 ---
 

@@ -10,7 +10,7 @@
 #   AGENTOS_LLM_PROVIDER=anthropic ./release.sh     # use cloud LLM
 #
 # Prerequisites:
-#   - Rust 1.91+ (with clang + mold linker)
+#   - Rust 1.91+ (system `cc` is enough; clang + mold are optional, faster)
 #   - bubblewrap (apt install bubblewrap)
 #   - ca-certificates
 #   - Ollama running locally OR a cloud LLM API key in vault
@@ -31,6 +31,11 @@ cd "$SCRIPT_DIR"
 HOST="${AGENTOS_HOST:-127.0.0.1}"
 PORT="${AGENTOS_PORT:-8080}"
 DATA_DIR="${AGENTOS_DATA_DIR:-$HOME/.agentos}"
+# NOTE: `devpass` + auto-init is a DEV convenience only. In production do NOT
+# bake a default passphrase: provide AGENTOS_VAULT_PASSPHRASE (e.g. systemd
+# EnvironmentFile, mode 0600) or AGENTOS_VAULT_PASSPHRASE_FILE (a Docker/K8s
+# secret mount), and leave AGENTOS_AUTO_INIT_VAULT unset/false.
+# See docs/guide/07-configuration.md (vault passphrase sourcing).
 export AGENTOS_VAULT_PASSPHRASE="${AGENTOS_VAULT_PASSPHRASE:-devpass}"
 export AGENTOS_AUTO_INIT_VAULT="${AGENTOS_AUTO_INIT_VAULT:-true}"
 EXTRA_FEATURES="${AGENTOS_FEATURES:-otel}"
@@ -71,12 +76,22 @@ check_cmd() {
   fi
 }
 
+# Optional tools: nice to have for fast builds but not required.  The workspace
+# .cargo/config.toml ships with the system `cc` as the linker so a missing
+# clang/mold never blocks installation; if both are present, an operator who
+# wants the faster link can override [target] in their local cargo config.
+check_optional() {
+  if ! command -v "$1" &>/dev/null; then
+    echo "  (optional) '$1' missing — $2"
+  fi
+}
+
 echo "==> Preflight checks"
 MISSING=0
 check_cmd cargo    "Install Rust: https://rustup.rs"             || MISSING=1
-check_cmd clang    "apt install clang"                            || MISSING=1
-check_cmd mold     "apt install mold"                             || MISSING=1
 check_cmd bwrap    "apt install bubblewrap (required for shell-exec sandbox)" || MISSING=1
+check_optional clang "install clang for faster optional linking"
+check_optional mold  "install mold for faster optional linking"
 
 if [[ $MISSING -eq 1 ]]; then
   echo ""
@@ -193,8 +208,19 @@ data_dir = "$DATA_DIR/data"
 
 [tools.workspace]
 # Agent can access these host directories via storage zones.
-# Desktop and projects are auto-granted by KMC policy.
-allowed_paths = ["$HOME/Desktop", "$HOME/projects", "$HOME/Documents", "/media", "/run/media"]
+# Desktop and projects are auto-granted READ_WRITE by KMC policy.
+#
+# IMPORTANT (1): bare mount roots like "/media" or "/run/media" are rejected
+# by the workspace-grants safety policy as too broad (they would expose every
+# USB / external disk). To grant a specific removable mount, use the full
+# path, e.g. "/run/media/$USER/MyDrive".
+#
+# IMPORTANT (2): ~/Documents is intentionally NOT included by default — it
+# typically holds personal records (signed PDFs, financial statements, …)
+# that should not be writeable by an agent. Add it explicitly only if you
+# intend agents to write there, and consider scoping to a subdirectory like
+# "$HOME/Documents/agentos".
+allowed_paths = ["$HOME/Desktop", "$HOME/projects"]
 
 [bus]
 socket_path = "$DATA_DIR/data/agentos.sock"

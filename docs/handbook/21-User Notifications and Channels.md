@@ -98,6 +98,7 @@ Fire-and-forget notification. The agent calls this tool and immediately continue
 | `subject` | string | Yes | — | ≤80 chars; used as the email subject and CLI one-liner |
 | `body` | string | Yes | — | Markdown-formatted message body |
 | `priority` | string | No | `"info"` | `info`, `warning`, `urgent`, or `critical` |
+| `channels` | array of strings | No | — | Restrict delivery to specific channel display-names/kinds (e.g. `telegram`, `ntfy`, `email`, `webhook`, `cli`, `web`). Omit to fan out to all configured channels; an empty array `[]` is rejected. |
 
 **Example agent usage:**
 ```json
@@ -127,7 +128,7 @@ Blocking interactive question. The task enters `Waiting` state until the operato
 |-----|------|----------|---------|-------|
 | `question` | string | Yes | — | The question to ask the user |
 | `options` | array of strings | No | — | Optional list of allowed answer choices |
-| `timeout_secs` | u64 | No | `300` | Seconds before `auto_action` fires (0 = no timeout) |
+| `timeout_secs` | u64 | No | `300` | Seconds before `auto_action` fires. Range 10–86400 seconds. |
 | `auto_action` | string | No | `"auto_denied"` | Text injected as the answer if timeout fires with no response |
 | `priority` | string | No | `"info"` | Notification priority level |
 

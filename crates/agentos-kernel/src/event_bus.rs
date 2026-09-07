@@ -2,6 +2,7 @@ use agentos_types::*;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
@@ -22,6 +23,10 @@ enum CompiledFilter {
 struct CompiledSubscription {
     subscription: EventSubscription,
     compiled_filter: Option<CompiledFilter>,
+    /// Whether this subscription is backed by a row in the state store. False
+    /// for task-scoped / TTL subscriptions, so a later enable/disable does not
+    /// accidentally give one durable storage.
+    persistent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,15 +68,71 @@ pub struct EventBus {
     subscriptions: RwLock<Vec<CompiledSubscription>>,
     throttle_state: RwLock<HashMap<SubscriptionID, ThrottleState>>,
     max_chain_depth: u32,
+    /// Durable backing for long-lived subscriptions. Without it the registry is
+    /// emptied by every kernel restart, which is why only the role defaults
+    /// re-seeded at connect ever survived. `None` in unit tests.
+    store: Option<Arc<crate::state_store::KernelStateStore>>,
 }
 
 impl EventBus {
     pub fn new() -> Self {
+        Self::with_store(None)
+    }
+
+    pub fn with_store(store: Option<Arc<crate::state_store::KernelStateStore>>) -> Self {
         Self {
             subscriptions: RwLock::new(Vec::new()),
             throttle_state: RwLock::new(HashMap::new()),
             max_chain_depth: 5,
+            store,
         }
+    }
+
+    /// Restore persisted subscriptions at boot. Returns how many were loaded.
+    pub async fn load_persisted(&self) -> usize {
+        let Some(store) = &self.store else {
+            return 0;
+        };
+        let persisted = match store.load_event_subscriptions().await {
+            Ok(subs) => subs,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load persisted event subscriptions — agents start with role defaults only"
+                );
+                return 0;
+            }
+        };
+        let mut subs = self.subscriptions.write().await;
+        let mut loaded = 0;
+        for mut sub in persisted {
+            // Defensive: a re-run of load_persisted must not duplicate.
+            if subs.iter().any(|s| s.subscription.id == sub.id) {
+                continue;
+            }
+            // `throttle` is `#[serde(default)]` = `None`, so every row written
+            // before the default cap existed reloads unbounded. Floor it.
+            let floored = floor_throttle(sub.throttle.clone());
+            if floored != sub.throttle {
+                tracing::warn!(
+                    subscription_id = %sub.id,
+                    agent_id = %sub.agent_id,
+                    "Persisted event subscription has no throttle; applying throttle floor \
+                     in memory (the stored row is left unchanged). Explicit unbounded \
+                     subscriptions are not supported across restarts — re-create the \
+                     subscription with an explicit rate policy if this is intentional"
+                );
+                sub.throttle = floored;
+            }
+            let compiled_filter = Self::compile_filter(&sub);
+            subs.push(CompiledSubscription {
+                subscription: sub,
+                compiled_filter,
+                persistent: true,
+            });
+            loaded += 1;
+        }
+        loaded
     }
 
     /// Maximum chain depth before loop detection triggers.
@@ -81,25 +142,134 @@ impl EventBus {
 
     // ── Subscription CRUD ─────────────────────────────────────────
 
+    /// Register a long-lived subscription. Persisted, so it survives a kernel
+    /// restart. Every caller that is not explicitly transient goes through here
+    /// — CLI, REST, the `event-subscribe` tool, and role seeding at connect.
     pub async fn subscribe(&self, sub: EventSubscription) -> SubscriptionID {
-        let id = sub.id;
-        let compiled_filter = Self::compile_filter(&sub);
-        self.subscriptions.write().await.push(CompiledSubscription {
-            subscription: sub,
-            compiled_filter,
-        });
+        let (id, inserted) = self.insert(sub.clone(), true).await;
+        if !inserted {
+            // Deduplicated onto an existing subscription — it already has its row.
+            return id;
+        }
+        if let Some(store) = &self.store {
+            if let Err(e) = store.upsert_event_subscription(sub).await {
+                tracing::warn!(
+                    subscription_id = %id,
+                    error = %e,
+                    "Failed to persist event subscription — it will not survive a restart"
+                );
+            }
+        }
         id
     }
 
-    pub async fn unsubscribe(&self, id: &SubscriptionID) -> bool {
+    /// Register a subscription that must NOT outlive this kernel process.
+    ///
+    /// Task-scoped and TTL subscriptions only: after a restart the owning task
+    /// and the expiry timer are both gone, so a persisted one would be a zombie
+    /// that keeps spawning tasks with nothing left to remove it.
+    pub async fn subscribe_transient(&self, sub: EventSubscription) -> SubscriptionID {
+        self.insert(sub, false).await.0
+    }
+
+    /// Insert unless an equivalent enabled subscription already exists. Returns
+    /// the subscription id and whether a new entry was actually added.
+    ///
+    /// Without this guard every re-registration — a role re-seed, a retried REST
+    /// call, an agent re-running `event-subscribe` — stacks another identical
+    /// subscription, and one event then fans out into N duplicate tasks.
+    /// Dedup is on (agent, event type filter, payload filter, priority,
+    /// throttle): the same agent asking for the same events under the same
+    /// policy twice gets the same subscription back.
+    ///
+    /// **Only persistent subscriptions are deduped**, and only against each
+    /// other. A transient subscription is owned by exactly one task or expiry
+    /// timer, which unsubscribes it when it finishes — sharing an id across
+    /// that boundary means the first owner to finish deletes someone else's
+    /// subscription (a task-scoped `subscribe` aliasing onto a role seed would
+    /// destroy that seed in memory *and* in the state store), or a "permanent"
+    /// subscription silently inherits a transient entry, never gets persisted,
+    /// and dies with the task.
+    async fn insert(&self, sub: EventSubscription, persistent: bool) -> (SubscriptionID, bool) {
+        let compiled_filter = Self::compile_filter(&sub);
         let mut subs = self.subscriptions.write().await;
-        let before = subs.len();
-        subs.retain(|s| s.subscription.id != *id);
-        let removed = subs.len() < before;
+        // Disabled subscriptions are not deduped against: the caller asked for a
+        // live one, and returning a switched-off id would silently deliver nothing.
+        let existing = if persistent {
+            subs.iter()
+                .find(|s| {
+                    s.persistent
+                        && s.subscription.enabled
+                        && s.subscription.agent_id == sub.agent_id
+                        && s.subscription.event_type_filter == sub.event_type_filter
+                        && s.subscription.filter == sub.filter
+                        // A different rate policy is a different subscription:
+                        // `default_role_subscription_throttle` documents that an
+                        // agent needing a higher ceiling re-subscribes with an
+                        // explicit one, and deduping would silently discard it.
+                        && s.subscription.priority == sub.priority
+                        && s.subscription.throttle == sub.throttle
+                })
+                .map(|s| s.subscription.id)
+        } else {
+            None
+        };
+        if let Some(existing_id) = existing {
+            tracing::debug!(
+                subscription_id = %existing_id,
+                agent_id = %sub.agent_id,
+                "Duplicate event subscription request; reusing the existing subscription"
+            );
+            return (existing_id, false);
+        }
+        let id = sub.id;
+        subs.push(CompiledSubscription {
+            subscription: sub,
+            compiled_filter,
+            persistent,
+        });
+        (id, true)
+    }
+
+    pub async fn unsubscribe(&self, id: &SubscriptionID) -> bool {
+        let removed = {
+            let mut subs = self.subscriptions.write().await;
+            let before = subs.len();
+            subs.retain(|s| s.subscription.id != *id);
+            subs.len() < before
+        };
         if removed {
             self.throttle_state.write().await.remove(id);
+            self.forget_persisted(*id).await;
         }
         removed
+    }
+
+    async fn forget_persisted(&self, id: SubscriptionID) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_event_subscription(id).await {
+                tracing::warn!(
+                    subscription_id = %id,
+                    error = %e,
+                    "Failed to delete persisted event subscription — it may return after a restart"
+                );
+            }
+        }
+    }
+
+    /// Re-persist a subscription after an in-place mutation (enable/disable).
+    /// No-op for transient subscriptions, which must never gain a row.
+    async fn repersist(&self, sub: Option<EventSubscription>) {
+        let (Some(store), Some(sub)) = (&self.store, sub) else {
+            return;
+        };
+        if let Err(e) = store.upsert_event_subscription(sub.clone()).await {
+            tracing::warn!(
+                subscription_id = %sub.id,
+                error = %e,
+                "Failed to persist event subscription state change"
+            );
+        }
     }
 
     pub async fn list_subscriptions(&self) -> Vec<EventSubscription> {
@@ -131,23 +301,27 @@ impl EventBus {
     }
 
     pub async fn enable_subscription(&self, id: &SubscriptionID) -> bool {
-        let mut subs = self.subscriptions.write().await;
-        if let Some(sub) = subs.iter_mut().find(|s| s.subscription.id == *id) {
-            sub.subscription.enabled = true;
-            true
-        } else {
-            false
-        }
+        self.set_enabled(id, true).await
     }
 
     pub async fn disable_subscription(&self, id: &SubscriptionID) -> bool {
-        let mut subs = self.subscriptions.write().await;
-        if let Some(sub) = subs.iter_mut().find(|s| s.subscription.id == *id) {
-            sub.subscription.enabled = false;
-            true
-        } else {
-            false
-        }
+        self.set_enabled(id, false).await
+    }
+
+    async fn set_enabled(&self, id: &SubscriptionID, enabled: bool) -> bool {
+        let (found, to_persist) = {
+            let mut subs = self.subscriptions.write().await;
+            match subs.iter_mut().find(|s| s.subscription.id == *id) {
+                Some(sub) => {
+                    sub.subscription.enabled = enabled;
+                    let persist = sub.persistent.then(|| sub.subscription.clone());
+                    (true, persist)
+                }
+                None => (false, None),
+            }
+        };
+        self.repersist(to_persist).await;
+        found
     }
 
     // ── Subscription evaluation ───────────────────────────────────
@@ -370,6 +544,45 @@ pub fn event_observe_permissions_for_role(role: &str) -> Vec<&'static str> {
     }
 }
 
+/// Rate cap applied to every subscription created without an explicit policy —
+/// kernel role seeds, the `event-subscribe` agent tool, the `subscribe` intent,
+/// the CLI, and the REST API. Callers opt out with an explicit `"none"`.
+///
+/// Defence in depth behind the `causing_agent` self-exclusion guard in
+/// `event_dispatch.rs`. Self-exclusion cannot catch a multi-agent cycle
+/// (A's activity triggers B, B's activity triggers A), and it fails open for
+/// emit sites whose payload carries no recognizable causer key. Without a
+/// throttle those residual cases run at wire speed — the 2026-07-26 incident
+/// produced ~88k tasks/hour from a single self-matching subscription.
+///
+/// 30/minute is far above real orchestration rates. An agent that genuinely
+/// needs a higher ceiling can re-subscribe via `event-subscribe` with its own
+/// explicit policy. Rows persisted with `ThrottlePolicy::None` are lifted to
+/// this cap at boot — see [`floor_throttle`].
+pub fn default_role_subscription_throttle() -> ThrottlePolicy {
+    ThrottlePolicy::MaxCountPerDuration(30, std::time::Duration::from_secs(60))
+}
+
+/// Lift an unbounded throttle to [`default_role_subscription_throttle`].
+///
+/// Applied to every subscription restored by `load_persisted`. `throttle` is
+/// `#[serde(default)]`, so every row written before the default cap existed
+/// deserialises to `ThrottlePolicy::None` — one such row delivered 60 events in
+/// 2 seconds on 2026-08-31, and reloading it as-is re-arms that flood on every
+/// restart.
+///
+/// The floor is applied **in memory only**; the stored row keeps its `None`.
+/// The trade-off is that `throttle "none"` from the CLI/REST subscribe path
+/// still stores `None` and is therefore floored again at the next boot, so an
+/// explicitly unbounded subscription does not survive a restart. Accepted:
+/// replaying a known flood is worse than ignoring a rare opt-out.
+pub fn floor_throttle(policy: ThrottlePolicy) -> ThrottlePolicy {
+    match policy {
+        ThrottlePolicy::None => default_role_subscription_throttle(),
+        bounded => bounded,
+    }
+}
+
 /// Default event subscriptions for a role.
 pub fn default_subscriptions_for_role(role: &str) -> Vec<(EventTypeFilter, SubscriptionPriority)> {
     match role.trim().to_ascii_lowercase().as_str() {
@@ -456,94 +669,126 @@ pub fn parse_event_category(name: &str) -> Option<EventCategory> {
     }
 }
 
+/// Canonical table of **subscribable** events: every name accepted by
+/// [`parse_event_type`], in display order. The `EventType` enum has extra
+/// variants (internal-only events) that are deliberately absent here.
+///
+/// This is the single source of truth for BOTH the parser and the generated
+/// panel event catalog (`gen-events` bin in `agentos-api`) — add a row here
+/// and both stay in sync by construction.
+pub const SUBSCRIBABLE_EVENTS: &[(&str, EventType)] = &[
+    // AgentLifecycle
+    ("AgentAdded", EventType::AgentAdded),
+    ("AgentRemoved", EventType::AgentRemoved),
+    ("AgentPermissionGranted", EventType::AgentPermissionGranted),
+    ("AgentPermissionRevoked", EventType::AgentPermissionRevoked),
+    // TaskLifecycle
+    ("TaskStarted", EventType::TaskStarted),
+    ("TaskCompleted", EventType::TaskCompleted),
+    ("TaskFailed", EventType::TaskFailed),
+    ("TaskTimedOut", EventType::TaskTimedOut),
+    ("TaskDelegated", EventType::TaskDelegated),
+    ("TaskRetrying", EventType::TaskRetrying),
+    ("TaskDeadlockDetected", EventType::TaskDeadlockDetected),
+    ("TaskPreempted", EventType::TaskPreempted),
+    // AgentCommunication
+    ("ChatMessageAdded", EventType::ChatMessageAdded),
+    // SecurityEvents
+    ("PromptInjectionAttempt", EventType::PromptInjectionAttempt),
+    ("CapabilityViolation", EventType::CapabilityViolation),
+    ("UnauthorizedToolAccess", EventType::UnauthorizedToolAccess),
+    ("SecretsAccessAttempt", EventType::SecretsAccessAttempt),
+    ("SandboxEscapeAttempt", EventType::SandboxEscapeAttempt),
+    ("AuditLogTamperAttempt", EventType::AuditLogTamperAttempt),
+    (
+        "AgentImpersonationAttempt",
+        EventType::AgentImpersonationAttempt,
+    ),
+    (
+        "UnverifiedToolInstalled",
+        EventType::UnverifiedToolInstalled,
+    ),
+    // MemoryEvents
+    ("ContextWindowNearLimit", EventType::ContextWindowNearLimit),
+    ("ContextWindowExhausted", EventType::ContextWindowExhausted),
+    ("EpisodicMemoryWritten", EventType::EpisodicMemoryWritten),
+    ("SemanticMemoryConflict", EventType::SemanticMemoryConflict),
+    ("MemorySearchFailed", EventType::MemorySearchFailed),
+    ("WorkingMemoryEviction", EventType::WorkingMemoryEviction),
+    // SystemHealth
+    ("CPUSpikeDetected", EventType::CPUSpikeDetected),
+    ("MemoryPressure", EventType::MemoryPressure),
+    ("DiskSpaceLow", EventType::DiskSpaceLow),
+    ("DiskSpaceCritical", EventType::DiskSpaceCritical),
+    ("ProcessCrashed", EventType::ProcessCrashed),
+    ("NetworkInterfaceDown", EventType::NetworkInterfaceDown),
+    (
+        "ContainerResourceQuotaExceeded",
+        EventType::ContainerResourceQuotaExceeded,
+    ),
+    ("KernelSubsystemError", EventType::KernelSubsystemError),
+    // HardwareEvents
+    ("GPUAvailable", EventType::GPUAvailable),
+    ("GPUMemoryPressure", EventType::GPUMemoryPressure),
+    (
+        "SensorReadingThresholdExceeded",
+        EventType::SensorReadingThresholdExceeded,
+    ),
+    ("DeviceConnected", EventType::DeviceConnected),
+    ("DeviceDisconnected", EventType::DeviceDisconnected),
+    ("HardwareAccessGranted", EventType::HardwareAccessGranted),
+    ("DeviceMounted", EventType::DeviceMounted),
+    ("DeviceUnmounted", EventType::DeviceUnmounted),
+    ("DeviceEjected", EventType::DeviceEjected),
+    ("PrintJobSubmitted", EventType::PrintJobSubmitted),
+    ("PrintJobCancelled", EventType::PrintJobCancelled),
+    ("AudioCaptureStarted", EventType::AudioCaptureStarted),
+    ("AudioCaptureStopped", EventType::AudioCaptureStopped),
+    ("AudioPlaybackStarted", EventType::AudioPlaybackStarted),
+    ("WebcamCaptureStarted", EventType::WebcamCaptureStarted),
+    ("WebcamCaptureStopped", EventType::WebcamCaptureStopped),
+    ("BluetoothScanStarted", EventType::BluetoothScanStarted),
+    ("BluetoothPairRequested", EventType::BluetoothPairRequested),
+    ("BluetoothConnected", EventType::BluetoothConnected),
+    // ToolEvents
+    ("ToolInstalled", EventType::ToolInstalled),
+    ("ToolRemoved", EventType::ToolRemoved),
+    ("ToolExecutionFailed", EventType::ToolExecutionFailed),
+    ("ToolSandboxViolation", EventType::ToolSandboxViolation),
+    (
+        "ToolResourceQuotaExceeded",
+        EventType::ToolResourceQuotaExceeded,
+    ),
+    ("ToolChecksumMismatch", EventType::ToolChecksumMismatch),
+    ("ToolRegistryUpdated", EventType::ToolRegistryUpdated),
+    // AgentCommunication
+    ("DirectMessageReceived", EventType::DirectMessageReceived),
+    ("BroadcastReceived", EventType::BroadcastReceived),
+    ("DelegationReceived", EventType::DelegationReceived),
+    (
+        "DelegationResponseReceived",
+        EventType::DelegationResponseReceived,
+    ),
+    ("MessageDeliveryFailed", EventType::MessageDeliveryFailed),
+    ("AgentUnreachable", EventType::AgentUnreachable),
+    // ScheduleEvents
+    ("CronJobFired", EventType::CronJobFired),
+    ("ScheduledTaskMissed", EventType::ScheduledTaskMissed),
+    ("ScheduledTaskCompleted", EventType::ScheduledTaskCompleted),
+    ("ScheduledTaskFailed", EventType::ScheduledTaskFailed),
+    // ExternalEvents
+    ("WebhookReceived", EventType::WebhookReceived),
+    ("ExternalFileChanged", EventType::ExternalFileChanged),
+    ("ExternalAPIEvent", EventType::ExternalAPIEvent),
+    ("ExternalAlertReceived", EventType::ExternalAlertReceived),
+];
+
 pub fn parse_event_type(name: &str) -> Option<EventType> {
-    match name {
-        // AgentLifecycle
-        "AgentAdded" => Some(EventType::AgentAdded),
-        "AgentRemoved" => Some(EventType::AgentRemoved),
-        "AgentPermissionGranted" => Some(EventType::AgentPermissionGranted),
-        "AgentPermissionRevoked" => Some(EventType::AgentPermissionRevoked),
-        // TaskLifecycle
-        "TaskStarted" => Some(EventType::TaskStarted),
-        "TaskCompleted" => Some(EventType::TaskCompleted),
-        "TaskFailed" => Some(EventType::TaskFailed),
-        "TaskTimedOut" => Some(EventType::TaskTimedOut),
-        "TaskDelegated" => Some(EventType::TaskDelegated),
-        "TaskRetrying" => Some(EventType::TaskRetrying),
-        "TaskDeadlockDetected" => Some(EventType::TaskDeadlockDetected),
-        "TaskPreempted" => Some(EventType::TaskPreempted),
-        // SecurityEvents
-        "PromptInjectionAttempt" => Some(EventType::PromptInjectionAttempt),
-        "CapabilityViolation" => Some(EventType::CapabilityViolation),
-        "UnauthorizedToolAccess" => Some(EventType::UnauthorizedToolAccess),
-        "SecretsAccessAttempt" => Some(EventType::SecretsAccessAttempt),
-        "SandboxEscapeAttempt" => Some(EventType::SandboxEscapeAttempt),
-        "AuditLogTamperAttempt" => Some(EventType::AuditLogTamperAttempt),
-        "AgentImpersonationAttempt" => Some(EventType::AgentImpersonationAttempt),
-        "UnverifiedToolInstalled" => Some(EventType::UnverifiedToolInstalled),
-        // MemoryEvents
-        "ContextWindowNearLimit" => Some(EventType::ContextWindowNearLimit),
-        "ContextWindowExhausted" => Some(EventType::ContextWindowExhausted),
-        "EpisodicMemoryWritten" => Some(EventType::EpisodicMemoryWritten),
-        "SemanticMemoryConflict" => Some(EventType::SemanticMemoryConflict),
-        "MemorySearchFailed" => Some(EventType::MemorySearchFailed),
-        "WorkingMemoryEviction" => Some(EventType::WorkingMemoryEviction),
-        // SystemHealth
-        "CPUSpikeDetected" => Some(EventType::CPUSpikeDetected),
-        "MemoryPressure" => Some(EventType::MemoryPressure),
-        "DiskSpaceLow" => Some(EventType::DiskSpaceLow),
-        "DiskSpaceCritical" => Some(EventType::DiskSpaceCritical),
-        "ProcessCrashed" => Some(EventType::ProcessCrashed),
-        "NetworkInterfaceDown" => Some(EventType::NetworkInterfaceDown),
-        "ContainerResourceQuotaExceeded" => Some(EventType::ContainerResourceQuotaExceeded),
-        "KernelSubsystemError" => Some(EventType::KernelSubsystemError),
-        // HardwareEvents
-        "GPUAvailable" => Some(EventType::GPUAvailable),
-        "GPUMemoryPressure" => Some(EventType::GPUMemoryPressure),
-        "SensorReadingThresholdExceeded" => Some(EventType::SensorReadingThresholdExceeded),
-        "DeviceConnected" => Some(EventType::DeviceConnected),
-        "DeviceDisconnected" => Some(EventType::DeviceDisconnected),
-        "HardwareAccessGranted" => Some(EventType::HardwareAccessGranted),
-        "DeviceMounted" => Some(EventType::DeviceMounted),
-        "DeviceUnmounted" => Some(EventType::DeviceUnmounted),
-        "DeviceEjected" => Some(EventType::DeviceEjected),
-        "PrintJobSubmitted" => Some(EventType::PrintJobSubmitted),
-        "PrintJobCancelled" => Some(EventType::PrintJobCancelled),
-        "AudioCaptureStarted" => Some(EventType::AudioCaptureStarted),
-        "AudioCaptureStopped" => Some(EventType::AudioCaptureStopped),
-        "AudioPlaybackStarted" => Some(EventType::AudioPlaybackStarted),
-        "WebcamCaptureStarted" => Some(EventType::WebcamCaptureStarted),
-        "WebcamCaptureStopped" => Some(EventType::WebcamCaptureStopped),
-        "BluetoothScanStarted" => Some(EventType::BluetoothScanStarted),
-        "BluetoothPairRequested" => Some(EventType::BluetoothPairRequested),
-        "BluetoothConnected" => Some(EventType::BluetoothConnected),
-        // ToolEvents
-        "ToolInstalled" => Some(EventType::ToolInstalled),
-        "ToolRemoved" => Some(EventType::ToolRemoved),
-        "ToolExecutionFailed" => Some(EventType::ToolExecutionFailed),
-        "ToolSandboxViolation" => Some(EventType::ToolSandboxViolation),
-        "ToolResourceQuotaExceeded" => Some(EventType::ToolResourceQuotaExceeded),
-        "ToolChecksumMismatch" => Some(EventType::ToolChecksumMismatch),
-        "ToolRegistryUpdated" => Some(EventType::ToolRegistryUpdated),
-        // AgentCommunication
-        "DirectMessageReceived" => Some(EventType::DirectMessageReceived),
-        "BroadcastReceived" => Some(EventType::BroadcastReceived),
-        "DelegationReceived" => Some(EventType::DelegationReceived),
-        "DelegationResponseReceived" => Some(EventType::DelegationResponseReceived),
-        "MessageDeliveryFailed" => Some(EventType::MessageDeliveryFailed),
-        "AgentUnreachable" => Some(EventType::AgentUnreachable),
-        // ScheduleEvents
-        "CronJobFired" => Some(EventType::CronJobFired),
-        "ScheduledTaskMissed" => Some(EventType::ScheduledTaskMissed),
-        "ScheduledTaskCompleted" => Some(EventType::ScheduledTaskCompleted),
-        "ScheduledTaskFailed" => Some(EventType::ScheduledTaskFailed),
-        // ExternalEvents
-        "WebhookReceived" => Some(EventType::WebhookReceived),
-        "ExternalFileChanged" => Some(EventType::ExternalFileChanged),
-        "ExternalAPIEvent" => Some(EventType::ExternalAPIEvent),
-        "ExternalAlertReceived" => Some(EventType::ExternalAlertReceived),
-        _ => None,
-    }
+    // Linear scan is fine: called on subscribe, not on the event hot path.
+    SUBSCRIBABLE_EVENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| *t)
 }
 
 pub fn parse_filter(filter_str: &str) -> Result<EventFilterExpr, String> {
@@ -1013,6 +1258,278 @@ mod tests {
         }
     }
 
+    /// A durable subscription must outlive the process; a transient one must not.
+    /// This is the whole point of the store — before it, every subscription an
+    /// agent made for itself died at the next kernel restart, so the only
+    /// surviving ones were the role defaults re-seeded at connect.
+    #[tokio::test]
+    async fn test_persisted_subscriptions_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::state_store::KernelStateStore::open(dir.path().join("state.db"))
+                .await
+                .unwrap(),
+        );
+        let agent_id = AgentID::new();
+
+        let bus = EventBus::with_store(Some(store.clone()));
+        let durable = bus
+            .subscribe(make_subscription(
+                agent_id,
+                EventTypeFilter::Exact(EventType::DiskSpaceLow),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        let transient = bus
+            .subscribe_transient(make_subscription(
+                agent_id,
+                EventTypeFilter::Exact(EventType::CPUSpikeDetected),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        assert_eq!(bus.list_subscriptions().await.len(), 2);
+
+        // Restart: a fresh bus over the same store.
+        let bus = EventBus::with_store(Some(store.clone()));
+        assert_eq!(bus.load_persisted().await, 1);
+        assert!(bus.get_subscription(&durable).await.is_some());
+        assert!(bus.get_subscription(&transient).await.is_none());
+
+        // An enable/disable toggle is persisted too.
+        assert!(bus.disable_subscription(&durable).await);
+        let bus = EventBus::with_store(Some(store.clone()));
+        assert_eq!(bus.load_persisted().await, 1);
+        assert!(!bus.get_subscription(&durable).await.unwrap().enabled);
+
+        // Unsubscribing drops the row, not just the in-memory entry.
+        assert!(bus.unsubscribe(&durable).await);
+        let bus = EventBus::with_store(Some(store));
+        assert_eq!(bus.load_persisted().await, 0);
+    }
+
+    /// A row persisted before the default cap existed carries no throttle and
+    /// would otherwise be reloaded unbounded — one such row delivered 60 events
+    /// in 2 seconds on 2026-08-31.
+    #[test]
+    fn test_floor_throttle_lifts_none_only() {
+        assert_eq!(
+            floor_throttle(ThrottlePolicy::None),
+            default_role_subscription_throttle()
+        );
+        // An explicit bounded policy is passed through untouched.
+        let explicit = ThrottlePolicy::MaxOncePerDuration(Duration::from_secs(3600));
+        assert_eq!(floor_throttle(explicit.clone()), explicit);
+        let explicit = ThrottlePolicy::MaxCountPerDuration(2, Duration::from_secs(5));
+        assert_eq!(floor_throttle(explicit.clone()), explicit);
+    }
+
+    /// End-to-end of the floor: an unthrottled row on disk comes back capped.
+    #[tokio::test]
+    async fn test_unthrottled_persisted_subscription_is_floored_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::state_store::KernelStateStore::open(dir.path().join("state.db"))
+                .await
+                .unwrap(),
+        );
+
+        let bus = EventBus::with_store(Some(store.clone()));
+        let id = bus
+            .subscribe(make_subscription(
+                AgentID::new(),
+                EventTypeFilter::All,
+                ThrottlePolicy::None,
+            ))
+            .await;
+
+        // Restart: the reloaded copy must not be unbounded.
+        let bus = EventBus::with_store(Some(store));
+        assert_eq!(bus.load_persisted().await, 1);
+        assert_eq!(
+            bus.get_subscription(&id).await.unwrap().throttle,
+            default_role_subscription_throttle()
+        );
+    }
+
+    /// Re-registering the same (agent, event filter, payload filter) must reuse
+    /// the existing subscription. Stacking duplicates turns one event into N
+    /// identical tasks.
+    #[tokio::test]
+    async fn test_duplicate_subscribe_returns_existing_id() {
+        let bus = EventBus::new();
+        let agent = AgentID::new();
+
+        let first = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        let second = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+
+        assert_eq!(first, second, "duplicate must reuse the existing id");
+        assert_eq!(bus.list_subscriptions().await.len(), 1);
+        // One event, one delivery — not two.
+        assert_eq!(
+            bus.evaluate_subscriptions(&make_event(EventType::AgentAdded))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    /// The guard is keyed on the full match criteria: a different event filter,
+    /// a different payload filter, or a different agent is a distinct subscription.
+    #[tokio::test]
+    async fn test_different_filter_creates_new_subscription() {
+        let bus = EventBus::new();
+        let agent = AgentID::new();
+
+        let first = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        let other_type = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentRemoved),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        let other_payload_filter = bus
+            .subscribe(make_subscription_with_payload_filter(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+                Some("agent_name == alice"),
+            ))
+            .await;
+        let other_agent = bus
+            .subscribe(make_subscription(
+                AgentID::new(),
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+
+        assert_ne!(first, other_type);
+        assert_ne!(first, other_payload_filter);
+        assert_ne!(first, other_agent);
+        assert_eq!(bus.list_subscriptions().await.len(), 4);
+    }
+
+    /// A task-scoped subscription must never alias onto a permanent one: the
+    /// task unsubscribes at the end, which would delete the role seed from
+    /// memory *and* from the state store. Dedup only ever matches persistent
+    /// subscriptions against each other.
+    #[tokio::test]
+    async fn test_transient_never_dedups_onto_persistent() {
+        let bus = EventBus::new();
+        let agent = AgentID::new();
+
+        let seed = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Category(EventCategory::AgentLifecycle),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        // Task-scoped request for the very same filter.
+        let task_scoped = bus
+            .subscribe_transient(make_subscription(
+                agent,
+                EventTypeFilter::Category(EventCategory::AgentLifecycle),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        assert_ne!(seed, task_scoped, "a transient sub must get its own id");
+
+        // Two task-scoped subs must not alias each other either.
+        let other_task = bus
+            .subscribe_transient(make_subscription(
+                agent,
+                EventTypeFilter::Category(EventCategory::AgentLifecycle),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        assert_ne!(task_scoped, other_task);
+
+        // And a later permanent subscription must not inherit a transient entry,
+        // which would leave it unpersisted and dying with the task.
+        let bus2 = EventBus::new();
+        let transient = bus2
+            .subscribe_transient(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        let permanent = bus2
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::None,
+            ))
+            .await;
+        assert_ne!(transient, permanent);
+
+        // The task ending must not take the seed with it.
+        assert!(bus.unsubscribe(&task_scoped).await);
+        assert!(bus.get_subscription(&seed).await.is_some());
+    }
+
+    /// Re-subscribing with an explicit, different rate policy must create its
+    /// own subscription — `default_role_subscription_throttle` documents that
+    /// as the way to raise the ceiling, and deduping would silently discard it.
+    #[tokio::test]
+    async fn test_explicit_throttle_is_not_deduped_away() {
+        let bus = EventBus::new();
+        let agent = AgentID::new();
+
+        let seeded = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                default_role_subscription_throttle(),
+            ))
+            .await;
+        let faster = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                ThrottlePolicy::MaxCountPerDuration(300, Duration::from_secs(60)),
+            ))
+            .await;
+        assert_ne!(
+            seeded, faster,
+            "a different rate policy is a new subscription"
+        );
+        assert_eq!(
+            bus.get_subscription(&faster).await.unwrap().throttle,
+            ThrottlePolicy::MaxCountPerDuration(300, Duration::from_secs(60))
+        );
+
+        // An exactly identical re-subscribe still dedups.
+        let again = bus
+            .subscribe(make_subscription(
+                agent,
+                EventTypeFilter::Exact(EventType::AgentAdded),
+                default_role_subscription_throttle(),
+            ))
+            .await;
+        assert_eq!(seeded, again);
+    }
+
     fn make_event(event_type: EventType) -> EventMessage {
         make_event_with_payload(event_type, json!({}))
     }
@@ -1028,6 +1545,24 @@ mod tests {
             signature: vec![],
             trace_id: TraceID::new(),
             chain_depth: 0,
+        }
+    }
+
+    /// SUBSCRIBABLE_EVENTS is the single source for the parser AND the
+    /// generated panel catalog — pin its internal coherence: names are unique,
+    /// each name is the exact Debug name of its EventType (no typo'd strings),
+    /// and parse_event_type round-trips every row.
+    #[test]
+    fn test_subscribable_events_table_is_coherent() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, ty) in SUBSCRIBABLE_EVENTS {
+            assert!(seen.insert(*name), "duplicate table entry: {name}");
+            assert_eq!(
+                *name,
+                format!("{ty:?}"),
+                "table name does not match the variant's Debug name"
+            );
+            assert_eq!(parse_event_type(name), Some(*ty));
         }
     }
 
@@ -1050,6 +1585,41 @@ mod tests {
     #[test]
     fn test_parse_event_type_filter_rejects_category_event_mismatch() {
         assert_eq!(parse_event_type_filter("TaskLifecycle.AgentAdded"), None);
+    }
+
+    #[test]
+    fn test_default_role_subscription_throttle_is_bounded() {
+        // A `None` throttle here is what let the 2026-07-26 trigger loop run at
+        // ~88k tasks/hour. Any seeded subscription must carry a rate cap.
+        match default_role_subscription_throttle() {
+            ThrottlePolicy::None => panic!("role-seeded subscriptions must be throttled"),
+            ThrottlePolicy::MaxCountPerDuration(count, window) => {
+                assert!(count > 0);
+                assert!(window.as_secs() > 0);
+            }
+            ThrottlePolicy::MaxOncePerDuration(window) => assert!(window.as_secs() > 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_seeded_throttle_drops_a_flood() {
+        let bus = EventBus::new();
+        let sub_id = SubscriptionID::new();
+        let policy = default_role_subscription_throttle();
+        let ThrottlePolicy::MaxCountPerDuration(cap, _) = policy else {
+            panic!("expected a count-based cap");
+        };
+
+        for i in 0..cap {
+            assert!(
+                bus.check_throttle_allowed(&sub_id, &policy).await,
+                "delivery {i} should be allowed within the cap"
+            );
+        }
+        assert!(
+            !bus.check_throttle_allowed(&sub_id, &policy).await,
+            "delivery past the cap must be dropped inside the window"
+        );
     }
 
     #[test]

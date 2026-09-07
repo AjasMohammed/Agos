@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Management · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a><div class="nav-subs"><a class="nav-sub" href="#what-is-an-agent" data-target="what-is-an-agent">What Is an Agent?</a><a class="nav-sub" href="#agent-lifecycle" data-target="agent-lifecycle">Agent Lifecycle</a><a class="nav-sub" href="#connecting-agents" data-target="connecting-agents">Connecting Agents</a><a class="nav-sub" href="#listing-agents" data-target="listing-agents">Listing Agents</a><a class="nav-sub" href="#disconnecting-agents" data-target="disconnecting-agents">Disconnecting Agents</a><a class="nav-sub" href="#agent-messaging" data-target="agent-messaging">Agent Messaging</a><a class="nav-sub" href="#viewing-messages" data-target="viewing-messages">Viewing Messages</a><a class="nav-sub" href="#agent-groups" data-target="agent-groups">Agent Groups</a><a class="nav-sub" href="#agent-identity" data-target="agent-identity">Agent Identity</a><a class="nav-sub" href="#permissions-and-roles" data-target="permissions-and-roles">Permissions and Roles</a><a class="nav-sub" href="#multi-agent-coordination" data-target="multi-agent-coordination">Multi-Agent Coordination</a><a class="nav-sub" href="#agent-teams" data-target="agent-teams">Agent Teams</a><a class="nav-sub" href="#agent-registry-persistence" data-target="agent-registry-persistence">Agent Registry Persistence</a><a class="nav-sub" href="#summary" data-target="summary">Summary</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 05 · Agent Management</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 05</div><h1 class="ch-title">Agent Management</h1><p class="ch-summary">Agent lifecycle, messaging, groups, identity keys, agent registry, multi-agent coordination (sub-agents, teams)</p></div>
+    <article class="prose"><h1 id="agent-management" class="anchored"><a class="hanchor" href="#agent-management" aria-label="link">#</a>Agent Management</h1>
+<blockquote><p>Agents are LLMs connected to the AgentOS kernel — each with a name, provider, model, cryptographic identity, permissions, and roles. This chapter covers the full agent lifecycle from connection through messaging to disconnection.</p></blockquote>
+<hr>
+<h2 id="what-is-an-agent" class="anchored"><a class="hanchor" href="#what-is-an-agent" aria-label="link">#</a>What Is an Agent?</h2>
+<p>An agent in AgentOS is an LLM instance registered with the kernel. Each agent has:</p>
+<ul><li><strong>Name</strong> — a unique human-readable identifier (e.g., <code>&quot;alice&quot;</code>, <code>&quot;code-reviewer&quot;</code>)</li><li><strong>Provider</strong> — the LLM backend (<code>Ollama</code>, <code>OpenAI</code>, <code>Anthropic</code>, <code>Gemini</code>, or <code>Custom</code>)</li><li><strong>Model</strong> — the specific model to use (e.g., <code>llama3.2</code>, <code>gpt-4o</code>, <code>claude-sonnet-4-20250514</code>)</li><li><strong>Status</strong> — current state: <code>Online</code>, <code>Idle</code>, <code>Busy</code>, or <code>Offline</code></li><li><strong>Permissions</strong> — a <code>PermissionSet</code> controlling what the agent can access</li><li><strong>Roles</strong> — one or more roles that grant additional permissions (every agent gets <code>base</code>)</li><li><strong>Identity</strong> — an Ed25519 keypair for cryptographic message signing</li><li><strong>Current task</strong> — the task the agent is currently executing, if any</li></ul>
+<p>Agents are defined by the <code>AgentProfile</code> struct in <code>crates/agentos-types/src/agent.rs</code>.</p>
+<hr>
+<h2 id="agent-lifecycle" class="anchored"><a class="hanchor" href="#agent-lifecycle" aria-label="link">#</a>Agent Lifecycle</h2>
+<div class="mermaid-wrap"><pre class="mermaid">graph LR
+    A[Connect] --&gt; B[Online]
+    B --&gt; C{Execute Tasks}
+    C --&gt; D[Busy]
+    D --&gt; C
+    C --&gt; E[Idle]
+    E --&gt; C
+    B --&gt; F[Disconnect]
+    D --&gt; F
+    E --&gt; F
+    F --&gt; G[Offline]</pre><details class="mermaid-src"><summary>diagram source</summary><pre><code>graph LR
+    A[Connect] --&gt; B[Online]
+    B --&gt; C{Execute Tasks}
+    C --&gt; D[Busy]
+    D --&gt; C
+    C --&gt; E[Idle]
+    E --&gt; C
+    B --&gt; F[Disconnect]
+    D --&gt; F
+    E --&gt; F
+    F --&gt; G[Offline]</code></pre></details></div>
+<ol><li><strong>Connect</strong> — register the agent with a provider, model, and name</li><li><strong>Online</strong> — agent is ready to receive tasks and messages</li><li><strong>Busy</strong> — agent is actively executing a task</li><li><strong>Idle</strong> — agent is connected but not currently working</li><li><strong>Disconnect</strong> — remove the agent from the kernel</li></ol>
+<hr>
+<h2 id="connecting-agents" class="anchored"><a class="hanchor" href="#connecting-agents" aria-label="link">#</a>Connecting Agents</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>&lt;PROVIDER&gt;<span class="w"> </span>--model<span class="w"> </span>&lt;MODEL&gt;<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span><span class="o">[</span>--role<span class="w"> </span>&lt;ROLE&gt;...<span class="o">]</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--provider</code></td><td><code>String</code></td><td>Yes</td><td>LLM provider (see table below)</td></tr><tr><td><code>--model</code></td><td><code>String</code></td><td>Yes</td><td>Model name for the provider</td></tr><tr><td><code>--name</code></td><td><code>String</code></td><td>Yes</td><td>Unique agent display name</td></tr><tr><td><code>--base-url</code></td><td><code>String</code></td><td>No</td><td>Base URL for custom providers</td></tr><tr><td><code>--role</code></td><td><code>String</code> (repeatable)</td><td>No</td><td>Roles to assign (default: <code>general</code>)</td></tr></tbody></table></div>
+<h3 id="supported-providers" class="anchored"><a class="hanchor" href="#supported-providers" aria-label="link">#</a>Supported Providers</h3>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th><code>--provider</code> value</th><th>API Key Env Var</th><th>Default Base URL</th></tr></thead><tbody><tr><td>Ollama</td><td><code>ollama</code></td><td>— (local)</td><td><code>http://localhost:11434</code></td></tr><tr><td>OpenAI</td><td><code>openai</code></td><td><code>OPENAI_API_KEY</code></td><td><code>https://api.openai.com/v1</code></td></tr><tr><td>Anthropic</td><td><code>anthropic</code></td><td><code>ANTHROPIC_API_KEY</code></td><td><code>https://api.anthropic.com/v1</code></td></tr><tr><td>Gemini</td><td><code>gemini</code></td><td><code>GEMINI_API_KEY</code></td><td><code>https://generativelanguage.googleapis.com/v1beta</code></td></tr><tr><td>Custom</td><td><code>custom:&lt;name&gt;</code></td><td>—</td><td>Must set <code>--base-url</code></td></tr></tbody></table></div>
+<h3 id="examples" class="anchored"><a class="hanchor" href="#examples" aria-label="link">#</a>Examples</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Connect a local Ollama agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;local-dev&quot;</span>
+
+<span class="c1"># Connect an OpenAI agent with the orchestrator role</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>openai<span class="w"> </span>--model<span class="w"> </span>gpt-4o<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;planner&quot;</span><span class="w"> </span>--role<span class="w"> </span>orchestrator
+
+<span class="c1"># Connect an Anthropic agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>anthropic<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-20250514<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span>
+
+<span class="c1"># Connect a Gemini agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>gemini<span class="w"> </span>--model<span class="w"> </span>gemini-pro<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;researcher&quot;</span>
+
+<span class="c1"># Connect a custom provider</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>custom:local-llm<span class="w"> </span>--model<span class="w"> </span>my-model<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;custom-agent&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--base-url<span class="w"> </span><span class="s2">&quot;http://localhost:8080/v1&quot;</span>
+
+<span class="c1"># Connect with multiple roles</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--role<span class="w"> </span>sysops<span class="w"> </span>--role<span class="w"> </span>security-monitor
+</pre></div>
+</div>
+<h3 id="available-roles" class="anchored"><a class="hanchor" href="#available-roles" aria-label="link">#</a>Available Roles</h3>
+<div class="table-wrap"><table><thead><tr><th>Role</th><th>Description</th></tr></thead><tbody><tr><td><code>general</code></td><td>Default role, basic permissions</td></tr><tr><td><code>orchestrator</code></td><td>Can delegate tasks to other agents</td></tr><tr><td><code>security-monitor</code></td><td>Access to security audit events</td></tr><tr><td><code>sysops</code></td><td>System operations access</td></tr><tr><td><code>memory-manager</code></td><td>Memory read/write access</td></tr><tr><td><code>tool-manager</code></td><td>Tool installation and management</td></tr></tbody></table></div>
+<p>On connect, the kernel automatically:</p>
+<ol><li>Creates an <code>AgentProfile</code> with a unique <code>AgentID</code></li><li>Assigns the <code>base</code> role (grants <code>fs.user_data</code> read/write)</li><li>Generates an Ed25519 keypair (private key stored in the vault)</li><li>Sets status to <code>Online</code></li><li>Persists the agent to <code>agents.json</code></li></ol>
+<hr>
+<h2 id="listing-agents" class="anchored"><a class="hanchor" href="#listing-agents" aria-label="link">#</a>Listing Agents</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>list
+</pre></div>
+</div>
+<p>Displays all connected agents in a table:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME            PROVIDER    MODEL              ID
+local-dev       Ollama      llama3.2           a1b2c3d4-...
+planner         OpenAI      gpt-4o             e5f6g7h8-...
+code-reviewer   Anthropic   claude-sonnet-4-20250514   i9j0k1l2-...
+</pre></div>
+</div>
+<hr>
+<h2 id="disconnecting-agents" class="anchored"><a class="hanchor" href="#disconnecting-agents" aria-label="link">#</a>Disconnecting Agents</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>disconnect<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Removes the agent from the kernel registry. The agent's inbox is closed and any queued messages are lost.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>disconnect<span class="w"> </span><span class="s2">&quot;local-dev&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="agent-messaging" class="anchored"><a class="hanchor" href="#agent-messaging" aria-label="link">#</a>Agent Messaging</h2>
+<p>Agents can communicate with each other through the kernel's message bus (<code>AgentMessageBus</code>). All messages are Ed25519-signed and have a configurable TTL (default: 60 seconds).</p>
+<h3 id="message-types" class="anchored"><a class="hanchor" href="#message-types" aria-label="link">#</a>Message Types</h3>
+<div class="table-wrap"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>Text</code></td><td>Plain text message</td></tr><tr><td><code>Structured</code></td><td>Arbitrary JSON payload</td></tr><tr><td><code>TaskDelegation</code></td><td>Delegate work with prompt, priority, and timeout</td></tr><tr><td><code>TaskResult</code></td><td>Return a task result with task ID and data</td></tr></tbody></table></div>
+<h3 id="sending-a-direct-message" class="anchored"><a class="hanchor" href="#sending-a-direct-message" aria-label="link">#</a>Sending a Direct Message</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>message<span class="w"> </span>--from<span class="w"> </span>&lt;SENDER&gt;<span class="w"> </span>&lt;RECIPIENT&gt;<span class="w"> </span><span class="s2">&quot;&lt;CONTENT&gt;&quot;</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--from</code></td><td><code>String</code></td><td>Yes</td><td>Sender agent name</td></tr><tr><td><code>to</code></td><td>positional</td><td>Yes</td><td>Recipient agent name</td></tr><tr><td><code>content</code></td><td>positional</td><td>Yes</td><td>Message content</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>message<span class="w"> </span>--from<span class="w"> </span><span class="s2">&quot;planner&quot;</span><span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span><span class="w"> </span><span class="s2">&quot;Please review the auth module changes&quot;</span>
+</pre></div>
+</div>
+<h3 id="message-security" class="anchored"><a class="hanchor" href="#message-security" aria-label="link">#</a>Message Security</h3>
+<p>Every message delivered through the bus must pass two checks:</p>
+<ol><li><strong>Signature verification</strong> — the sender's Ed25519 signature is verified against their registered public key. Messages with invalid or missing signatures are rejected.</li><li><strong>Expiration check</strong> — messages past their <code>expires_at</code> timestamp are rejected before delivery. The default TTL is 60 seconds.</li></ol>
+<p>Failed deliveries emit a <code>MessageDeliveryFailed</code> notification for audit logging.</p>
+<hr>
+<h2 id="viewing-messages" class="anchored"><a class="hanchor" href="#viewing-messages" aria-label="link">#</a>Viewing Messages</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>messages<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span><span class="o">[</span>--last<span class="w"> </span>N<span class="o">]</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td>positional</td><td>—</td><td>Agent name to view messages for</td></tr><tr><td><code>--last</code></td><td><code>u32</code></td><td><code>10</code></td><td>Number of recent messages to show</td></tr></tbody></table></div>
+<p>Shows messages sent to and from the specified agent, with content type indicated:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[2026-03-16 14:30:01] planner -&gt; code-reviewer: [Text] Please review the auth module changes
+[2026-03-16 14:30:15] code-reviewer -&gt; planner: [Text] LGTM, approved
+[2026-03-16 14:31:00] planner -&gt; ops: [TaskDelegation] Deploy auth module to staging (priority: 5, timeout: 300s)
+</pre></div>
+</div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Show last 5 messages for the planner agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>messages<span class="w"> </span>planner<span class="w"> </span>--last<span class="w"> </span><span class="m">5</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="agent-groups" class="anchored"><a class="hanchor" href="#agent-groups" aria-label="link">#</a>Agent Groups</h2>
+<p>Groups allow broadcasting messages to multiple agents at once. Members are specified at group creation time.</p>
+<h3 id="creating-a-group" class="anchored"><a class="hanchor" href="#creating-a-group" aria-label="link">#</a>Creating a Group</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--members<span class="w"> </span><span class="s2">&quot;&lt;AGENT1,AGENT2,...&gt;&quot;</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>positional</td><td>Yes</td><td>Group name</td></tr><tr><td><code>--members</code></td><td><code>String</code></td><td>Yes</td><td>Comma-separated agent names</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;dev-team&quot;</span><span class="w"> </span>--members<span class="w"> </span><span class="s2">&quot;planner,code-reviewer,local-dev&quot;</span>
+</pre></div>
+</div>
+<h3 id="broadcasting-to-a-group" class="anchored"><a class="hanchor" href="#broadcasting-to-a-group" aria-label="link">#</a>Broadcasting to a Group</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>broadcast<span class="w"> </span>--from<span class="w"> </span>&lt;SENDER&gt;<span class="w"> </span>&lt;GROUP&gt;<span class="w"> </span><span class="s2">&quot;&lt;CONTENT&gt;&quot;</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--from</code></td><td><code>String</code></td><td>Yes</td><td>Sender agent name</td></tr><tr><td><code>group</code></td><td>positional</td><td>Yes</td><td>Target group name</td></tr><tr><td><code>content</code></td><td>positional</td><td>Yes</td><td>Message content</td></tr></tbody></table></div>
+<p>The broadcast is delivered to all group members except the sender. The response includes the number of recipients.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>broadcast<span class="w"> </span>--from<span class="w"> </span><span class="s2">&quot;planner&quot;</span><span class="w"> </span><span class="s2">&quot;dev-team&quot;</span><span class="w"> </span><span class="s2">&quot;Sprint review in 10 minutes&quot;</span>
+<span class="c1"># Output: Broadcast sent to 2 agents in group &#39;dev-team&#39;</span>
+</pre></div>
+</div>
+<div class="callout callout-note"><div class="callout-title">Broadcast Scope</div><p>A broadcast to a group only reaches members of that group. To broadcast to <em>all</em> connected agents regardless of group membership, the kernel uses the <code>Broadcast</code> message target internally — this is not directly exposed via CLI.</p></div>
+<hr>
+<h2 id="agent-identity" class="anchored"><a class="hanchor" href="#agent-identity" aria-label="link">#</a>Agent Identity</h2>
+<p>Every agent receives an Ed25519 cryptographic identity on connection. The private key is stored in the encrypted vault; the public key is registered with the message bus for signature verification.</p>
+<h3 id="viewing-an-agents-identity" class="anchored"><a class="hanchor" href="#viewing-an-agents-identity" aria-label="link">#</a>Viewing an Agent's Identity</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>show<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Displays the agent's identity information:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent:        code-reviewer
+Agent ID:     i9j0k1l2-...
+Public Key:   a4f8e2d1c3b5...  (64 hex characters)
+Has Signing Key: true
+</pre></div>
+</div>
+<h3 id="revoking-an-agents-identity" class="anchored"><a class="hanchor" href="#revoking-an-agents-identity" aria-label="link">#</a>Revoking an Agent's Identity</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>revoke<span class="w"> </span>&lt;NAME&gt;
+</pre></div>
+</div>
+<p>Removes the agent's signing key from the vault and revokes associated permissions. After revocation, the agent can no longer sign messages.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>revoke<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span>
+<span class="c1"># Output: Identity and permissions revoked for agent &#39;code-reviewer&#39;.</span>
+</pre></div>
+</div>
+<div class="callout callout-warning"><div class="callout-title">Revocation Is Permanent</div><p>Revoking an identity deletes the private key from the vault. The agent will need to be disconnected and reconnected to generate a new keypair.</p></div>
+<hr>
+<h2 id="permissions-and-roles" class="anchored"><a class="hanchor" href="#permissions-and-roles" aria-label="link">#</a>Permissions and Roles</h2>
+<p>Every agent has two sources of permissions:</p>
+<ol><li><strong>Direct permissions</strong> — granted explicitly to the agent via <code>agentos perm grant</code></li><li><strong>Role permissions</strong> — inherited from assigned roles</li></ol>
+<p>The kernel computes <strong>effective permissions</strong> by merging both sources. The <code>base</code> role is mandatory and grants <code>fs.user_data</code> read/write access to all agents.</p>
+<p>For the full permission model — including capability tokens, deny entries, path-prefix matching, and SSRF blocking — see <a class="wikilink" href="ch-08.html">Security Model</a>.</p>
+<h3 id="quick-permission-examples" class="anchored"><a class="hanchor" href="#quick-permission-examples" aria-label="link">#</a>Quick Permission Examples</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Grant an agent file-read permission</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>local-dev<span class="w"> </span>fs.user_data:r
+
+<span class="c1"># Grant shell execution</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>ops<span class="w"> </span>shell.exec:x
+
+<span class="c1"># View an agent&#39;s effective permissions</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>show<span class="w"> </span>local-dev
+</pre></div>
+</div>
+<hr>
+<h2 id="multi-agent-coordination" class="anchored"><a class="hanchor" href="#multi-agent-coordination" aria-label="link">#</a>Multi-Agent Coordination</h2>
+<p>AgentOS supports hierarchical multi-agent workflows where a parent agent can spawn sub-agents to handle subtasks, pass context to them, and collect their results. This enables divide-and-conquer patterns without manual orchestration.</p>
+<h3 id="sub-agent-spawning" class="anchored"><a class="hanchor" href="#sub-agent-spawning" aria-label="link">#</a>Sub-Agent Spawning</h3>
+<p>An agent spawns a sub-agent by calling the <code>spawn-agent</code> tool with a target agent name and prompt. The kernel:</p>
+<ol><li>Creates a child <code>AgentTask</code> with <code>parent_task_id</code> set to the parent's task and <code>spawn_depth</code> incremented by 1</li><li>Optionally copies the last N messages from the parent's context window into the child via a <code>ContextSlice</code> (controlled by <code>context_messages</code>, default 10, max 100)</li><li>Generates a scoped <code>CapabilityToken</code> for the child via <code>scope_for_child()</code> — the child inherits an intersection of the parent's permissions</li><li>Queues the child task for execution</li></ol>
+<p><strong>Depth limit:</strong> The kernel enforces a maximum spawn depth of 5 (the hardcoded <code>MAX_SPAWN_DEPTH</code> constant). Attempts to spawn beyond this depth are rejected with an error. This prevents unbounded recursive spawning.</p>
+<h3 id="context-handoff" class="anchored"><a class="hanchor" href="#context-handoff" aria-label="link">#</a>Context Handoff</h3>
+<p>When a sub-agent is spawned with <code>context_messages &gt; 0</code>, the kernel builds a <code>ContextSlice</code> from the parent's context window:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ContextSlice</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">messages</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ContextEntry</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The slice is seeded into the child's context via <code>ContextManager::seed_from_slice()</code>, giving the child relevant conversation history without the full parent context.</p>
+<h3 id="result-injection" class="anchored"><a class="hanchor" href="#result-injection" aria-label="link">#</a>Result Injection</h3>
+<p>When a sub-agent completes, its result is injected back into the parent's context window as a synthetic tool-result entry via <code>inject_sub_agent_result()</code>:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[SUB-AGENT RESULT: agent_name (task_id)]
+&lt;result text, truncated to 8 KiB&gt;
+[/SUB-AGENT RESULT]
+</pre></div>
+</div>
+<p>An idempotency guard (<code>injected_sub_agents</code> set) prevents duplicate injection if the result is delivered more than once.</p>
+<h3 id="awaiting-sub-agents" class="anchored"><a class="hanchor" href="#awaiting-sub-agents" aria-label="link">#</a>Awaiting Sub-Agents</h3>
+<p>The parent agent calls the <code>await-agents</code> tool with a list of child task IDs. The kernel blocks the parent until all specified children complete, then injects their results into the parent's context in one batch.</p>
+<h3 id="cascading-cancellation" class="anchored"><a class="hanchor" href="#cascading-cancellation" aria-label="link">#</a>Cascading Cancellation</h3>
+<p>When a parent task is cancelled, the kernel automatically cascades the cancellation to all registered child sub-agents. This ensures no orphaned tasks continue running after the parent is terminated.</p>
+<h3 id="coordination-tools" class="anchored"><a class="hanchor" href="#coordination-tools" aria-label="link">#</a>Coordination Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>spawn-agent</code></td><td><code>agent.spawn:x</code></td><td>Spawn a sub-agent with a prompt and optional context handoff</td></tr><tr><td><code>await-agents</code></td><td><code>agent.spawn:x</code></td><td>Wait for spawned sub-agents to complete and collect results</td></tr><tr><td><code>verify-output</code></td><td><code>agent.spawn:x</code></td><td>Spawn a critic agent to review an output for correctness and safety</td></tr></tbody></table></div>
+<p>See <a class="wikilink" href="ch-07.html">Tool System</a> for full tool schemas.</p>
+<hr>
+<h2 id="agent-teams" class="anchored"><a class="hanchor" href="#agent-teams" aria-label="link">#</a>Agent Teams</h2>
+<p>Agent teams provide a declarative way to run coordinated multi-agent workflows from a TOML configuration file. A team has a <strong>coordinator</strong> agent that breaks the goal into subtasks and dispatches them to <strong>worker</strong> agents.</p>
+<h3 id="team-configuration-toml" class="anchored"><a class="hanchor" href="#team-configuration-toml" aria-label="link">#</a>Team Configuration (TOML)</h3>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;research-team&quot;</span>
+<span class="n">goal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Research and summarize the topic&quot;</span>
+<span class="n">max_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span>
+
+<span class="k">[[members]]</span>
+<span class="n">agent_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;planner&quot;</span>
+<span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Coordinator&quot;</span>
+<span class="n">role_description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Breaks the goal into subtasks and synthesizes results&quot;</span>
+
+<span class="k">[[members]]</span>
+<span class="n">agent_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;researcher&quot;</span>
+<span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Worker&quot;</span>
+<span class="n">role_description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Searches and retrieves information&quot;</span>
+
+<span class="k">[[members]]</span>
+<span class="n">agent_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;writer&quot;</span>
+<span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Worker&quot;</span>
+<span class="n">role_description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Drafts and polishes written content&quot;</span>
+</pre></div>
+</div>
+<h3 id="teamconfig-structure" class="anchored"><a class="hanchor" href="#teamconfig-structure" aria-label="link">#</a>TeamConfig Structure</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>Team display name</td></tr><tr><td><code>goal</code></td><td>string</td><td>The objective for the team run</td></tr><tr><td><code>members</code></td><td>list</td><td>Team members with roles</td></tr><tr><td><code>max_rounds</code></td><td>integer</td><td>Maximum coordinator↔worker rounds before forced conclusion (default: 10)</td></tr></tbody></table></div>
+<p>Each member has:</p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent_name</code></td><td>string</td><td>Name of a connected agent</td></tr><tr><td><code>role</code></td><td>enum</td><td><code>Coordinator</code> or <code>Worker</code></td></tr><tr><td><code>role_description</code></td><td>string</td><td>Description of the member's responsibility</td></tr></tbody></table></div>
+<h3 id="running-a-team" class="anchored"><a class="hanchor" href="#running-a-team" aria-label="link">#</a>Running a Team</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>team<span class="w"> </span>run<span class="w"> </span>--config<span class="w"> </span>&lt;path-to-team.toml&gt;
+</pre></div>
+</div>
+<p>The kernel creates a coordinator task with <code>is_team_coordinator = true</code>. The coordinator agent receives the team goal and member descriptions in its prompt, then uses <code>spawn-agent</code> and <code>await-agents</code> to orchestrate the workers.</p>
+<p>To inspect active team runs, use <code>agentos team list</code>, which lists coordinator tasks (filtered on the <code>is_team_coordinator</code> flag).</p>
+<h3 id="task-identification" class="anchored"><a class="hanchor" href="#task-identification" aria-label="link">#</a>Task Identification</h3>
+<p>Team tasks are identifiable in <code>agentos task list</code> output:</p>
+<ul><li><code>is_team_coordinator</code> flag marks the coordinator's task</li><li><code>parent_task_id</code> links worker tasks back to the coordinator</li><li><code>spawn_depth</code> shows the nesting level (coordinator = 0, workers = 1)</li></ul>
+<hr>
+<h2 id="agent-registry-persistence" class="anchored"><a class="hanchor" href="#agent-registry-persistence" aria-label="link">#</a>Agent Registry Persistence</h2>
+<p>The kernel persists agent state to disk in the configured data directory:</p>
+<div class="table-wrap"><table><thead><tr><th>File</th><th>Contents</th></tr></thead><tbody><tr><td><code>agents.json</code></td><td>All registered <code>AgentProfile</code> records</td></tr><tr><td><code>roles.json</code></td><td>All role definitions and permission sets</td></tr></tbody></table></div>
+<p>These files are updated on every agent registration, status change, role assignment, or removal. On kernel restart, agents and roles are reloaded from these files.</p>
+<hr>
+<h2 id="summary" class="anchored"><a class="hanchor" href="#summary" aria-label="link">#</a>Summary</h2>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Command</th><th>Key Behavior</th></tr></thead><tbody><tr><td>Connect</td><td><code>agentos agent connect --provider ... --model ... --name ...</code></td><td>Creates profile, generates identity, assigns roles</td></tr><tr><td>List</td><td><code>agentos agent list</code></td><td>Shows NAME, PROVIDER, MODEL, ID columns</td></tr><tr><td>Disconnect</td><td><code>agentos agent disconnect &lt;name&gt;</code></td><td>Removes from registry, closes inbox</td></tr><tr><td>Message</td><td><code>agentos agent message --from ... &lt;to&gt; &quot;...&quot;</code></td><td>Ed25519-signed, 60s TTL, audit logged</td></tr><tr><td>View Messages</td><td><code>agentos agent messages &lt;agent&gt; --last N</code></td><td>Shows message history with types</td></tr><tr><td>Create Group</td><td><code>agentos agent group create &lt;name&gt; --members &quot;a,b,c&quot;</code></td><td>Named group for broadcast</td></tr><tr><td>Broadcast</td><td><code>agentos agent broadcast --from ... &lt;group&gt; &quot;...&quot;</code></td><td>Delivers to all group members except sender</td></tr><tr><td>Show Identity</td><td><code>agentos identity show &lt;name&gt;</code></td><td>Displays public key and signing status</td></tr><tr><td>Revoke Identity</td><td><code>agentos identity revoke &lt;name&gt;</code></td><td>Permanently removes signing key</td></tr><tr><td>Spawn Sub-Agent</td><td><code>spawn-agent</code> tool</td><td>Creates child task with context handoff</td></tr><tr><td>Await Sub-Agents</td><td><code>await-agents</code> tool</td><td>Blocks until children complete, injects results</td></tr><tr><td>Run Team</td><td><code>agentos team run --config &lt;team.toml&gt;</code></td><td>Coordinator dispatches work to workers</td></tr></tbody></table></div></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-04.html"><span class="pn-dir">← Previous</span><span class="pn-title">CLI Reference Complete</span></a><a class="pn pn-next" href="ch-06.html"><span class="pn-dir">Next →</span><span class="pn-title">Task System</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#what-is-an-agent" data-target="what-is-an-agent">What Is an Agent?</a></li><li class="toc-h2"><a href="#agent-lifecycle" data-target="agent-lifecycle">Agent Lifecycle</a></li><li class="toc-h2"><a href="#connecting-agents" data-target="connecting-agents">Connecting Agents</a></li><li class="toc-h3"><a href="#supported-providers" data-target="supported-providers">Supported Providers</a></li><li class="toc-h3"><a href="#examples" data-target="examples">Examples</a></li><li class="toc-h3"><a href="#available-roles" data-target="available-roles">Available Roles</a></li><li class="toc-h2"><a href="#listing-agents" data-target="listing-agents">Listing Agents</a></li><li class="toc-h2"><a href="#disconnecting-agents" data-target="disconnecting-agents">Disconnecting Agents</a></li><li class="toc-h2"><a href="#agent-messaging" data-target="agent-messaging">Agent Messaging</a></li><li class="toc-h3"><a href="#message-types" data-target="message-types">Message Types</a></li><li class="toc-h3"><a href="#sending-a-direct-message" data-target="sending-a-direct-message">Sending a Direct Message</a></li><li class="toc-h3"><a href="#message-security" data-target="message-security">Message Security</a></li><li class="toc-h2"><a href="#viewing-messages" data-target="viewing-messages">Viewing Messages</a></li><li class="toc-h2"><a href="#agent-groups" data-target="agent-groups">Agent Groups</a></li><li class="toc-h3"><a href="#creating-a-group" data-target="creating-a-group">Creating a Group</a></li><li class="toc-h3"><a href="#broadcasting-to-a-group" data-target="broadcasting-to-a-group">Broadcasting to a Group</a></li><li class="toc-h2"><a href="#agent-identity" data-target="agent-identity">Agent Identity</a></li><li class="toc-h3"><a href="#viewing-an-agents-identity" data-target="viewing-an-agents-identity">Viewing an Agent's Identity</a></li><li class="toc-h3"><a href="#revoking-an-agents-identity" data-target="revoking-an-agents-identity">Revoking an Agent's Identity</a></li><li class="toc-h2"><a href="#permissions-and-roles" data-target="permissions-and-roles">Permissions and Roles</a></li><li class="toc-h3"><a href="#quick-permission-examples" data-target="quick-permission-examples">Quick Permission Examples</a></li><li class="toc-h2"><a href="#multi-agent-coordination" data-target="multi-agent-coordination">Multi-Agent Coordination</a></li><li class="toc-h3"><a href="#sub-agent-spawning" data-target="sub-agent-spawning">Sub-Agent Spawning</a></li><li class="toc-h3"><a href="#context-handoff" data-target="context-handoff">Context Handoff</a></li><li class="toc-h3"><a href="#result-injection" data-target="result-injection">Result Injection</a></li><li class="toc-h3"><a href="#awaiting-sub-agents" data-target="awaiting-sub-agents">Awaiting Sub-Agents</a></li><li class="toc-h3"><a href="#cascading-cancellation" data-target="cascading-cancellation">Cascading Cancellation</a></li><li class="toc-h3"><a href="#coordination-tools" data-target="coordination-tools">Coordination Tools</a></li><li class="toc-h2"><a href="#agent-teams" data-target="agent-teams">Agent Teams</a></li><li class="toc-h3"><a href="#team-configuration-toml" data-target="team-configuration-toml">Team Configuration (TOML)</a></li><li class="toc-h3"><a href="#teamconfig-structure" data-target="teamconfig-structure">TeamConfig Structure</a></li><li class="toc-h3"><a href="#running-a-team" data-target="running-a-team">Running a Team</a></li><li class="toc-h3"><a href="#task-identification" data-target="task-identification">Task Identification</a></li><li class="toc-h2"><a href="#agent-registry-persistence" data-target="agent-registry-persistence">Agent Registry Persistence</a></li><li class="toc-h2"><a href="#summary" data-target="summary">Summary</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

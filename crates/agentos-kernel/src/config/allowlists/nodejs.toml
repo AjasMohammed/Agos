@@ -1,0 +1,22 @@
+# Curated Node.js package allowlist for managed environments.
+# Packages not on this list require operator approval via escalation.
+# Policy: set `nodejs_policy = "open"` in config to allow any package.
+
+packages = [
+    # Web frameworks
+    "express", "fastify", "koa", "next", "nuxt",
+    # HTTP clients
+    "axios", "node-fetch", "got",
+    # Testing
+    "jest", "mocha", "chai", "vitest", "supertest",
+    # Build tools
+    "typescript", "esbuild", "vite", "webpack",
+    # Linting / formatting
+    "eslint", "prettier",
+    # Database
+    "prisma", "sequelize", "mongoose", "knex", "pg",
+    # Utilities
+    "lodash", "dayjs", "uuid", "dotenv", "zod", "yup",
+    # CLI
+    "commander", "inquirer", "chalk", "ora",
+]

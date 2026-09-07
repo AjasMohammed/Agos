@@ -1,0 +1,49 @@
+[skill]
+name = "alert-builder"
+version = "0.1.0"
+description = "Recipe for turning a user's 'notify me when X' request into a durable monitor — picks the right trigger (cron poll vs. event subscription), wires deterministic notify/tool fire modes, and uses scratchpad state for alert dedup"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = []
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["alert-builder"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = [
+    "schedule-recurring",
+    "schedule-once",
+    "schedule-control",
+    "list-my-schedules",
+    "process-manager",
+    "system-mounts",
+    "hardware-info",
+    "notify-user",
+    "scratch-read",
+    "scratch-write",
+    "event-list-available",
+    "event-subscribe",
+    "event-list-subscriptions",
+    "event-unsubscribe",
+]
+optional = ["network-sockets", "system-open-files", "system-services"]
+
+[permissions]
+required = [
+    "schedule.job:w",
+    "process.list:r",
+    "hardware.system:r",
+    "user.notify:w",
+    "scratchpad:r",
+    "scratchpad:w",
+    "events.stream:o",
+]
+
+[budget]
+max_cost_per_run = 0.05
+max_tokens_per_run = 8000

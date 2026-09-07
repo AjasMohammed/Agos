@@ -1,4 +1,5 @@
-tags = ["read", "meta"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name = "proc-list"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "List all managed processes for this agent"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "readonly_scoped"
+category    = "process"
 
 [capabilities_required]
 permissions = ["proc.list:r"]
@@ -18,7 +19,7 @@ outputs = ["content.json"]
 input = "ProcListIntent"
 output = "ProcListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

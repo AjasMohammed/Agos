@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "procedure-delete"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Delete a procedure from procedural memory by ID"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "memory"
 
 [capabilities_required]
 permissions = ["memory.procedural:w"]
@@ -17,11 +19,11 @@ outputs = ["status"]
 input  = "ProcedureDeleteIntent"
 output = "DeleteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type = "string"
 description = "Procedure id"
 

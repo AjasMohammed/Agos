@@ -12,6 +12,8 @@ use std::collections::HashSet;
 fn make_extra_tool_manifest(name: &str) -> ToolManifest {
     ToolManifest {
         manifest: ToolInfo {
+            category: None,
+            search_hints: vec![],
             name: name.to_string(),
             version: "0.1.0".to_string(),
             description: format!("Test extra tool {name}"),
@@ -32,7 +34,8 @@ fn make_extra_tool_manifest(name: &str) -> ToolManifest {
             input: "None".to_string(),
             output: "None".to_string(),
         },
-        input_schema: None,
+        payload_schema: None,
+        examples: vec![],
         sandbox: ToolSandbox {
             network: false,
             fs_write: false,

@@ -70,7 +70,7 @@ impl SecretResolver {
             let _ = self.audit.append(AuditEntry {
                 timestamp: chrono::Utc::now(),
                 trace_id: TraceID::new(),
-                event_type: AuditEventType::SecretResolved,
+                event_type: AuditEventType::SecretAccessed,
                 agent_id: ctx.agent_id.and_then(|s| s.parse().ok()),
                 task_id: None,
                 tool_id: None,

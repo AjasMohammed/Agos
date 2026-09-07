@@ -200,8 +200,40 @@ impl TraceCollector {
         Some(task_trace)
     }
 
-    /// Retrieve a completed trace from the SQLite store.
+    /// Snapshot the in-progress trace for a still-running task. Includes the
+    /// currently open iteration so callers see tool calls as they happen.
+    /// Returns `None` once the task has finished (the trace moves to SQLite).
+    pub async fn snapshot_active(&self, task_id: &TaskID) -> Option<TaskTrace> {
+        let active = self.active.read().await;
+        let trace = active.get(task_id)?;
+        let mut iterations = trace.completed_iterations.clone();
+        if let Some(cur) = &trace.current_iter {
+            iterations.push(cur.snapshot());
+        }
+        let (total_in, total_out) = iterations.iter().fold((0u64, 0u64), |acc, it| {
+            (acc.0 + it.input_tokens, acc.1 + it.output_tokens)
+        });
+        Some(TaskTrace {
+            task_id: *task_id,
+            agent_id: trace.agent_id,
+            started_at: trace.started_at,
+            finished_at: None,
+            status: "Running".to_string(),
+            prompt_preview: trace.prompt_preview.clone(),
+            iterations,
+            snapshot_ids: trace.snapshot_ids.clone(),
+            total_input_tokens: total_in,
+            total_output_tokens: total_out,
+            total_cost_usd: trace.total_cost_usd,
+        })
+    }
+
+    /// Retrieve a trace: the live in-progress snapshot for a running task, or
+    /// the completed trace from the SQLite store once it has finished.
     pub async fn get_trace(&self, task_id: &TaskID) -> Result<Option<TaskTrace>, AgentOSError> {
+        if let Some(live) = self.snapshot_active(task_id).await {
+            return Ok(Some(live));
+        }
         let db = self.db.clone();
         let id_str = task_id.to_string();
         tokio::task::spawn_blocking(move || {

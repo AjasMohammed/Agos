@@ -158,6 +158,6 @@
 
 <article>
     <header><strong>Kernel Config</strong></header>
-    <pre><code>{{ config|pretty_json }}</code></pre>
+    <div class="data-panel">{{ config|structured_data_html }}</div>
 </article>
 {% endblock %}

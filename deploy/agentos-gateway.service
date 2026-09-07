@@ -1,0 +1,82 @@
+[Unit]
+Description=AgentOS Messaging Gateway (run as a bot)
+Documentation=https://github.com/agentos-project/agentos
+After=network-online.target
+Wants=network-online.target
+
+# Restart budget: up to 5 restarts in any 5-minute window before systemd
+# declares the unit failed and stops retrying.
+StartLimitIntervalSec=300s
+StartLimitBurst=5
+
+[Service]
+# Type=notify: the kernel calls sd_notify("READY=1") once fully started, pings
+# WATCHDOG=1 on every health-check cycle, and STOPPING=1 on graceful shutdown.
+Type=notify
+
+# Runs the gateway daemon: boots the kernel and connects every channel declared
+# in the [gateway] config block, then runs until SIGTERM.
+ExecStart=/usr/local/bin/agentos gateway run
+
+User=agentos
+Group=agentos
+WorkingDirectory=/var/lib/agentos
+
+# ── Restart policy ─────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Watchdog ───────────────────────────────────────────────────────────────
+WatchdogSec=90s
+TimeoutStopSec=30s
+
+# ── Configuration / secrets ────────────────────────────────────────────────
+# NOTE: this unit and agentos.service share the same bus socket + data dir, so
+# they are MUTUALLY EXCLUSIVE on one host unless given distinct AGENTOS_CONFIG +
+# data dirs. Channel tokens come from the vault (referenced by credential_key in
+# the [gateway] block) — never inline in this file.
+Environment="AGENTOS_CONFIG=/etc/agentos/config.toml"
+Environment="RUST_LOG=info"
+EnvironmentFile=-/etc/agentos/env
+
+# ── Resource limits ────────────────────────────────────────────────────────
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=65536
+
+# ── Security hardening ─────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/agentos /var/log/agentos
+RuntimeDirectory=agentos
+RuntimeDirectoryMode=0750
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+
+# The gateway needs outbound network (Telegram/Discord/Slack APIs) — AF_INET(6)
+# is already allowed below. See agentos.service for the bwrap script-tool note:
+# RestrictNamespaces=true + @system-service block bwrap shell-exec/script tools.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+
+NotifyAccess=main
+UMask=0077
+
+# ── Logging ────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentos-gateway
+
+[Install]
+WantedBy=multi-user.target

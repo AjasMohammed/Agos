@@ -93,16 +93,19 @@ impl AgentTool for FileDiff {
                     })?;
                 }
 
-                let data_dir_canon = context.data_dir.canonicalize().map_err(|_| {
-                    AgentOSError::ToolExecutionFailed {
-                        tool_name: "file-diff".into(),
-                        reason: "Cannot resolve data directory".into(),
-                    }
-                })?;
+                // SECURITY: relative paths resolve under the agent's own home, never
+                // the kernel state dir (audit.db, api_keys.db, chat.db, agents.json).
+                let agent_root = context.agent_files_dir()?;
+                let agent_root_canon =
+                    agent_root
+                        .canonicalize()
+                        .map_err(|_| AgentOSError::ToolExecutionFailed {
+                            tool_name: "file-diff".into(),
+                            reason: "Cannot resolve data directory".into(),
+                        })?;
 
                 let resolve = |p: &str| -> Result<std::path::PathBuf, AgentOSError> {
-                    let resolved =
-                        resolve_tool_path(p, &context.data_dir, &context.workspace_paths)?;
+                    let resolved = resolve_tool_path(p, &agent_root, &context.workspace_paths)?;
                     resolved
                         .canonicalize()
                         .map_err(|_| AgentOSError::ToolExecutionFailed {
@@ -125,7 +128,7 @@ impl AgentTool for FileDiff {
                         .as_ref()
                         .map(|q| q.is_path_in_zone(&context.agent_id, canon))
                         .unwrap_or(false);
-                    if !canon.starts_with(&data_dir_canon) && !in_workspace && !in_storage_zone {
+                    if !canon.starts_with(&agent_root_canon) && !in_workspace && !in_storage_zone {
                         return Err(AgentOSError::PermissionDenied {
                             resource: "fs.user_data".into(),
                             operation: format!("Path traversal denied: {}", path_str),
@@ -219,6 +222,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -296,6 +301,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

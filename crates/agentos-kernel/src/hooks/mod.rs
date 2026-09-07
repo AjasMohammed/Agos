@@ -1,10 +1,14 @@
 pub mod approval_hook;
 pub mod audit_hook;
+pub mod background_review_hook;
 pub mod registry;
+pub mod user_adaptation_hook;
 
-pub use approval_hook::{ApprovalHook, AutoApprovePolicy, AutoApproveRule};
+pub use approval_hook::{ApprovalHook, ApprovalModeResolver, AutoApprovePolicy, AutoApproveRule};
 pub use audit_hook::AuditHook;
+pub use background_review_hook::BackgroundReviewHook;
 pub use registry::HookRegistry;
+pub use user_adaptation_hook::UserAdaptationHook;
 
 use agentos_types::{HookEvent, HookResult};
 use async_trait::async_trait;

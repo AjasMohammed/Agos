@@ -70,8 +70,20 @@ impl WsBroadcaster {
                     event: event_name.to_string(),
                     data: data.clone(),
                 };
-                if entry.sender.try_send(frame).is_err() {
-                    dead.push(sub_id.clone());
+                match entry.sender.try_send(frame) {
+                    Ok(()) => {}
+                    // Channel closed — the connection is gone; reap it.
+                    Err(mpsc::error::TrySendError::Closed(_)) => dead.push(sub_id.clone()),
+                    // Channel full — the consumer is momentarily slow. Shed *this*
+                    // event rather than disconnecting (the per-connection channel is
+                    // bounded at 256; a transient burst must not kill the client).
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!(
+                            sub_id = %sub_id,
+                            channel = %channel,
+                            "WS subscriber lagging; dropping event (connection kept)"
+                        );
+                    }
                 }
             }
         }
@@ -114,6 +126,32 @@ impl WsBroadcaster {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!("Status update channel closed, stopping WS broadcaster");
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Start a background task that reads coarse `RealtimeEvent`s from the kernel
+    /// and fans them out to their channel (`agents`/`audit`/`schedules`/`system`/
+    /// `events`, plus `tasks` from non-status sources). Complements
+    /// [`Self::start_status_relay`], which carries the richer task-status stream.
+    pub fn start_realtime_relay(
+        self,
+        mut rx: tokio::sync::broadcast::Receiver<agentos_types::RealtimeEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        self.broadcast(&ev.channel, &ev.event, ev.data).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "WsBroadcaster lagged on realtime events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Realtime event channel closed, stopping relay");
                         break;
                     }
                 }

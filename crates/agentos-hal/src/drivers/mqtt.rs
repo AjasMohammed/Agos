@@ -69,8 +69,7 @@ impl MqttDriver {
                         match event {
                             Ok(Event::Incoming(Packet::Publish(publish))) => {
                                 let topic = publish.topic.clone();
-                                let payload = String::from_utf8(publish.payload.to_vec())
-                                    .unwrap_or_default();
+                                let payload = decode_payload(&publish.payload);
 
                                 let mut subs_guard = subs.write().await;
                                 if let Some(sub) = subs_guard.get_mut(&topic) {
@@ -255,9 +254,23 @@ impl HalDriver for MqttDriver {
     }
 }
 
+/// Decode an inbound MQTT payload lossily: binary payloads become
+/// replacement-character strings instead of silently-empty ones.
+fn decode_payload(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_binary_payload_decodes_lossily() {
+        let decoded = decode_payload(&[0xff, 0xfe, 0x41]);
+        assert!(!decoded.is_empty(), "binary payload must not become empty");
+        assert!(decoded.contains('A'));
+        assert_eq!(decode_payload(b"plain utf8"), "plain utf8");
+    }
 
     #[test]
     fn test_validate_topic_ok() {

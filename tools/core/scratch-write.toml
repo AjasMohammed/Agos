@@ -1,9 +1,9 @@
 tags = ["write", "fs"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "scratch-write"
 version     = "1.0.0"
-risk_class  = "write_scoped"
 description = "Write a markdown page to the agent's scratchpad. Use [[Page Title]] to link pages."
 author      = "agentos-core"
 trust_tier  = "core"
@@ -18,24 +18,24 @@ outputs = ["content.text"]
 input  = "ScratchWriteIntent"
 output = "ScratchWriteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["title", "content"]
 
-[input_schema.properties.title]
+[payload_schema.properties.title]
 type = "string"
 maxLength = 256
 description = "Page title (unique within your scratchpad)"
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Markdown content. Use [[Page Title]] to link to other pages."
 
-[input_schema.properties.tags]
+[payload_schema.properties.tags]
 type = "array"
 description = "Optional tags for categorization"
 
-[input_schema.properties.tags.items]
+[payload_schema.properties.tags.items]
 type = "string"
 
 [sandbox]

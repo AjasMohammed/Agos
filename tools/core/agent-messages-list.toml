@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-messages-list"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "List direct messages addressed to this agent. Returns sender name, body, and timestamp."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+category    = "agent"
 
 [capabilities_required]
 permissions = []
@@ -18,16 +19,16 @@ outputs = ["messages", "count"]
 input  = "AgentMessagesListIntent"
 output = "AgentMessagesListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type        = "integer"
 minimum     = 1
 maximum     = 50
 description = "Maximum number of messages to return (default: 20, max: 50)"
 
-[input_schema.properties.unread_only]
+[payload_schema.properties.unread_only]
 type        = "boolean"
 description = "When true (default), return only unread messages"
 

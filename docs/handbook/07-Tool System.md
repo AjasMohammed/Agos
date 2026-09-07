@@ -70,7 +70,7 @@ pub struct ToolExecutionContext {
 
 All built-in tools ship as `trust_tier = "core"` manifests in `tools/core/`. They are compiled into the kernel as Rust code — no external binary or WASM module is loaded.
 
-The kernel registers **127 built-in tools** spanning sixteen domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, and host introspection. Use the `list-tools` tool to enumerate all tools at runtime, `search-tools` for keyword search, and `describe-tool` for the full input schema of any individual tool.
+The kernel registers **132 built-in tools** spanning sixteen domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, and host introspection. Use the `list-tools` tool to enumerate all tools at runtime, `search-tools` for keyword search, and `describe-tool` for the full input schema of any individual tool.
 
 ### `file-reader`
 
@@ -715,7 +715,7 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | `agent-call` | `agent.rpc:x` | Invoke another agent via RPC |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
-| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent (non-blocking) |
+| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent and block until it finishes (use `spawn-async` for fire-and-forget) |
 | `spawn-agent` | `agent.spawn:x` | Spawn a child sub-agent task with scoped permissions and context handoff |
 | `await-agents` | `agent.spawn:x` | Wait for one or more sub-agent tasks and collect their results |
 | `verify-output` | `agent.spawn:x` | Spawn a critic agent to validate an output against criteria |
@@ -749,8 +749,8 @@ These tools wrap the HAL drivers — each one runs through the device approval w
 | Tool | Permission | Description |
 |------|------------|-------------|
 | `hardware-info` | `hardware.system:r` | Cross-driver overview: CPU, memory, disk, GPU, sensors |
-| `audio-tool` | `hardware.audio:x` | Capture and playback via PipeWire/PulseAudio |
-| `bluetooth-tool` | `hardware.bluetooth:x` | Scan, pair, and connect to Bluetooth devices |
+| `audio` | `hardware.audio:x` | Capture and playback via PipeWire/PulseAudio |
+| `bluetooth` | `hardware.bluetooth:x` | Scan, pair, and connect to Bluetooth devices |
 | `display-config` | `hardware.display:x` | Apply / revert display output configuration |
 | `printer` | `hardware.printer:x` | Submit and cancel CUPS print jobs |
 | `raw-usb` | `hardware.raw-usb:x` | Open USB devices and run bulk/interrupt/control transfers |
@@ -868,6 +868,8 @@ syscalls      = []                  # Optional syscall allowlist (empty = defaul
 | `trust_tier` | `manifest` | Yes | `core`, `verified`, `community`, or `blocked` |
 | `author_pubkey` | `manifest` | Verified/Community | Hex-encoded Ed25519 public key (64 chars) |
 | `signature` | `manifest` | Verified/Community | Hex-encoded Ed25519 signature (128 chars) |
+| `risk_class` | `manifest` | No | Risk classification driving the approval workflow: `readonly_scoped`, `readonly_external`, `write_agent_state`, `write_scoped`, `exec_capable`, `control_plane`, or `interactive` |
+| `tags` | `manifest` | No | Capability/discovery tags, e.g. `["read", "network"]` (used by `search-tools`) |
 | `permissions` | `capabilities_required` | Yes | Permission strings, e.g. `["fs.user_data:r"]` |
 | `outputs` | `capabilities_provided` | Yes | Capability output labels |
 | `input` | `intent_schema` | Yes | Intent schema name |
@@ -1117,7 +1119,7 @@ Four tools for agents to introspect their own scheduled tasks and run history.
 
 ## Tool Discovery and Pagination
 
-Four tools for agents to navigate the full 127-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.
+Four tools for agents to navigate the full 132-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.
 
 | Tool | Description |
 |---|---|

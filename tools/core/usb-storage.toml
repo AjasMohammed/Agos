@@ -1,12 +1,13 @@
 tags = ["read", "write", "fs"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "usb-storage"
 version     = "1.0.0"
-risk_class  = "control_plane"
 description = "Mount, unmount, and eject USB storage devices via UDisks2 D-Bus API."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "hal"
 
 [capabilities_required]
 permissions = ["hardware.usb-storage:x"]
@@ -18,17 +19,17 @@ outputs = ["hardware.storage"]
 input  = "UsbStorageIntent"
 output = "UsbStorageResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "USB storage operation"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "mount", "unmount", "eject"]
 default = "list"
 description = "Operation: list USB filesystems, mount a device, unmount, or eject (power-off)"
 
-[input_schema.properties.device]
+[payload_schema.properties.device]
 type = "string"
 description = "Block device ID (e.g. 'sdb1', 'nvme0n1p1'). Required for mount/unmount/eject; ignored for list."
 pattern = "^[a-zA-Z0-9._-]*$"
@@ -41,30 +42,18 @@ max_memory_mb = 128
 max_cpu_ms    = 10000
 syscalls      = []
 
-[examples]
-"List USB filesystems" = """
-{
-  "action": "list"
-}
-"""
+[[examples]]
+description = "List USB filesystems"
+payload = { action = "list" }
 
-"Mount a USB drive" = """
-{
-  "action": "mount",
-  "device": "sdb1"
-}
-"""
+[[examples]]
+description = "Mount a USB drive"
+payload = { action = "mount", device = "sdb1" }
 
-"Unmount a device" = """
-{
-  "action": "unmount",
-  "device": "sdb1"
-}
-"""
+[[examples]]
+description = "Unmount a device"
+payload = { action = "unmount", device = "sdb1" }
 
-"Eject a USB drive" = """
-{
-  "action": "eject",
-  "device": "sdb1"
-}
-"""
+[[examples]]
+description = "Eject a USB drive"
+payload = { action = "eject", device = "sdb1" }

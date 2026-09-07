@@ -67,6 +67,7 @@ Each key carries a list of permission scopes. An empty list grants full access (
 | audit | `audit:r` | — | Logs, detail, verify |
 | costs | `costs:r` | — | Summary, per-agent costs |
 | notifications | `notifications:r` | `notifications:w` | List, get, unread count, respond |
+| chat | — | `chat:w` | OpenAI-compatible chat completions |
 | system | `system:r` | — | Status |
 
 Wildcard scope `*:r` or `*:w` grants read or write across all resources.
@@ -245,6 +246,21 @@ curl -X POST http://localhost:8080/api/v1/agents/worker/permissions/revoke \
   -H "Authorization: Bearer agos_..." \
   -H "Content-Type: application/json" \
   -d '{ "permission": "fs:/tmp/:rw" }'
+```
+
+---
+
+#### `POST /api/v1/agents/{name}/settings` — Update agent settings
+
+**Auth:** `agents:w`
+
+Updates an agent's settings (e.g. provider/model overrides, runtime options).
+
+```bash
+curl -X POST http://localhost:8080/api/v1/agents/worker/settings \
+  -H "Authorization: Bearer agos_..." \
+  -H "Content-Type: application/json" \
+  -d '{ ... }'
 ```
 
 ---
@@ -560,6 +576,32 @@ Returns the cost entry for a specific agent: tokens used, cost in micro-USD, too
 
 ---
 
+#### `DELETE /api/v1/notifications/{id}` — Dismiss notification
+
+**Auth:** `notifications:w`
+
+Dismisses (removes) a single notification by ID.
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/notifications/uuid \
+  -H "Authorization: Bearer agos_..."
+```
+
+---
+
+#### `DELETE /api/v1/notifications/read` — Clear read notifications
+
+**Auth:** `notifications:w`
+
+Clears all notifications that have been marked as read.
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/notifications/read \
+  -H "Authorization: Bearer agos_..."
+```
+
+---
+
 #### `POST /api/v1/notifications/{id}/respond` — Respond to notification
 
 **Auth:** `notifications:w`
@@ -572,6 +614,32 @@ curl -X POST http://localhost:8080/api/v1/notifications/uuid/respond \
   -H "Content-Type: application/json" \
   -d '{ "text": "Yes, proceed." }'
 ```
+
+---
+
+### Webhooks
+
+#### `POST /api/v1/webhooks/telegram/{channel_id}` — Telegram webhook ingress
+
+**Auth:** None required (public).
+
+Public inbound webhook endpoint for Telegram updates. Telegram POSTs updates here for the channel adapter instance identified by `{channel_id}`.
+
+---
+
+### Developer / OpenAPI
+
+#### `GET /api/v1/openapi.json` — OpenAPI specification
+
+**Auth:** None required (public).
+
+Returns the OpenAPI 3.1 specification document describing the REST API.
+
+#### `GET /api/v1/docs` — Interactive API docs
+
+**Auth:** None required (public).
+
+Serves the [Scalar](https://scalar.com/) interactive API documentation UI, rendered from the OpenAPI spec.
 
 ---
 
@@ -603,6 +671,6 @@ Requests pass through this middleware chain (outermost to innermost):
 ## Related
 
 - [[25-API Authentication and Keys]] — API key lifecycle and best practices
-- [[24-WebSocket Guide]] — Real-time event subscriptions and chat streaming
+- [[24-WebSocket Guide]] — Real-time event subscriptions and chat
 - [[08-Security Model]] — Capability tokens, permission scopes, and API auth layer
 - [[16-Configuration Reference]] — `[api]` config section

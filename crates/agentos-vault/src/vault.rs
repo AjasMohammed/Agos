@@ -188,6 +188,33 @@ impl SecretsVault {
 
         {
             let conn = self.conn.lock().await;
+
+            // Kernel-scoped immutability: an existing kernel-scoped secret may
+            // only be overwritten by another kernel-scoped write. This matches
+            // the guard `revoke()`/`rotate()` enforce and prevents a CLI/agent
+            // `set` (which carries a non-kernel scope) from silently clobbering
+            // a kernel-owned secret via the upsert path.
+            let existing_scope: Option<String> = conn
+                .query_row(
+                    "SELECT scope FROM secrets WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| AgentOSError::VaultError(format!("DB error during set: {}", e)))?;
+            if let Some(existing_scope_json) = existing_scope {
+                if let Ok(existing) = serde_json::from_str::<SecretScope>(&existing_scope_json) {
+                    if matches!(existing, SecretScope::Kernel)
+                        && !matches!(scope, SecretScope::Kernel)
+                    {
+                        return Err(AgentOSError::VaultError(format!(
+                            "Cannot overwrite kernel-scoped secret '{}'",
+                            name
+                        )));
+                    }
+                }
+            }
+
             conn.execute(
                 "INSERT INTO secrets (id, name, owner, scope, encrypted_value, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)

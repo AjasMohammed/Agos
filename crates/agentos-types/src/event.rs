@@ -41,6 +41,10 @@ pub enum EventCategory {
     AgentCommunication,
     ScheduleEvents,
     ExternalEvents,
+    /// Operator chat traffic. Deliberately its own category: a subscription to
+    /// `AgentCommunication` must not be woken by every chat turn — the woken
+    /// agent's own reply is another chat turn, which is an unbounded loop.
+    ChatEvents,
 }
 
 // ── Event Types ───────────────────────────────────────────────────
@@ -140,6 +144,10 @@ pub enum EventType {
 
     // ── AgentCommunication (Phase 4) ──
     DirectMessageReceived,
+    /// A message was appended to an operator chat session. Lets a second panel
+    /// tab (or a channel bridge writing into the same session) refresh without
+    /// a reload — the streaming client already sees its own turn.
+    ChatMessageAdded,
     BroadcastReceived,
     DelegationReceived,
     DelegationResponseReceived,
@@ -267,6 +275,8 @@ impl EventType {
             | Self::SubAgentCompleted
             | Self::SubAgentFailed => EventCategory::AgentCommunication,
 
+            Self::ChatMessageAdded => EventCategory::ChatEvents,
+
             Self::CronJobFired
             | Self::ScheduledTaskMissed
             | Self::ScheduledTaskCompleted
@@ -326,6 +336,19 @@ pub enum EventSeverity {
 }
 
 // ── Event Message ─────────────────────────────────────────────────
+
+/// A coarse realtime event for WebSocket/SSE fan-out to the control panel.
+///
+/// `channel` is the subscription channel (e.g. `"tasks"`, `"agents"`, `"audit"`);
+/// `event` is a stable event name (e.g. `"task.completed"`); `data` is the JSON
+/// payload pushed to subscribers. Distinct from [`EventMessage`] (the internal,
+/// signed, single-consumer kernel event) — this is the lossy broadcast view.
+#[derive(Debug, Clone, Serialize)]
+pub struct RealtimeEvent {
+    pub channel: String,
+    pub event: String,
+    pub data: serde_json::Value,
+}
 
 /// A single event emitted by an OS subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]

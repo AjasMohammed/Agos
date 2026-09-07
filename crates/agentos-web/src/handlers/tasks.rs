@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use agentos_api::types::ApiTaskStatus;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
@@ -31,7 +32,13 @@ pub async fn list(
     use agentos_api::types::TaskFilter;
 
     let filter = TaskFilter {
-        status: query.status.clone().filter(|s| !s.is_empty()),
+        // Unknown values are dropped rather than passed through: the filter
+        // vocabulary is a closed set (`ApiTaskStatus`).
+        status: query
+            .status
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(ApiTaskStatus::parse),
         agent_name: None,
         offset: None,
         limit: Some(500),
@@ -42,6 +49,50 @@ pub async fn list(
             tracing::error!("Failed to list tasks: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list tasks").into_response();
         }
+    };
+
+    // Counts across ALL statuses (separate query) — drives the status chip filters
+    // on the page header. Only fetched on the full-page render.
+    let task_counts = if query.partial.as_deref() != Some("list") {
+        let all_filter = TaskFilter {
+            status: None,
+            agent_name: None,
+            offset: None,
+            limit: Some(2000),
+        };
+        match state.service.list_tasks(all_filter).await {
+            Ok((all_tasks, _)) => {
+                let mut queued = 0u32;
+                let mut running = 0u32;
+                let mut waiting = 0u32;
+                let mut complete = 0u32;
+                let mut failed = 0u32;
+                let mut cancelled = 0u32;
+                for t in &all_tasks {
+                    match t.status.as_str() {
+                        "queued" => queued += 1,
+                        "running" => running += 1,
+                        "waiting" | "suspended" => waiting += 1,
+                        "complete" | "completed" => complete += 1,
+                        "failed" => failed += 1,
+                        "cancelled" | "canceled" => cancelled += 1,
+                        _ => {}
+                    }
+                }
+                Some((
+                    queued,
+                    running,
+                    waiting,
+                    complete,
+                    failed,
+                    cancelled,
+                    all_tasks.len(),
+                ))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
     };
 
     let task_rows: Vec<_> = tasks_api
@@ -80,11 +131,28 @@ pub async fn list(
 
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
+    let active_status = query.status.clone().unwrap_or_default();
+    let active_search = query.search.clone().unwrap_or_default();
+    let counts_ctx = task_counts.map(|(q, r, w, c, f, x, total)| {
+        context! {
+            queued => q,
+            running => r,
+            waiting => w,
+            complete => c,
+            failed => f,
+            cancelled => x,
+            total => total,
+        }
+    });
+
     let ctx = context! {
         page_title => "Tasks",
         breadcrumbs => vec![context! { label => "Tasks" }],
         tasks => task_rows,
         csrf_token,
+        active_status,
+        active_search,
+        task_counts => counts_ctx,
     };
     super::render(&state.templates, "tasks.html", ctx)
 }
@@ -202,6 +270,23 @@ pub async fn detail(
             let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
             let short_id = task.id.to_string().chars().take(8).collect::<String>();
+            // Cap the rendered prompt so onboarding/system-style prompts don't
+            // dominate the task-detail page. The full prompt remains queryable
+            // via the API and audit log.
+            const PROMPT_RENDER_CAP: usize = 2000;
+            let prompt_full_len = task.original_prompt.chars().count();
+            let prompt_truncated = prompt_full_len > PROMPT_RENDER_CAP;
+            let prompt_display: String = if prompt_truncated {
+                let mut s: String = task
+                    .original_prompt
+                    .chars()
+                    .take(PROMPT_RENDER_CAP)
+                    .collect();
+                s.push('…');
+                s
+            } else {
+                task.original_prompt.clone()
+            };
             let ctx = context! {
                 page_title => format!("Task {}", task.id),
                 breadcrumbs => vec![
@@ -211,7 +296,9 @@ pub async fn detail(
                 task_id => task.id.to_string(),
                 state => format!("{:?}", task.state),
                 agent_id => task.agent_id.to_string(),
-                prompt => task.original_prompt.clone(),
+                prompt => prompt_display,
+                prompt_truncated,
+                prompt_full_len,
                 created_at => task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                 priority => task.priority,
                 history,
@@ -504,6 +591,11 @@ pub async fn resume(
         }
     };
 
+    // Resuming restores the SAME task, so its causal depth must survive. This
+    // path drops `trigger_source`, so collapse both sources into the plain
+    // counter before the literal partially moves `payload.task`.
+    let resumed_chain_depth = payload.task.event_chain_depth();
+
     let resumed_task = agentos_types::AgentTask {
         id: task_id,
         state: agentos_types::TaskState::Queued,
@@ -528,12 +620,14 @@ pub async fn resume(
         skip_checkpoint: payload.task.skip_checkpoint,
         thinking_level: payload.task.thinking_level,
         tool_categories: payload.task.tool_categories,
+        disable_tool_scoping: false,
+        chain_depth: resumed_chain_depth,
     };
 
-    let _ = state
+    state
         .kernel
         .context_manager
-        .replace_context(&task_id, payload.context.window)
+        .restore_context(task_id, agent.id, payload.context.window)
         .await;
     state.kernel.scheduler.enqueue(resumed_task).await;
     let _ = state.kernel.audit.append(agentos_audit::AuditEntry {

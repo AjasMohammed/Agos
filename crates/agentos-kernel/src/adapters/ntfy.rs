@@ -210,6 +210,8 @@ async fn ntfy_sse_loop(
                                                         "topic": event.topic,
                                                         "message": event.message,
                                                     }),
+                                                    media_file_ids: Vec::new(),
+                                                    pending_media: Vec::new(),
                                                 };
                                                 if tx.send(inbound).await.is_err() {
                                                     // Receiver dropped — kernel shutdown.

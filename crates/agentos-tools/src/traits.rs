@@ -53,10 +53,22 @@ pub struct ToolExecutionContext {
     pub task_registry: Option<std::sync::Arc<dyn TaskQuery>>,
     /// Snapshot of the escalation manager at task dispatch time. `None` outside kernel context.
     pub escalation_query: Option<std::sync::Arc<dyn EscalationQuery>>,
-    /// Additional directories the agent may access beyond `data_dir`.
-    /// Populated from `tools.workspace.allowed_paths` in the kernel config.
-    /// Paths are pre-canonicalized at kernel startup.
+    /// Additional directories the agent may *at least read* beyond `data_dir`.
+    /// Populated from kernel config + every active `WorkspaceGrant` whose mode
+    /// covers `READ`. Used by read-only file tools (`file-reader`, `file-diff`,
+    /// `file-grep`, `file-glob`).
     pub workspace_paths: Vec<PathBuf>,
+    /// Subset of `workspace_paths` the agent may also *write to* — i.e. every
+    /// active `WorkspaceGrant` whose mode covers `WRITE`. Used by write-side
+    /// file tools (`file-writer`, `file-editor`, `file-delete`, `file-append`,
+    /// `file-move`). A read-only grant is intentionally absent here so it
+    /// can't be written through.
+    pub workspace_paths_writable: Vec<PathBuf>,
+    /// Subset of `workspace_paths` the agent may bind into a sandboxed
+    /// command — i.e. every active `WorkspaceGrant` whose mode covers `EXEC`.
+    /// Used by `shell-exec` to extend its bwrap bind list so commands act on
+    /// real on-disk files rather than the data_dir tmpfs view.
+    pub workspace_paths_executable: Vec<PathBuf>,
     /// Capability registry query interface for managed capabilities (KMC).
     /// Used by capability tools to discover available providers.
     pub capability_registry: Option<std::sync::Arc<dyn CapabilityRegistryQuery>>,
@@ -78,6 +90,37 @@ pub struct ToolExecutionContext {
     /// (default) = no restriction.
     /// Mirrors `AgentTask.tool_categories`. Set by the kernel at dispatch.
     pub tool_categories: Option<Vec<String>>,
+}
+
+impl ToolExecutionContext {
+    /// Root directory that file tools resolve relative paths against:
+    /// `<data_dir>/agents/<agent name>/`.
+    ///
+    /// SECURITY: this is deliberately *not* `data_dir`. `data_dir` is the
+    /// kernel's own state directory — it holds `audit.db`, `api_keys.db`,
+    /// `chat.db` (every agent's conversations), `agents.json` (every agent's
+    /// permission set, reloaded at boot) and the task snapshots. An agent with
+    /// the default `fs.user_data:rw` grant must not reach any of it.
+    ///
+    /// The agent name comes from the registry snapshot. When no registry is
+    /// attached (direct tool calls in tests) the fallback is the agent's ID,
+    /// never bare `data_dir` — resolution fails closed.
+    ///
+    /// The directory is created if missing, since callers canonicalize it.
+    pub fn agent_files_dir(&self) -> Result<PathBuf, AgentOSError> {
+        let name = self
+            .agent_registry
+            .as_ref()
+            .and_then(|r| r.get_agent(&self.agent_id))
+            .map(|a| a.name)
+            .unwrap_or_else(|| self.agent_id.to_string());
+        let dir = self.data_dir.join("agents").join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: "file".into(),
+            reason: format!("Agent home directory error: {} ({})", dir.display(), e),
+        })?;
+        Ok(dir)
+    }
 }
 
 /// Percent-decode ASCII bytes in a path string (e.g. `%2e%2e` → `..`, `%2f` → `/`).
@@ -127,21 +170,26 @@ fn contains_traversal(path: &Path) -> bool {
 
 /// Resolve a user-supplied path for file tools, respecting workspace paths.
 ///
+/// `root` is the agent's own home — [`ToolExecutionContext::agent_files_dir`] —
+/// not the kernel's `data_dir`. See that method for why.
+///
 /// Resolution rules:
 /// - The input is first percent-decoded (`%2e%2e` → `..`, `%2f` → `/`) and
 ///   then explicitly rejected if any component is `..` (defence-in-depth on
 ///   top of the canonicalize check the caller must still perform).
-/// - Relative path → joined onto `data_dir`.
+/// - Relative path → joined onto `root`.
+/// - Absolute path that starts with `root` → used as-is.
 /// - Absolute path that starts with a configured workspace prefix → used as-is.
-/// - Absolute path with no workspace match → the leading `/` is stripped and the
-///   remainder is joined onto `data_dir` (legacy behavior for data-dir-relative
-///   absolute paths).
+/// - Absolute path with no workspace match → `PermissionDenied`. (Earlier
+///   builds silently remapped the path into `data_dir`; that hid failures
+///   from agents and users. Grant the path with `agentos workspace grant
+///   <dir>` to give the agent real access instead.)
 ///
 /// The caller must still canonicalize the result and verify containment within
-/// `data_dir` or one of `workspace_paths`.
+/// `root` or one of `workspace_paths`.
 pub fn resolve_tool_path(
     path_str: &str,
-    data_dir: &Path,
+    root: &Path,
     workspace_paths: &[PathBuf],
 ) -> Result<PathBuf, agentos_types::AgentOSError> {
     // SECURITY: percent-decode first to catch %2e%2e (%2F, etc.)
@@ -160,25 +208,25 @@ pub fn resolve_tool_path(
         });
     }
 
-    let resolved = if p.is_absolute() {
-        // If this absolute path is within a configured workspace, use it directly.
-        let mut matched = None;
+    if p.is_absolute() {
+        if p.starts_with(root) {
+            return Ok(p.to_path_buf());
+        }
         for wp in workspace_paths {
             if p.starts_with(wp) {
-                matched = Some(p.to_path_buf());
-                break;
+                return Ok(p.to_path_buf());
             }
         }
-        matched.unwrap_or_else(|| {
-            // Fall back: strip the leading `/` and resolve relative to data_dir.
-            let stripped = p.strip_prefix("/").unwrap_or(p);
-            data_dir.join(stripped)
+        Err(agentos_types::AgentOSError::PermissionDenied {
+            resource: "fs.user_data".into(),
+            operation: format!(
+                "No workspace grant covers '{}'. Grant access with: `agentos workspace grant <directory>`",
+                path_str
+            ),
         })
     } else {
-        data_dir.join(p)
-    };
-
-    Ok(resolved)
+        Ok(root.join(p))
+    }
 }
 
 #[cfg(test)]
@@ -204,9 +252,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_absolute_non_workspace_strips_slash() {
-        let r = resolve_tool_path("/etc/passwd", &data_dir(), &[]).unwrap();
-        assert_eq!(r, PathBuf::from("/opt/agentos/data/etc/passwd"));
+    fn resolve_absolute_non_workspace_denied() {
+        let err = resolve_tool_path("/etc/passwd", &data_dir(), &[]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("No workspace grant covers"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("agentos workspace grant"));
+    }
+
+    #[test]
+    fn resolve_absolute_under_data_dir_allowed() {
+        // Absolute paths that already sit under data_dir don't need a grant.
+        let r = resolve_tool_path("/opt/agentos/data/notes.txt", &data_dir(), &[]).unwrap();
+        assert_eq!(r, PathBuf::from("/opt/agentos/data/notes.txt"));
     }
 
     #[test]

@@ -37,7 +37,12 @@ impl Kernel {
 
         // Silent delivery requires no network/inbox action. Mark as delivered so
         // future sweepers don't treat undelivered-Silent runs as pending work.
-        if matches!(run.delivery, DeliveryMode::Silent) {
+        //
+        // Failures are the exception: Silent means "don't ping me when this
+        // works", not "never tell me it broke". A daily schedule that failed
+        // every run for a week is invisible otherwise — the operator only finds
+        // out by asking. Those fall through to the inbox below.
+        if stays_silent(&run.delivery, run.state) {
             let mut silent_run = run;
             silent_run.delivered = true;
             silent_run.delivered_at = Some(Utc::now());
@@ -48,10 +53,40 @@ impl Kernel {
             return;
         }
 
+        // A `* * * * *` schedule that fails every run would otherwise write one
+        // inbox notification per minute forever — Kernel-sourced notifications
+        // are exempt from the rate limiter, and `thread_id` is per-run so they
+        // do not collapse. Report the first failure of a streak, then go quiet
+        // until it recovers.
+        if matches!(run.delivery, DeliveryMode::Silent) && self.failure_already_reported(&run).await
+        {
+            let mut suppressed = run;
+            suppressed.delivered = true;
+            suppressed.delivered_at = Some(Utc::now());
+            suppressed.delivery_error = None;
+            if let Err(e) = store.upsert_run(suppressed).await {
+                tracing::warn!(run_id = %run_id, error = %e, "DeliveryRouter: failed to mark repeat failure as delivered");
+            }
+            return;
+        }
+
         let parent_name = self.resolve_run_parent_name(&run).await;
 
         let delivery_result = match run.delivery.clone() {
-            DeliveryMode::Silent => Ok(()),
+            // Only reached for Failed/Missed runs (see `stays_silent`).
+            DeliveryMode::Silent => {
+                self.deliver_direct_scheduled(
+                    &run,
+                    &parent_name,
+                    NotifyTarget::UserInbox,
+                    Some(format!(
+                        "{parent_name}: scheduled run {}",
+                        run.state.as_str()
+                    )),
+                    "warning".to_string(),
+                )
+                .await
+            }
             DeliveryMode::Direct {
                 target,
                 subject,
@@ -114,6 +149,28 @@ impl Kernel {
         }
     }
 
+    /// Whether the previous terminal run of this run's parent already failed.
+    ///
+    /// Only consulted for `DeliveryMode::Silent`; explicit delivery targets are
+    /// what the operator asked for and are never suppressed. Errs toward
+    /// notifying: an unreadable history reports.
+    async fn failure_already_reported(&self, run: &ScheduledRun) -> bool {
+        let Some(store) = self.schedule_manager.store() else {
+            return false;
+        };
+        // Small window, newest first: this run plus enough neighbours that a
+        // concurrently-written sibling cannot hide the predecessor.
+        let Ok(recent) = store.list_runs_for_schedule(run.parent_id, 5).await else {
+            return false;
+        };
+        recent
+            .into_iter()
+            .filter(|r| r.run_id != run.run_id && !matches!(r.state, RunState::Running))
+            .map(|r| r.state)
+            .next()
+            .is_some_and(|prev| matches!(prev, RunState::Failed | RunState::Missed))
+    }
+
     async fn resolve_run_parent_name(&self, run: &ScheduledRun) -> String {
         // Use the name captured at fire time when available — this is the only
         // reliable source for Timers (which are evicted from memory on fire).
@@ -170,6 +227,7 @@ impl Kernel {
                     read: false,
                     thread_id: Some(run.run_id.to_string()),
                     reply_to_external_id: None,
+                    attachment: None,
                 };
                 self.notification_router.deliver(msg).await.map_err(|e| {
                     AgentOSError::KernelError {
@@ -178,14 +236,32 @@ impl Kernel {
                 })?;
             }
             NotifyTarget::Channel { id } => {
-                use agentos_channels::types::{MessageContent, OutboundMessage};
-                let text = format!("**{subject}**\n\n{body}");
-                let outbound = OutboundMessage {
-                    channel_instance_id: id.to_string(),
-                    content: MessageContent::Text(text),
-                    thread_id: None,
+                // Routed by `send_to_channel`, not `channel_manager` directly:
+                // the manager only owns Discord/Slack/WhatsApp/Webhook, so a
+                // schedule delivering to a Telegram or Ntfy channel used to
+                // error on every single fire.
+                let msg = UserMessage {
+                    id: NotificationID::new(),
+                    from: NotificationSource::Kernel,
+                    task_id: run.task_id,
+                    trace_id: TraceID::new(),
+                    kind: UserMessageKind::Notification,
+                    priority: parse_priority_str(&priority),
+                    subject,
+                    body,
+                    interaction: None,
+                    delivery_status: HashMap::new(),
+                    response: None,
+                    created_at: Utc::now(),
+                    expires_at: None,
+                    read: false,
+                    thread_id: Some(run.run_id.to_string()),
+                    reply_to_external_id: None,
+                    attachment: None,
                 };
-                self.channel_manager.send(&id.to_string(), outbound).await?;
+                self.notification_router
+                    .send_to_channel(msg, &id.to_string())
+                    .await?;
             }
             NotifyTarget::File { path } => {
                 use std::path::{Component, Path};
@@ -287,7 +363,15 @@ impl Kernel {
     }
 }
 
-#[allow(dead_code)]
+/// Whether a finished run should be delivered nowhere.
+///
+/// `Silent` suppresses the success ping, not the failure report: a schedule
+/// that has failed every run for a week is otherwise invisible to the operator.
+fn stays_silent(delivery: &DeliveryMode, state: RunState) -> bool {
+    matches!(delivery, DeliveryMode::Silent)
+        && !matches!(state, RunState::Failed | RunState::Missed)
+}
+
 fn render_run_body(run: &ScheduledRun, parent_name: &str) -> String {
     let state_str = run.state.as_str();
     let result_str = run
@@ -300,9 +384,13 @@ fn render_run_body(run: &ScheduledRun, parent_name: &str) -> String {
         .take(500)
         .collect::<String>();
     match run.error.as_deref() {
-        Some(err) if !err.is_empty() => format!(
-            "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Error:** {err}\n**Result:** {result_str}"
-        ),
+        Some(err) if !err.is_empty() => {
+            let err_preview: String = err.chars().take(400).collect();
+            let err_suffix = if err.chars().count() > 400 { "…" } else { "" };
+            format!(
+                "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Error:** {err_preview}{err_suffix}\n**Result:** {result_str}"
+            )
+        }
         _ => format!(
             "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Result:** {result_str}"
         ),
@@ -316,5 +404,33 @@ fn parse_priority_str(s: &str) -> NotificationPriority {
         "urgent" => NotificationPriority::Urgent,
         "critical" => NotificationPriority::Critical,
         _ => NotificationPriority::Info,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stays_silent;
+    use agentos_types::delivery::{DeliveryMode, NotifyTarget};
+    use agentos_types::schedule::RunState;
+
+    #[test]
+    fn silent_suppresses_success_but_not_failure() {
+        assert!(stays_silent(&DeliveryMode::Silent, RunState::Complete));
+        assert!(stays_silent(&DeliveryMode::Silent, RunState::Running));
+        // The whole point of the fix: these reach the operator inbox.
+        assert!(!stays_silent(&DeliveryMode::Silent, RunState::Failed));
+        assert!(!stays_silent(&DeliveryMode::Silent, RunState::Missed));
+    }
+
+    #[test]
+    fn non_silent_modes_always_deliver() {
+        let direct = DeliveryMode::Direct {
+            target: NotifyTarget::UserInbox,
+            subject: None,
+            priority: "info".into(),
+        };
+        for state in [RunState::Complete, RunState::Failed, RunState::Missed] {
+            assert!(!stays_silent(&direct, state));
+        }
     }
 }

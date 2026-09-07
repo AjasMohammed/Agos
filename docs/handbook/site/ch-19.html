@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting and FAQ · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a><div class="nav-subs"><a class="nav-sub" href="#common-errors-and-solutions" data-target="common-errors-and-solutions">Common Errors and Solutions</a><a class="nav-sub" href="#debug-logging" data-target="debug-logging">Debug Logging</a><a class="nav-sub" href="#checking-system-health" data-target="checking-system-health">Checking System Health</a><a class="nav-sub" href="#resetting-agentos" data-target="resetting-agentos">Resetting AgentOS</a><a class="nav-sub" href="#platform-notes" data-target="platform-notes">Platform Notes</a><a class="nav-sub" href="#error-reference" data-target="error-reference">Error Reference</a><a class="nav-sub" href="#getting-help" data-target="getting-help">Getting Help</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 19 · Troubleshooting and FAQ</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 19</div><h1 class="ch-title">Troubleshooting and FAQ</h1><p class="ch-summary">33+ common errors with solutions, debug logging, health checks, platform notes</p></div>
+    <article class="prose"><h1 id="19-troubleshooting-and-faq" class="anchored"><a class="hanchor" href="#19-troubleshooting-and-faq" aria-label="link">#</a>19 — Troubleshooting and FAQ</h1>
+<blockquote><p>Diagnostic procedures, common error solutions, and platform-specific notes for AgentOS operators.</p></blockquote>
+<hr>
+<h2 id="common-errors-and-solutions" class="anchored"><a class="hanchor" href="#common-errors-and-solutions" aria-label="link">#</a>Common Errors and Solutions</h2>
+<h3 id="startup-and-connection" class="anchored"><a class="hanchor" href="#startup-and-connection" aria-label="link">#</a>Startup and Connection</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>1</td><td><code>Config file not found: config/default.toml</code></td><td>Running binary from wrong directory</td><td>Run from project root, or pass <code>--config /path/to/default.toml</code></td></tr><tr><td>2</td><td><code>Connection refused</code> / <code>BusError: …</code></td><td>Kernel not running</td><td>Start the kernel first: <code>agentos start</code> in a separate terminal</td></tr><tr><td>3</td><td><code>Socket path already in use</code></td><td>Previous kernel instance still alive</td><td>Kill the old process (<code>pkill agentos</code>) or change <code>[bus].socket_path</code> in <code>config/default.toml</code></td></tr><tr><td>4</td><td><code>KernelShutdown</code> returned on any command</td><td>Kernel is mid-shutdown or crashed</td><td>Restart: <code>agentos start</code></td></tr></tbody></table></div>
+<h3 id="agents" class="anchored"><a class="hanchor" href="#agents" aria-label="link">#</a>Agents</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>5</td><td><code>AgentNotFound: &lt;name&gt;</code></td><td>Agent never registered or was evicted</td><td>Verify with <code>agentos agent list</code>; re-register if missing</td></tr><tr><td>6</td><td>Agent unresponsive to messages</td><td>LLM not connected or overloaded</td><td>Check <code>agentos status</code>; verify the LLM provider config with <code>agentos provider list</code> and overall health with <code>agentos status</code></td></tr><tr><td>7</td><td><code>NoLLMConnected</code></td><td>No adapter configured or all health checks failed</td><td>Add a provider in <code>[llm]</code> section or start Ollama (<code>ollama serve</code>)</td></tr></tbody></table></div>
+<h3 id="tasks" class="anchored"><a class="hanchor" href="#tasks" aria-label="link">#</a>Tasks</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>8</td><td>Task stuck in <code>Running</code> state</td><td>Pending escalation or LLM hang</td><td>Check <code>agentos escalation list</code>; approve, deny, or cancel the task</td></tr><tr><td>9</td><td><code>TaskTimeout: &lt;id&gt;</code></td><td>Task exceeded configured timeout</td><td>Increase <code>[kernel].task_timeout_secs</code> or break work into smaller tasks</td></tr><tr><td>10</td><td><code>BudgetExceeded</code> — task stopped</td><td>Per-agent cost limit reached</td><td>Review with <code>agentos cost show</code>; increase budget or switch to a cheaper model</td></tr><tr><td>11</td><td>Task immediately fails with <code>PermissionDenied</code></td><td>Agent lacks required capability</td><td>Grant the permission: <code>agentos perm grant &lt;agent&gt; &lt;resource&gt;:&lt;op&gt;</code> (e.g. <code>agentos perm grant worker fs.user_data:rw</code>)</td></tr></tbody></table></div>
+<h3 id="tools" class="anchored"><a class="hanchor" href="#tools" aria-label="link">#</a>Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>12</td><td><code>ToolBlocked: &lt;name&gt;</code> on install</td><td>Manifest sets <code>trust_tier = &quot;blocked&quot;</code></td><td>Change the tier in the manifest or use a different tool</td></tr><tr><td>13</td><td><code>ToolSignatureInvalid: &lt;name&gt;</code> on install</td><td>Signature does not match <code>author_pubkey</code></td><td>Re-sign: <code>agentos tool sign --key author.key manifest.toml</code>; verify: <code>agentos tool verify manifest.toml</code></td></tr><tr><td>14</td><td><code>ToolNotFound: &lt;name&gt;</code></td><td>Tool directory not on scan path</td><td>Add directory to <code>[tools].tool_dirs</code> in config; reload tools</td></tr><tr><td>15</td><td><code>ToolExecutionFailed</code></td><td>Runtime error inside the tool</td><td>Check tool logs; run with <code>RUST_LOG=agentos=debug</code> to see detail</td></tr><tr><td>16</td><td>WASM tool timeout (<code>SandboxTimeout</code>)</td><td>Tool CPU limit exceeded</td><td>Increase <code>max_cpu_ms</code> in the WASM tool manifest</td></tr><tr><td>17</td><td><code>SandboxSpawnFailed</code> on non-Linux</td><td>Seccomp is Linux-only</td><td>Disable the sandbox in config (<code>[kernel].enable_sandbox = false</code>) when running on macOS or Windows</td></tr><tr><td>18</td><td><code>SandboxFilterError</code></td><td>Seccomp policy rejected a syscall</td><td>Review seccomp allow-list in <code>agentos-sandbox</code>; file a bug if a legitimate syscall is blocked</td></tr><tr><td>19</td><td><code>FileLocked</code> — file held by another task</td><td>Concurrent tasks hold a file lock</td><td>Wait for the other task to finish, or cancel it: <code>agentos task cancel &lt;id&gt;</code></td></tr></tbody></table></div>
+<h3 id="secrets-and-vault" class="anchored"><a class="hanchor" href="#secrets-and-vault" aria-label="link">#</a>Secrets and Vault</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>20</td><td><code>SecretNotFound: &lt;key&gt;</code></td><td>Secret not set for this scope</td><td>Add it: <code>agentos secret set &lt;key&gt; --scope &lt;scope&gt;</code></td></tr><tr><td>21</td><td><code>VaultError: wrong passphrase</code></td><td>Wrong master passphrase</td><td>No recovery path — if passphrase is lost, delete the vault DB and recreate all secrets</td></tr><tr><td>22</td><td>OpenAI / Anthropic / Gemini API errors</td><td>Key not in vault or endpoint unreachable</td><td>Check <code>agentos secret list</code>; set key if missing; verify network access to the API endpoint</td></tr><tr><td>23</td><td>Ollama <code>LLMError: connection refused</code></td><td>Ollama server not running</td><td>Run <code>ollama serve</code> and ensure the model is pulled: <code>ollama pull &lt;model&gt;</code></td></tr></tbody></table></div>
+<h3 id="memory" class="anchored"><a class="hanchor" href="#memory" aria-label="link">#</a>Memory</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>24</td><td>Memory model download is slow</td><td>First-run cache miss</td><td>Embedding model is cached at <code>[memory].model_cache_dir</code>; ensure sufficient disk space (≥ 2 GB)</td></tr><tr><td>25</td><td>Semantic search returns irrelevant results</td><td>Empty or cold memory store</td><td>Let the agent complete a few tasks to populate episodic memory before relying on retrieval</td></tr></tbody></table></div>
+<h3 id="events-and-pipelines" class="anchored"><a class="hanchor" href="#events-and-pipelines" aria-label="link">#</a>Events and Pipelines</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>26</td><td>Event subscription not firing</td><td>Subscription disabled or throttled</td><td>List subscriptions: <code>agentos event subscriptions list</code>; check <code>enabled</code> flag and throttle policy</td></tr><tr><td>27</td><td><code>EventLoopDetected</code> error</td><td>Triggered task emits the same event that triggered it</td><td>Add a depth guard or break the feedback loop in the subscription filter</td></tr><tr><td>28</td><td>Pipeline step shows <code>skipped</code> status</td><td><code>depends_on</code> prerequisite failed</td><td>Inspect step results with <code>agentos pipeline status &lt;id&gt;</code>; fix the failing predecessor step</td></tr><tr><td>29</td><td>Pipeline hangs at a step</td><td>Step agent is awaiting escalation</td><td>Check <code>agentos escalation list</code> and respond</td></tr></tbody></table></div>
+<h3 id="resources-and-audit" class="anchored"><a class="hanchor" href="#resources-and-audit" aria-label="link">#</a>Resources and Audit</h3>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Problem</th><th>Likely Cause</th><th>Solution</th></tr></thead><tbody><tr><td>30</td><td>Resource deadlock detected</td><td>Two tasks holding locks in opposite order</td><td>Inspect contention: <code>agentos resource contention</code>; force-release: <code>agentos resource release --resource &lt;resource&gt; --agent &lt;agent&gt;</code></td></tr><tr><td>31</td><td>Escalation auto-expired</td><td>No response within 5 minutes</td><td>Escalations expire after <code>[kernel].escalation_timeout_secs</code> (default 300 s); respond faster or increase the timeout</td></tr><tr><td>32</td><td>Audit chain verification fails</td><td>Possible log corruption or tampering</td><td>Export the chain for forensics: <code>agentos audit export --output audit.json</code>; then review the broken link</td></tr><tr><td>33</td><td><code>SchemaValidation</code> error on intent</td><td>Intent payload does not match declared schema</td><td>Validate the JSON against the tool manifest schema before submission</td></tr></tbody></table></div>
+<hr>
+<h2 id="debug-logging" class="anchored"><a class="hanchor" href="#debug-logging" aria-label="link">#</a>Debug Logging</h2>
+<h3 id="enable-verbose-output" class="anchored"><a class="hanchor" href="#enable-verbose-output" aria-label="link">#</a>Enable verbose output</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nv">RUST_LOG</span><span class="o">=</span><span class="nv">agentos</span><span class="o">=</span>debug<span class="w"> </span>cargo<span class="w"> </span>run<span class="w"> </span>--bin<span class="w"> </span>agentos-cli<span class="w"> </span>--<span class="w"> </span>start
+</pre></div>
+</div>
+<p>For trace-level output from a single crate:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nv">RUST_LOG</span><span class="o">=</span><span class="nv">agentos_kernel</span><span class="o">=</span>trace,agentos_llm<span class="o">=</span>debug<span class="w"> </span>cargo<span class="w"> </span>run<span class="w"> </span>--bin<span class="w"> </span>agentos-cli<span class="w"> </span>--<span class="w"> </span>start
+</pre></div>
+</div>
+<h3 id="correlate-log-entries-with-audit-records" class="anchored"><a class="hanchor" href="#correlate-log-entries-with-audit-records" aria-label="link">#</a>Correlate log entries with audit records</h3>
+<p>Every kernel log line at <code>debug</code> level includes a <code>trace_id</code>. Use it to find the corresponding audit entry:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">100</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>&lt;trace_id&gt;
+</pre></div>
+</div>
+<h3 id="useful-investigation-commands" class="anchored"><a class="hanchor" href="#useful-investigation-commands" aria-label="link">#</a>Useful investigation commands</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Recent audit entries</span>
+agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">50</span>
+
+<span class="c1"># Verify audit chain integrity</span>
+agentos<span class="w"> </span>audit<span class="w"> </span>verify
+
+<span class="c1"># Export full chain for offline analysis</span>
+agentos<span class="w"> </span>audit<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--output<span class="w"> </span>audit.json
+</pre></div>
+</div>
+<hr>
+<h2 id="checking-system-health" class="anchored"><a class="hanchor" href="#checking-system-health" aria-label="link">#</a>Checking System Health</h2>
+<p>Run this sequence when something seems wrong:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Overall kernel status</span>
+agentos<span class="w"> </span>status
+
+<span class="c1"># 2. Registered agents</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>list
+
+<span class="c1"># 3. Loaded tools</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>list
+
+<span class="c1"># 4. Active tasks</span>
+agentos<span class="w"> </span>task<span class="w"> </span>list
+
+<span class="c1"># 5. Pending escalations</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>list
+
+<span class="c1"># 6. Audit chain integrity</span>
+agentos<span class="w"> </span>audit<span class="w"> </span>verify
+</pre></div>
+</div>
+<p>All commands should return without error. Any <code>ERROR</code> or <code>WARN</code> lines indicate the component that needs attention.</p>
+<hr>
+<h2 id="resetting-agentos" class="anchored"><a class="hanchor" href="#resetting-agentos" aria-label="link">#</a>Resetting AgentOS</h2>
+<h3 id="full-reset-loses-all-state" class="anchored"><a class="hanchor" href="#full-reset-loses-all-state" aria-label="link">#</a>Full reset (loses all state)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Stop the kernel</span>
+agentos<span class="w"> </span>stop
+
+<span class="c1"># Remove runtime state (sockets, task state, agent registrations)</span>
+rm<span class="w"> </span>-rf<span class="w"> </span>/tmp/agentos/
+
+<span class="c1"># Remove audit and memory databases (paths from config/default.toml)</span>
+rm<span class="w"> </span>-f<span class="w"> </span>data/audit.db<span class="w"> </span>data/memory.db
+
+<span class="c1"># Restart</span>
+agentos<span class="w"> </span>start
+</pre></div>
+</div>
+<h3 id="preserve-secrets-while-resetting-other-state" class="anchored"><a class="hanchor" href="#preserve-secrets-while-resetting-other-state" aria-label="link">#</a>Preserve secrets while resetting other state</h3>
+<p>The vault database is separate from runtime state. To keep secrets intact while resetting everything else:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>stop
+
+<span class="c1"># Back up vault</span>
+cp<span class="w"> </span>data/vault.db<span class="w"> </span>vault.db.bak
+
+<span class="c1"># Remove runtime state and other databases</span>
+rm<span class="w"> </span>-rf<span class="w"> </span>/tmp/agentos/<span class="w"> </span>data/audit.db<span class="w"> </span>data/memory.db
+
+<span class="c1"># Restart — vault.db is still in place, secrets are preserved</span>
+agentos<span class="w"> </span>start
+</pre></div>
+</div>
+<hr>
+<h2 id="platform-notes" class="anchored"><a class="hanchor" href="#platform-notes" aria-label="link">#</a>Platform Notes</h2>
+<h3 id="linux-fully-supported" class="anchored"><a class="hanchor" href="#linux-fully-supported" aria-label="link">#</a>Linux (fully supported)</h3>
+<ul><li>Full feature set including seccomp-BPF sandboxing (<code>agentos-sandbox</code>)</li><li>All tool trust tiers enforced</li><li>Primary CI and deployment target</li></ul>
+<h3 id="macos" class="anchored"><a class="hanchor" href="#macos" aria-label="link">#</a>macOS</h3>
+<ul><li>Sandboxing is unavailable — <code>agentos-sandbox</code> is gated behind <code>#[cfg(target_os = &quot;linux&quot;)]</code></li><li>Set <code>[kernel].enable_sandbox = false</code> in config; the kernel will refuse to start otherwise</li><li>All other features (tools, vault, memory, pipelines, events) work normally</li></ul>
+<h3 id="windows" class="anchored"><a class="hanchor" href="#windows" aria-label="link">#</a>Windows</h3>
+<ul><li>Not a supported target for production use</li><li>Sandboxing and seccomp are Linux-only</li><li>Wasmtime WASM execution requires a compatible host binary</li></ul>
+<h3 id="wasmtime-and-wasm-tools" class="anchored"><a class="hanchor" href="#wasmtime-and-wasm-tools" aria-label="link">#</a>Wasmtime and WASM tools</h3>
+<ul><li>WASM tools require a Wasmtime-compatible host (Linux x86_64 recommended)</li><li>If <code>SandboxSpawnFailed</code> occurs, ensure Wasmtime runtime libraries are installed</li><li>WASM tool <code>max_cpu_ms</code> defaults are conservative; increase in the tool manifest for long-running tools</li></ul>
+<hr>
+<h2 id="error-reference" class="anchored"><a class="hanchor" href="#error-reference" aria-label="link">#</a>Error Reference</h2>
+<p>Key <code>AgentOSError</code> variants and what they mean:</p>
+<div class="table-wrap"><table><thead><tr><th>Variant</th><th>Meaning</th></tr></thead><tbody><tr><td><code>AgentNotFound(name)</code></td><td>Named agent is not registered in the kernel</td></tr><tr><td><code>TaskNotFound(id)</code></td><td>Task ID does not exist or was already garbage-collected</td></tr><tr><td><code>TaskTimeout(id)</code></td><td>Task exceeded its configured execution deadline</td></tr><tr><td><code>PermissionDenied { resource, operation }</code></td><td>Agent's capability token does not cover this resource+operation pair</td></tr><tr><td><code>InvalidToken { reason }</code></td><td>Capability token signature check failed</td></tr><tr><td><code>TokenExpired</code></td><td>Capability token's TTL elapsed</td></tr><tr><td><code>ToolBlocked { name }</code></td><td>Tool manifest declares <code>trust_tier = &quot;blocked&quot;</code></td></tr><tr><td><code>ToolSignatureInvalid { name, reason }</code></td><td>Ed25519 signature over the manifest does not verify</td></tr><tr><td><code>ToolNotFound(name)</code></td><td>No tool with that name is registered</td></tr><tr><td><code>ToolExecutionFailed { tool_name, reason }</code></td><td>The tool ran but returned an error</td></tr><tr><td><code>FileLocked { path, … }</code></td><td>Another task holds a write lock on the file</td></tr><tr><td><code>LLMError { provider, reason }</code></td><td>The LLM adapter returned an error (network, quota, etc.)</td></tr><tr><td><code>NoLLMConnected</code></td><td>No LLM adapter is configured or all are unhealthy</td></tr><tr><td><code>SecretNotFound(key)</code></td><td>Secret key not present in the vault for this scope</td></tr><tr><td><code>VaultError(msg)</code></td><td>Vault encryption/decryption or DB error</td></tr><tr><td><code>BusError(msg)</code></td><td>Unix socket IPC failure between CLI and kernel</td></tr><tr><td><code>SandboxSpawnFailed { reason }</code></td><td>Could not create the sandboxed subprocess</td></tr><tr><td><code>SandboxTimeout { tool_name, timeout_ms }</code></td><td>Tool exceeded its CPU time budget</td></tr><tr><td><code>SandboxFilterError { reason }</code></td><td>Seccomp policy violation</td></tr><tr><td><code>EventSubscriptionNotFound(id)</code></td><td>Subscription ID does not exist</td></tr><tr><td><code>EventLoopDetected { event_type, depth }</code></td><td>Event triggered itself recursively</td></tr><tr><td><code>SchemaValidation(msg)</code></td><td>Intent JSON failed schema validation</td></tr></tbody></table></div>
+<hr>
+<h2 id="getting-help" class="anchored"><a class="hanchor" href="#getting-help" aria-label="link">#</a>Getting Help</h2>
+<h3 id="filing-issues" class="anchored"><a class="hanchor" href="#filing-issues" aria-label="link">#</a>Filing issues</h3>
+<p>Report bugs and feature requests at the project issue tracker. Include:</p>
+<ol><li>AgentOS version (<code>agentos --version</code>)</li><li>Operating system and kernel version</li><li>Relevant log output (<code>RUST_LOG=agentos=debug</code>)</li><li>Audit export if the issue involves task execution (<code>agentos audit export</code>)</li></ol>
+<h3 id="reading-audit-logs-for-diagnostics" class="anchored"><a class="hanchor" href="#reading-audit-logs-for-diagnostics" aria-label="link">#</a>Reading audit logs for diagnostics</h3>
+<p>The audit log is the ground truth for what AgentOS did and why. For any unexpected behaviour:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Last 100 events</span>
+agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">100</span>
+
+<span class="c1"># Narrow or widen the window with --last &lt;N&gt;</span>
+agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">50</span>
+</pre></div>
+</div>
+<p>Look for <code>SecurityViolation</code>, <code>EscalationRequired</code>, <code>BudgetExceeded</code>, and <code>ToolExecutionFailed</code> event types — these are the most common root causes of unexpected stops.</p></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-18.html"><span class="pn-dir">← Previous</span><span class="pn-title">Advanced Operations</span></a><a class="pn pn-next" href="ch-20.html"><span class="pn-dir">Next →</span><span class="pn-title">LLM Agent Testing</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#common-errors-and-solutions" data-target="common-errors-and-solutions">Common Errors and Solutions</a></li><li class="toc-h3"><a href="#startup-and-connection" data-target="startup-and-connection">Startup and Connection</a></li><li class="toc-h3"><a href="#agents" data-target="agents">Agents</a></li><li class="toc-h3"><a href="#tasks" data-target="tasks">Tasks</a></li><li class="toc-h3"><a href="#tools" data-target="tools">Tools</a></li><li class="toc-h3"><a href="#secrets-and-vault" data-target="secrets-and-vault">Secrets and Vault</a></li><li class="toc-h3"><a href="#memory" data-target="memory">Memory</a></li><li class="toc-h3"><a href="#events-and-pipelines" data-target="events-and-pipelines">Events and Pipelines</a></li><li class="toc-h3"><a href="#resources-and-audit" data-target="resources-and-audit">Resources and Audit</a></li><li class="toc-h2"><a href="#debug-logging" data-target="debug-logging">Debug Logging</a></li><li class="toc-h3"><a href="#enable-verbose-output" data-target="enable-verbose-output">Enable verbose output</a></li><li class="toc-h3"><a href="#correlate-log-entries-with-audit-records" data-target="correlate-log-entries-with-audit-records">Correlate log entries with audit records</a></li><li class="toc-h3"><a href="#useful-investigation-commands" data-target="useful-investigation-commands">Useful investigation commands</a></li><li class="toc-h2"><a href="#checking-system-health" data-target="checking-system-health">Checking System Health</a></li><li class="toc-h2"><a href="#resetting-agentos" data-target="resetting-agentos">Resetting AgentOS</a></li><li class="toc-h3"><a href="#full-reset-loses-all-state" data-target="full-reset-loses-all-state">Full reset (loses all state)</a></li><li class="toc-h3"><a href="#preserve-secrets-while-resetting-other-state" data-target="preserve-secrets-while-resetting-other-state">Preserve secrets while resetting other state</a></li><li class="toc-h2"><a href="#platform-notes" data-target="platform-notes">Platform Notes</a></li><li class="toc-h3"><a href="#linux-fully-supported" data-target="linux-fully-supported">Linux (fully supported)</a></li><li class="toc-h3"><a href="#macos" data-target="macos">macOS</a></li><li class="toc-h3"><a href="#windows" data-target="windows">Windows</a></li><li class="toc-h3"><a href="#wasmtime-and-wasm-tools" data-target="wasmtime-and-wasm-tools">Wasmtime and WASM tools</a></li><li class="toc-h2"><a href="#error-reference" data-target="error-reference">Error Reference</a></li><li class="toc-h2"><a href="#getting-help" data-target="getting-help">Getting Help</a></li><li class="toc-h3"><a href="#filing-issues" data-target="filing-issues">Filing issues</a></li><li class="toc-h3"><a href="#reading-audit-logs-for-diagnostics" data-target="reading-audit-logs-for-diagnostics">Reading audit logs for diagnostics</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 tags = ["read", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name = "iot-mqtt-subscribe"
@@ -6,6 +7,7 @@ version = "1.0.0"
 description = "Subscribe to an MQTT topic to receive sensor data from IoT devices."
 author = "agentos-core"
 trust_tier = "core"
+category    = "hal"
 tags = ["iot", "mqtt", "hardware"]
 
 [capabilities_required]
@@ -17,6 +19,26 @@ outputs = ["subscribed"]
 [intent_schema]
 input = "IotMqttSubscribeIntent"
 output = "IotMqttSubscribeResult"
+
+[payload_schema]
+type     = "object"
+required = ["topic"]
+
+[payload_schema.properties.topic]
+type        = "string"
+description = "MQTT topic filter, supports + and # wildcards (e.g. 'home/+/temperature')."
+
+[payload_schema.properties.qos]
+type        = "integer"
+enum        = [0, 1, 2]
+default     = 0
+description = "MQTT quality-of-service level."
+
+[payload_schema.properties.duration_seconds]
+type        = "integer"
+minimum     = 1
+default     = 30
+description = "How long to keep the subscription open before returning collected messages."
 
 [sandbox]
 network = false

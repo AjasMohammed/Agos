@@ -56,6 +56,7 @@ impl PrinterDriver {
             tracked_jobs: Arc::new(RwLock::new(HashMap::new())),
             max_jobs_per_hour: DEFAULT_MAX_JOBS_PER_HOUR,
             max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
+            // Parses a compile-time constant; cannot fail at runtime.
             default_server_uri: DEFAULT_CUPS_URI
                 .parse()
                 .expect("default CUPS IPP URI must be valid"),
@@ -68,15 +69,45 @@ impl PrinterDriver {
 
     fn server_uri_from_params(&self, params: &Value) -> Result<Uri, AgentOSError> {
         if let Some(server_uri) = params.get("server_uri").and_then(Value::as_str) {
-            return Self::parse_server_uri(server_uri);
+            let parsed = Self::parse_server_uri(server_uri)?;
+            self.reject_ssrf_host(&parsed)?;
+            return Ok(parsed);
         }
 
         if let Some(printer_uri) = params.get("printer_uri").and_then(Value::as_str) {
             let parsed = Self::parse_printer_uri(printer_uri)?;
+            self.reject_ssrf_host(&parsed)?;
             return Ok(Self::server_uri_from_printer_uri(&parsed));
         }
 
         Ok(self.default_server_uri.clone())
+    }
+
+    /// Host guard for agent-supplied printer URIs. Only the operator-configured
+    /// default CUPS authority is reachable; every other host is rejected.
+    ///
+    /// This blocks two attacks at once:
+    /// - exfiltration — a public IPP host would let an agent read a local file
+    ///   (via `document_path`) and ship its bytes off-box to an attacker;
+    /// - SSRF — private/loopback/link-local hosts (10.x, 127.x, `169.254.169.254`
+    ///   cloud metadata, internal admin endpoints) would turn the IPP client
+    ///   into an internal-network probe.
+    ///
+    /// Network printers are expected to be registered with the local CUPS daemon
+    /// and addressed by name through the default server, not by arbitrary URI.
+    fn reject_ssrf_host(&self, uri: &Uri) -> Result<(), AgentOSError> {
+        let Some(authority) = uri.authority() else {
+            return Ok(());
+        };
+        if Some(authority.as_str()) == self.default_server_uri.authority().map(|a| a.as_str()) {
+            return Ok(());
+        }
+        Err(AgentOSError::HalError(format!(
+            "Printer host '{}' is not the configured CUPS server \
+             (SSRF/exfiltration blocked); register network printers with the local \
+             CUPS daemon and print by name",
+            authority.as_str()
+        )))
     }
 
     fn parse_server_uri(uri: &str) -> Result<Uri, AgentOSError> {
@@ -124,7 +155,9 @@ impl PrinterDriver {
 
     fn printer_uri_from_params(&self, params: &Value) -> Result<Uri, AgentOSError> {
         if let Some(uri) = params.get("printer_uri").and_then(Value::as_str) {
-            return Self::parse_printer_uri(uri);
+            let parsed = Self::parse_printer_uri(uri)?;
+            self.reject_ssrf_host(&parsed)?;
+            return Ok(parsed);
         }
 
         let printer = self.printer_name_from_params(params)?;
@@ -191,9 +224,18 @@ impl PrinterDriver {
             return Err(AgentOSError::HalError("Path traversal blocked".into()));
         }
 
-        let metadata = std::fs::metadata(path).map_err(|e| {
+        // symlink_metadata does NOT follow symlinks — reject them outright so
+        // a link under an allowed directory can't smuggle /etc/shadow to the
+        // printer (matches the audio driver's playback-path policy).
+        let metadata = std::fs::symlink_metadata(path).map_err(|e| {
             AgentOSError::HalError(format!("Unable to read document metadata '{}': {e}", raw))
         })?;
+
+        if metadata.file_type().is_symlink() {
+            return Err(AgentOSError::HalError(
+                "Document path is a symlink; refusing to print".into(),
+            ));
+        }
 
         if !metadata.is_file() {
             return Err(AgentOSError::HalError(format!(
@@ -752,6 +794,76 @@ mod tests {
 
         let err = driver.check_rate_limit(&params).await.unwrap_err();
         assert!(matches!(err, AgentOSError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn server_uri_rejects_all_non_default_hosts() {
+        let driver = PrinterDriver::new();
+        // Only the configured default CUPS authority is reachable. Private,
+        // loopback, link-local AND public hosts are all rejected: private/
+        // loopback would be an SSRF probe, public an exfiltration channel.
+        for blocked in [
+            "http://10.0.0.5:631",
+            "http://169.254.169.254/latest/meta-data",
+            "http://127.0.0.1:8080",
+            "ipp://192.168.1.50:631",
+            "http://[::1]:631",
+            // public hosts are blocked too — exfiltration channel
+            "ipp://printserver.example.com:631",
+            "https://attacker.example.com/ipp",
+        ] {
+            let err = driver
+                .server_uri_from_params(&json!({ "server_uri": blocked }))
+                .expect_err("non-default host must be blocked");
+            assert!(
+                err.to_string().contains("SSRF"),
+                "expected SSRF error for {blocked}, got: {err}"
+            );
+        }
+
+        // The configured default CUPS authority is always allowed, and the
+        // no-URI default path never trips the guard.
+        driver
+            .server_uri_from_params(&json!({ "server_uri": "ipp://localhost:631" }))
+            .expect("default CUPS authority must be allowed");
+        driver
+            .server_uri_from_params(&json!({}))
+            .expect("default server uri must be allowed");
+
+        // The same guard covers agent-supplied printer_uri (private and public).
+        for blocked in [
+            "ipp://10.1.2.3:631/printers/hp",
+            "ipp://printserver.example.com:631/printers/hp",
+        ] {
+            let err = driver
+                .printer_uri_from_params(&json!({ "printer_uri": blocked }))
+                .expect_err("non-default printer_uri must be blocked");
+            assert!(err.to_string().contains("SSRF"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_path_rejects_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("doc.pdf");
+        std::fs::write(&real, b"%PDF-1.4").expect("write doc");
+        let link = dir.path().join("link.pdf");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let driver = PrinterDriver::new();
+        // The real file passes.
+        driver
+            .document_path_from_params(&json!({ "document_path": real.to_str().unwrap() }))
+            .expect("regular file should pass");
+        // The symlink is refused.
+        let err = driver
+            .document_path_from_params(&json!({ "document_path": link.to_str().unwrap() }))
+            .expect_err("symlink must be refused");
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
     }
 
     #[test]

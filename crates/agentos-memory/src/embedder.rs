@@ -1,17 +1,44 @@
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::path::Path;
 
+/// Dimension of the MiniLM-L6-v2 embedding (also used for the no-op fallback
+/// so downstream consumers always see a fixed-size vector).
+pub const EMBED_DIMS: usize = 384;
+
+/// Token cap per text. all-MiniLM-L6-v2 is trained at 256; fastembed defaults to
+/// 512, and attention memory is quadratic in this.
+pub const EMBED_MAX_LENGTH: usize = 256;
+/// Texts per ONNX run. fastembed defaults to 256; onnxruntime's arena keeps the
+/// peak of the largest run forever (one 130-text run at 453 tokens held ~3 GB,
+/// see roadmap/Issues and Fixes 2026-09-07). Memory scales linearly with this.
+pub const EMBED_BATCH_SIZE: usize = 16;
+
+enum Backend {
+    // Boxed so the enum's discriminant size isn't dominated by the
+    // `TextEmbedding` variant (clippy::large_enum_variant).
+    Onnx(Box<TextEmbedding>),
+    /// Returns a zero vector of [`EMBED_DIMS`] floats per input. Used when
+    /// the host can't load onnxruntime safely (see `memory.disable_embedder`
+    /// in `MemorySettings`). Vector search degrades to "everything is
+    /// equally distant" — FTS5 lexical search keeps working.
+    Noop,
+}
+
 pub struct Embedder {
-    model: TextEmbedding,
+    backend: Backend,
 }
 
 impl Embedder {
     /// Downloads and initializes the embedding model during construction (~23MB for MiniLM).
     pub fn new() -> Result<Self, anyhow::Error> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_max_length(EMBED_MAX_LENGTH)
+                .with_show_download_progress(true),
         )?;
-        Ok(Self { model })
+        Ok(Self {
+            backend: Backend::Onnx(Box::new(model)),
+        })
     }
 
     /// Downloads and initializes the embedding model with an explicit cache directory.
@@ -19,15 +46,34 @@ impl Embedder {
         std::fs::create_dir_all(cache_dir)?;
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_max_length(EMBED_MAX_LENGTH)
                 .with_show_download_progress(true)
                 .with_cache_dir(cache_dir.to_path_buf()),
         )?;
-        Ok(Self { model })
+        Ok(Self {
+            backend: Backend::Onnx(Box::new(model)),
+        })
+    }
+
+    /// Construct an embedder that returns zero vectors and never touches
+    /// onnxruntime. Use this when `memory.disable_embedder = true`.
+    pub fn noop() -> Self {
+        Self {
+            backend: Backend::Noop,
+        }
+    }
+
+    /// Returns `true` when this embedder is the zero-vector stub.
+    pub fn is_noop(&self) -> bool {
+        matches!(self.backend, Backend::Noop)
     }
 
     /// Embed one or many texts — batched for efficiency.
     pub fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anyhow::Error> {
-        self.model.embed(texts.to_vec(), None)
+        match &self.backend {
+            Backend::Onnx(model) => model.embed(texts.to_vec(), Some(EMBED_BATCH_SIZE)),
+            Backend::Noop => Ok(vec![vec![0.0_f32; EMBED_DIMS]; texts.len()]),
+        }
     }
 
     /// Helper string chunker for long documents
@@ -115,9 +161,23 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads ONNX model and initializes onnxruntime; skip in default CI \
+                because graph optimization crashes on some Zen-class CPUs (SIGFPE)"]
     fn test_embed_single_text_returns_correct_dimension() {
         let embedder = Embedder::new().unwrap();
         let vecs = embedder.embed(&["hello world"]).unwrap();
-        assert_eq!(vecs[0].len(), 384); // MiniLM-L6-v2
+        assert_eq!(vecs[0].len(), EMBED_DIMS); // MiniLM-L6-v2
+    }
+
+    #[test]
+    fn noop_embedder_returns_zero_vector_of_correct_dim() {
+        let embedder = Embedder::noop();
+        assert!(embedder.is_noop());
+        let vecs = embedder.embed(&["one", "two", "three"]).unwrap();
+        assert_eq!(vecs.len(), 3);
+        for v in &vecs {
+            assert_eq!(v.len(), EMBED_DIMS);
+            assert!(v.iter().all(|&x| x == 0.0));
+        }
     }
 }

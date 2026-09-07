@@ -53,7 +53,58 @@ async fn resolve_env_secrets(
     }
 }
 
+/// Map a catalog entry to its transport-layer one-line summary.
+fn catalog_summary(entry: &crate::mcp_catalog::CatalogEntry) -> agentos_bus::CatalogSummary {
+    agentos_bus::CatalogSummary {
+        id: entry.id.clone(),
+        display_name: entry.display_name.clone(),
+        description: entry.description.clone(),
+        trust_tier: entry.trust_tier.clone(),
+        transport: entry.mcp.transport.clone(),
+        runtime: entry.install.runtime.clone(),
+    }
+}
+
 impl Kernel {
+    /// List every MCP catalog entry as a one-line summary.
+    pub async fn cmd_mcp_catalog_list(&self) -> KernelResponse {
+        let entries = self
+            .mcp_catalog
+            .list()
+            .into_iter()
+            .map(catalog_summary)
+            .collect();
+        KernelResponse::McpCatalogList(entries)
+    }
+
+    /// Search catalog entries by id, display name, or description.
+    pub async fn cmd_mcp_catalog_search(&self, query: String) -> KernelResponse {
+        let entries = self
+            .mcp_catalog
+            .search(&query)
+            .into_iter()
+            .map(catalog_summary)
+            .collect();
+        KernelResponse::McpCatalogList(entries)
+    }
+
+    /// Return the full detail of a single catalog entry as JSON.
+    pub async fn cmd_mcp_catalog_info(&self, id: String) -> KernelResponse {
+        match self.mcp_catalog.lookup(&id) {
+            Some(entry) => match serde_json::to_value(entry) {
+                Ok(value) => KernelResponse::McpCatalogInfo(value),
+                Err(e) => KernelResponse::Error {
+                    message: format!("Failed to serialize catalog entry '{id}': {e}"),
+                },
+            },
+            None => KernelResponse::Error {
+                message: format!(
+                    "No catalog entry '{id}'. Try: agentos mcp catalog search <keyword>"
+                ),
+            },
+        }
+    }
+
     /// Return the live health status of all configured MCP server connections.
     pub async fn cmd_mcp_status(&self) -> KernelResponse {
         let statuses: Vec<McpServerStatus> = self
@@ -185,15 +236,23 @@ impl Kernel {
                 )
                 .await
             {
-                tracing::warn!(
+                // Fail closed: never fall back to persisting the plaintext token
+                // to mcp_attachments.db (which is unencrypted and survives
+                // restarts). Refuse the attach so the operator can fix the vault.
+                tracing::error!(
                     mcp_server = %name,
                     error = %e,
-                    "Failed to store auth_token in vault — token will be used in-memory only"
+                    "Failed to store MCP auth_token in vault — refusing attach (token not persisted)"
                 );
-                Some(token)
-            } else {
-                Some(format!("vault:{}", vault_key))
+                return KernelResponse::Error {
+                    message: format!(
+                        "Failed to store auth_token for MCP server '{name}' in the vault: {e}. \
+                         Attach refused — the token was NOT persisted. Ensure the vault is \
+                         initialized/unlocked and retry."
+                    ),
+                };
             }
+            Some(format!("vault:{}", vault_key))
         } else {
             None
         };
@@ -349,9 +408,14 @@ impl Kernel {
         {
             Ok(tools) => tools,
             Err(e) => {
+                // `add_server_with_factory` registers the server before the
+                // handshake, so a failure leaves it behind in `Backoff` — it
+                // shows up in `mcp list` forever and blocks re-attaching the
+                // same name ("already attached"). Roll it back.
+                self.mcp_supervisor.remove_server(&name).await;
                 return KernelResponse::Error {
                     message: format!("MCP handshake failed for '{}': {}", name, e),
-                }
+                };
             }
         };
 
@@ -387,6 +451,8 @@ impl Kernel {
             // Build a ToolManifest so the LLM can discover and describe this tool.
             let manifest = ToolManifest {
                 manifest: ToolInfo {
+                    category: None,
+                    search_hints: vec![],
                     name: tool_def.name.clone(),
                     version: "0.1.0".to_string(),
                     description: tool_def.description.clone(),
@@ -400,9 +466,15 @@ impl Kernel {
                     group: String::new(),
                 },
                 capabilities_required: ToolCapabilities {
+                    // SECURITY/DISCOVERY: must match the resource the adapter
+                    // enforces (`McpToolAdapter::new`) *and* parse as
+                    // `resource:BITS` — an unparseable manifest permission
+                    // fails closed in the discovery filter, which would hide
+                    // every MCP tool from the model while the call itself
+                    // would have been allowed.
                     permissions: vec![format!(
-                        "mcp.{}",
-                        tool_def.name.replace('-', "_").to_lowercase()
+                        "mcp.{}:x",
+                        agentos_mcp::adapter::sanitize_tool_name(&tool_def.name)
                     )],
                 },
                 capabilities_provided: ToolOutputs {
@@ -412,7 +484,8 @@ impl Kernel {
                     input: "McpToolInput".to_string(),
                     output: "McpToolOutput".to_string(),
                 },
-                input_schema: Some(tool_def.input_schema.clone()),
+                payload_schema: Some(tool_def.input_schema.clone()),
+                examples: vec![],
                 sandbox: ToolSandbox {
                     network: true,
                     fs_write: false,

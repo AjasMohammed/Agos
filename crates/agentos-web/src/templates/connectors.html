@@ -59,7 +59,7 @@
     </figure>
 
     {% if connectors|length == 0 %}
-    {% with icon="🔌", title="No connectors configured", message="Configure OAuth providers in config/oauth_providers.toml, then connect them here. Agents will be able to use external APIs without seeing raw credentials." %}
+    {% with icon="", title="No connectors configured", message="Configure OAuth providers in config/oauth_providers.toml, then connect them here. Agents will be able to use external APIs without seeing raw credentials." %}
     {% include "partials/empty_state.html" %}
     {% endwith %}
     {% endif %}

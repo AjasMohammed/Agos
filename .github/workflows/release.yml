@@ -4,43 +4,142 @@ on:
     tags: ['v*']
 
 jobs:
+  quality:
+    name: Quality gate (fmt / clippy / deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fail fast if the pushed tag disagrees with the workspace version, so the
+      # Release name and `agentos --version` can never drift apart.
+      - name: Verify tag matches workspace version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          V="$(grep -m1 -E '^version\s*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$V" != "$TAG" ]; then
+            echo "::error file=Cargo.toml::workspace version ${V} != tag ${TAG} — bump [workspace.package] version or re-tag."
+            exit 1
+          fi
+          echo "Workspace version ${V} matches tag v${TAG}."
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   build:
+    needs: quality
     strategy:
+      # One broken leg must not cancel the others — linux-amd64 is the only
+      # required artifact; the rest are best-effort (see continue-on-error below).
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
             artifact: agentos-linux-amd64
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
             artifact: agentos-linux-arm64
+            use_cross: true            # cross supplies the aarch64 gnu toolchain + ort aarch64 linux-gnu libs
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: agentos-darwin-amd64
+            use_cross: false
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: agentos-darwin-arm64
+            use_cross: false
     runs-on: ${{ matrix.os }}
+    # Linux x86_64 is the primary target (and what install.sh serves most users);
+    # only that leg is allowed to block the release. arm64 cross builds have a
+    # history of breaking on ort/onnxruntime, and a red darwin leg should not
+    # strand linux users without a release either.
+    continue-on-error: ${{ matrix.artifact != 'agentos-linux-amd64' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install musl tools
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get install -y musl-tools
-      - name: Build
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build (native)
+        if: matrix.use_cross == false
         run: cargo build --release --target ${{ matrix.target }} -p agentos-cli
-      - name: Package
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }} -p agentos-cli
+      - name: Package + checksum
         run: |
           cp target/${{ matrix.target }}/release/agentos ${{ matrix.artifact }}
-          sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
-      - uses: actions/upload-artifact@v4
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+          fi
+      - name: Install minisign
+        run: |
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            brew install minisign
+          else
+            sudo apt-get update && sudo apt-get install -y minisign
+          fi
+      - name: Sign artifact (minisign)
+        # Skips cleanly until Phase 08 publishes MINISIGN_SECRET_KEY (a passwordless
+        # CI key — see packaging/signing/README.md). Until then, checksum-only.
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -n "$MINISIGN_KEY" ]; then
+            printf '%s\n' "$MINISIGN_KEY" > /tmp/minisign.key
+            minisign -S -s /tmp/minisign.key -m ${{ matrix.artifact }} -x ${{ matrix.artifact }}.sig
+            rm -f /tmp/minisign.key
+            echo "Signed ${{ matrix.artifact }}"
+          else
+            echo "MINISIGN_SECRET_KEY not set — skipping signing (checksum only)."
+          fi
+      - name: Generate CycloneDX SBOM (linux-amd64 leg only)
+        if: matrix.artifact == 'agentos-linux-amd64'
+        # SBOM is a nice-to-have; it must not block the only required build leg.
+        continue-on-error: true
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json
+          # cargo-cyclonedx emits per-package bom files; gather the workspace
+          # root bom into a single bom.json shipped with every release.
+          if [ -f bom.json ]; then
+            :
+          else
+            root_bom=$(find . -name 'bom.json' -not -path './target/*' | head -n1)
+            cp "$root_bom" bom.json
+          fi
+      - name: Upload SBOM (linux-amd64 leg only)
+        if: matrix.artifact == 'agentos-linux-amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          if-no-files-found: warn # SBOM generation is best-effort (see above)
+          path: bom.json
+      - name: Upload binary + checksum (required)
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+          if-no-files-found: error
           path: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
+      - name: Upload signature (optional until signing is mandatory)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-sig
+          if-no-files-found: warn
+          path: ${{ matrix.artifact }}.sig
 
   docker:
     needs: build
@@ -61,11 +160,14 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/ajasmohammed/agos:latest
+            ghcr.io/ajasmohammed/agos:${{ github.ref_name }}
 
   release:
     needs: [build, docker]
+    # Publish the Release as long as the required build leg succeeded — a failed
+    # docker push (ghcr outage, permissions) must not strand the binaries.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -73,8 +175,17 @@ jobs:
       - uses: actions/download-artifact@v4
       - uses: softprops/action-gh-release@v1
         with:
+          generate_release_notes: true
+          # Optional legs (arm64/darwin/sig/sbom) may have produced nothing;
+          # unmatched globs are warned about, not fatal (fail_on_unmatched_files
+          # defaults to false).
           files: |
             agentos-linux-amd64/*
             agentos-linux-arm64/*
             agentos-darwin-amd64/*
             agentos-darwin-arm64/*
+            agentos-linux-amd64-sig/*
+            agentos-linux-arm64-sig/*
+            agentos-darwin-amd64-sig/*
+            agentos-darwin-arm64-sig/*
+            sbom/bom.json

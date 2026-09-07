@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Integration · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#inbound-connecting-external-mcp-servers" data-target="inbound-connecting-external-mcp-servers">Inbound: Connecting External MCP Servers</a><a class="nav-sub" href="#outbound-agentos-as-an-mcp-server" data-target="outbound-agentos-as-an-mcp-server">Outbound: AgentOS as an MCP Server</a><a class="nav-sub" href="#cli-reference" data-target="cli-reference">CLI Reference</a><a class="nav-sub" href="#oauth-credentials" data-target="oauth-credentials">OAuth Credentials</a><a class="nav-sub" href="#mcp-security-gate" data-target="mcp-security-gate">MCP Security Gate</a><a class="nav-sub" href="#a2a-agent-to-agent-protocol" data-target="a2a-agent-to-agent-protocol">A2A — Agent-to-Agent Protocol</a><a class="nav-sub" href="#internals" data-target="internals">Internals</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 22 · MCP Integration</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 22</div><h1 class="ch-title">MCP Integration</h1><p class="ch-summary">Bidirectional MCP bridge — boot-time servers, runtime `mcp attach`/`detach`, persisted across restarts, OAuth credential lifecycle, A2A (Agent-to-Agent) protocol, security gate (injection scanning + rate limit)</p></div>
+    <article class="prose"><h1 id="mcp-integration" class="anchored"><a class="hanchor" href="#mcp-integration" aria-label="link">#</a>MCP Integration</h1>
+<blockquote><p>Connect any MCP-compatible tool server to AgentOS, and expose AgentOS tools to any MCP client — bridging the LLM tool ecosystem with AgentOS's security model.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>AgentOS has bidirectional MCP (Model Context Protocol) support:</p>
+<div class="table-wrap"><table><thead><tr><th>Direction</th><th>What it does</th></tr></thead><tbody><tr><td><strong>Inbound</strong> (kernel consumer)</td><td>Kernel spawns external MCP servers at boot, discovers their tools, and makes them available to agents with full capability-token enforcement</td></tr><tr><td><strong>Outbound</strong> (kernel as server)</td><td><code>agentos mcp serve</code> exposes all registered AgentOS tools as an MCP server over stdio — Claude Desktop, Cursor, and any MCP client can use AgentOS tools directly</td></tr></tbody></table></div>
+<p>MCP uses JSON-RPC 2.0 over stdio. Each server is a child process; communication is line-delimited JSON.</p>
+<hr>
+<h2 id="inbound-connecting-external-mcp-servers" class="anchored"><a class="hanchor" href="#inbound-connecting-external-mcp-servers" aria-label="link">#</a>Inbound: Connecting External MCP Servers</h2>
+<h3 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h3>
+<p>Add servers to <code>config/default.toml</code>:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[[mcp.servers]]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;filesystem&quot;</span>
+<span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;npx&quot;</span>
+<span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;-y&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;/tmp&quot;</span><span class="p">]</span>
+
+<span class="k">[[mcp.servers]]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;web-search&quot;</span>
+<span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;python3&quot;</span>
+<span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;-m&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;mcp_server_websearch&quot;</span><span class="p">]</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>yes</td><td>Human-readable label — used in logs and <code>agentos mcp status</code></td></tr><tr><td><code>command</code></td><td><code>String</code></td><td>yes</td><td>Executable to spawn (<code>npx</code>, <code>python3</code>, absolute path, etc.)</td></tr><tr><td><code>args</code></td><td><code>[String]</code></td><td>no</td><td>Arguments passed to <code>command</code></td></tr></tbody></table></div>
+<p>Both <code>name</code> and <code>command</code> must be non-empty — the kernel validates this at boot and will refuse to start if either is blank.</p>
+<h3 id="boot-time-behavior" class="anchored"><a class="hanchor" href="#boot-time-behavior" aria-label="link">#</a>Boot-time behavior</h3>
+<p>At kernel startup, for each configured server:</p>
+<ol><li>The server process is spawned with <code>kill_on_drop(true)</code> — the process is automatically killed if the kernel exits.</li><li>The MCP initialize handshake runs over stdio.</li><li><code>tools/list</code> is called to discover available tools.</li><li>Each tool is registered with <code>ToolRunner</code> under its original name.</li><li><strong>Name collision protection</strong>: any MCP tool whose name matches an existing AgentOS tool (or another tool from the same server) is skipped with a warning.</li></ol>
+<p>Failures at any step are logged as warnings and <strong>do not abort boot</strong> — a missing MCP server doesn't take down the kernel.</p>
+<h3 id="security-model" class="anchored"><a class="hanchor" href="#security-model" aria-label="link">#</a>Security model</h3>
+<p>MCP tools go through the same security pipeline as native tools:</p>
+<ul><li>Every call goes through <code>ToolRunner</code>, which validates the agent's <code>CapabilityToken</code> and <code>PermissionSet</code> before calling the adapter.</li><li>Each MCP tool requires the permission <code>mcp.&lt;sanitized_name&gt;:x</code> by default, where the tool name has non-alphanumeric characters replaced with <code>_</code> (e.g. <code>fs:read</code> → <code>mcp.fs_read</code>).</li><li>Environment isolation: the server process inherits only <code>PATH</code>, <code>HOME</code>, <code>TMPDIR</code>, <code>TEMP</code>, <code>TMP</code> — other environment variables (API keys, etc.) are NOT passed through.</li></ul>
+<h3 id="auto-reconnect" class="anchored"><a class="hanchor" href="#auto-reconnect" aria-label="link">#</a>Auto-reconnect</h3>
+<p>If an MCP server process crashes or its stdio connection breaks, the kernel detects the failure on the next tool call and automatically:</p>
+<ol><li>Re-spawns the server process.</li><li>Retries the tool call once against the fresh process.</li><li>If reconnect fails, returns a <code>ToolExecutionFailed</code> error to the agent.</li></ol>
+<p>This is transparent to the calling agent. Use <code>agentos mcp status</code> to see live connection state.</p>
+<hr>
+<h2 id="outbound-agentos-as-an-mcp-server" class="anchored"><a class="hanchor" href="#outbound-agentos-as-an-mcp-server" aria-label="link">#</a>Outbound: AgentOS as an MCP Server</h2>
+<h3 id="agentos-mcp-serve" class="anchored"><a class="hanchor" href="#agentos-mcp-serve" aria-label="link">#</a><code>agentos mcp serve</code></h3>
+<p>Exposes all tools registered in the AgentOS tool registry as an MCP server over stdin/stdout. This is the bridge for Claude Desktop, Cursor, VS Code extensions, and any other MCP-compatible client to use AgentOS tools.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Pipe stdin/stdout — used by MCP clients automatically</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>serve
+
+<span class="c1"># Test from the shell</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;tools/list&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>agentos<span class="w"> </span>mcp<span class="w"> </span>serve
+</pre></div>
+</div>
+<p><strong>Offline command</strong> — does not require a running kernel. The tool registry is loaded fresh from tool manifest files.</p>
+<p>The server grants a broad <code>operator_permissions()</code> permission set covering all 12 resource namespaces used by core tools:</p>
+<div class="table-wrap"><table><thead><tr><th>Namespace</th><th>Access</th></tr></thead><tbody><tr><td><code>fs:</code></td><td>read, write, execute</td></tr><tr><td><code>fs.user_data</code></td><td>read, write</td></tr><tr><td><code>memory.</code></td><td>read, write</td></tr><tr><td><code>net:</code></td><td>read, write, execute</td></tr><tr><td><code>network.</code></td><td>read, execute</td></tr><tr><td><code>hardware.</code></td><td>read</td></tr><tr><td><code>process.</code></td><td>read, execute</td></tr><tr><td><code>task.</code></td><td>read</td></tr><tr><td><code>escalation.</code></td><td>read, query</td></tr><tr><td><code>user.</code></td><td>read, write, execute</td></tr><tr><td><code>agent.</code></td><td>read, execute</td></tr><tr><td><code>data.</code></td><td>read, write</td></tr></tbody></table></div>
+<h3 id="claude-desktop-integration" class="anchored"><a class="hanchor" href="#claude-desktop-integration" aria-label="link">#</a>Claude Desktop integration</h3>
+<p>Add to Claude Desktop's <code>claude_desktop_config.json</code>:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;mcpServers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;agentos&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/agentos&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;--config&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;/path/to/config/default.toml&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;mcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;serve&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="cli-reference" class="anchored"><a class="hanchor" href="#cli-reference" aria-label="link">#</a>CLI Reference</h2>
+<h3 id="mcp-list" class="anchored"><a class="hanchor" href="#mcp-list" aria-label="link">#</a><code>mcp list</code></h3>
+<p>List all MCP servers configured in the current config file. <strong>Offline</strong> — shows config only, not live state.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>mcp<span class="w"> </span>list
+agentos<span class="w"> </span>--config<span class="w"> </span>/etc/agentos/prod.toml<span class="w"> </span>mcp<span class="w"> </span>list
+</pre></div>
+</div>
+<p>Output format: one row per configured server showing <code>name</code>, <code>command</code>, and <code>args</code>.</p>
+<h3 id="mcp-serve" class="anchored"><a class="hanchor" href="#mcp-serve" aria-label="link">#</a><code>mcp serve</code></h3>
+<p>Start an MCP server on stdin/stdout exposing all AgentOS tools. <strong>Offline.</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>mcp<span class="w"> </span>serve
+</pre></div>
+</div>
+<h3 id="mcp-status" class="anchored"><a class="hanchor" href="#mcp-status" aria-label="link">#</a><code>mcp status</code></h3>
+<p>Query the running kernel for live health of all configured MCP server connections. <strong>Requires a running kernel.</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>mcp<span class="w"> </span>status
+</pre></div>
+</div>
+<p>Sample output:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME                 STATUS       TOOLS    LAST ERROR
+----------------------------------------------------------------------
+filesystem           connected    8        -
+web-search           disconnected 0        MCP server &#39;web-search&#39; reconnect failed: ...
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td><code>NAME</code></td><td>Server name from config</td></tr><tr><td><code>STATUS</code></td><td><code>connected</code> if the process is alive; <code>disconnected</code> if the last connection attempt failed</td></tr><tr><td><code>TOOLS</code></td><td>Number of tools registered from this server at boot</td></tr><tr><td><code>LAST ERROR</code></td><td>Last connection-level error message, or <code>-</code> if none</td></tr></tbody></table></div>
+<h3 id="mcp-attach-mcp-detach" class="anchored"><a class="hanchor" href="#mcp-attach-mcp-detach" aria-label="link">#</a><code>mcp attach</code> / <code>mcp detach</code></h3>
+<p>Beyond <code>[[mcp.servers]]</code> config-driven boot, the kernel supports <strong>runtime attach</strong>: connect a new MCP server without restarting. Attachments are persisted to the kernel database (SQLite) and restored automatically on the next boot.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Stdio transport — typical for npm/python MCP packages.</span>
+<span class="c1"># The server command and its arguments go after `--`.</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>attach<span class="w"> </span>github<span class="w"> </span>--<span class="w"> </span>npx<span class="w"> </span>-y<span class="w"> </span>@modelcontextprotocol/server-github
+
+<span class="c1"># HTTP transport with a static bearer token — for self-hosted MCP servers</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>attach<span class="w"> </span>corp-tools<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--url<span class="w"> </span>https://mcp.internal.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$CORP_TOOLS_TOKEN</span><span class="s2">&quot;</span>
+
+<span class="c1"># OAuth-protected server — token lifecycle managed by the kernel</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>attach<span class="w"> </span>jira<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--url<span class="w"> </span>https://mcp.atlassian.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--oauth-connector<span class="w"> </span>jira
+
+<span class="c1"># Remove a previously attached server</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>detach<span class="w"> </span>github
+</pre></div>
+</div>
+<p>Pass environment variables to a stdio server with repeated <code>--env KEY=VALUE</code> flags (use <code>vault:SECRET_NAME</code> as the value to read a secret from the vault), e.g. <code>agentos mcp attach github --env GITHUB_TOKEN=vault:github_token -- npx -y @modelcontextprotocol/server-github</code>.</p>
+<p>Both <code>attach</code> and <code>detach</code> are kernel-mediated: the change is applied to the running supervisor and persisted to SQLite. The kernel reports <code>McpStatus</code> for each running server (config-driven and runtime-attached) in a single list — confirm the result with <code>agentos mcp status</code>.</p>
+<h3 id="mcp-tools-mcp-call" class="anchored"><a class="hanchor" href="#mcp-tools-mcp-call" aria-label="link">#</a><code>mcp tools</code> / <code>mcp call</code></h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List every tool in the local AgentOS tool registry (offline — loaded from</span>
+<span class="c1"># tool manifest files, not the live kernel or attached servers)</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>tools
+
+<span class="c1"># Direct invocation of a single tool — bypasses the agent loop.</span>
+<span class="c1"># Operates on the local AgentOS tool registry.</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>call<span class="w"> </span>--tool<span class="w"> </span>file-reader<span class="w"> </span>--input<span class="w"> </span><span class="s1">&#39;{&quot;path&quot;: &quot;notes.txt&quot;}&#39;</span>
+</pre></div>
+</div>
+<p><code>mcp tools</code> lists the local AgentOS tool registry offline; it does not query attached MCP servers. Both commands are useful for smoke-testing tool dispatch.</p>
+<hr>
+<h2 id="oauth-credentials" class="anchored"><a class="hanchor" href="#oauth-credentials" aria-label="link">#</a>OAuth Credentials</h2>
+<p>MCP servers behind an OAuth provider authenticate via the kernel's <code>OAuthTokenProvider</code>. The flow is:</p>
+<ol><li><code>mcp attach --oauth-connector &lt;name&gt;</code> triggers the authorization-code flow if no valid token is in the vault. The kernel writes <code>OAuthFlowStarted</code> and prints a browser URL.</li><li>After the user consents, the kernel exchanges the code for tokens, encrypts them in the vault, and emits <code>OAuthCredentialStored</code> and <code>OAuthFlowCompleted</code>.</li><li>Each subsequent MCP call passes through <code>OAuthTokenProvider</code> which transparently refreshes the access token when expired and emits <code>OAuthTokenRefreshed</code>. Persistent failures emit <code>OAuthTokenExpired</code> and surface as <code>ToolExecutionFailed</code> to the agent.</li><li><code>mcp detach</code> removes the credential and emits <code>OAuthCredentialDeleted</code>.</li></ol>
+<p>OAuth credentials live in the encrypted vault under the <code>mcp.oauth.&lt;connector&gt;</code> namespace and never appear in logs or audit details. Use <code>agentos secret list</code> to confirm storage; the value is opaque to the operator.</p>
+<hr>
+<h2 id="mcp-security-gate" class="anchored"><a class="hanchor" href="#mcp-security-gate" aria-label="link">#</a>MCP Security Gate</h2>
+<p>All output returned by external MCP tools passes through the <code>McpSecurityGate</code> before being injected into the agent context:</p>
+<ul><li><strong>Injection scanning</strong> — output is scanned for known prompt-injection patterns. Suspicious payloads emit a <code>McpInjectionDetected</code> audit event and are flagged in the result so the agent can treat the data as untrusted.</li><li><strong>Per-server rate limiting</strong> — a token bucket per server caps tool calls per minute to prevent runaway loops or quota exhaustion.</li><li><strong>Risk class</strong> — every dynamically registered MCP tool carries <code>risk_class = ReadonlyExternal</code>. The <code>ApprovalHook</code> may intercept the first call to require operator approval.</li></ul>
+<p>Treat MCP tool output the same way you treat any untrusted user data: use it as data, never as instructions to follow.</p>
+<hr>
+<h2 id="a2a-agent-to-agent-protocol" class="anchored"><a class="hanchor" href="#a2a-agent-to-agent-protocol" aria-label="link">#</a>A2A — Agent-to-Agent Protocol</h2>
+<p>Beyond classic MCP tool import, AgentOS speaks an <strong>Agent-to-Agent</strong> protocol so one AgentOS instance can discover and delegate tasks to agents on another instance.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Show this agent&#39;s own A2A card (what external agents would see)</span>
+agentos<span class="w"> </span>a2a<span class="w"> </span>card
+
+<span class="c1"># Discover agents exposed by a remote AgentOS endpoint</span>
+agentos<span class="w"> </span>a2a<span class="w"> </span>discover<span class="w"> </span>https://other.example.com
+
+<span class="c1"># Delegate a capability invocation to a remote agent and wait for the result</span>
+agentos<span class="w"> </span>a2a<span class="w"> </span>delegate<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span>https://other.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--capability<span class="w"> </span>researcher<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input<span class="w"> </span><span class="s1">&#39;{&quot;query&quot;:&quot;Find the latest CVEs for openssl 3.x&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--wait
+
+<span class="c1"># List active A2A task delegations</span>
+agentos<span class="w"> </span>a2a<span class="w"> </span>tasks
+</pre></div>
+</div>
+<p>The remote call is wrapped in a <code>task-delegate</code>-shaped intent and passes through the same <code>CapabilityToken</code> and <code>ApprovalHook</code> machinery as a local delegation. Failures (network, auth, capability) are returned as <code>ToolExecutionFailed</code> with the remote error embedded.</p>
+<hr>
+<h2 id="internals" class="anchored"><a class="hanchor" href="#internals" aria-label="link">#</a>Internals</h2>
+<h3 id="key-types" class="anchored"><a class="hanchor" href="#key-types" aria-label="link">#</a>Key types</h3>
+<div class="table-wrap"><table><thead><tr><th>Type</th><th>Crate</th><th>Purpose</th></tr></thead><tbody><tr><td><code>McpServerHandle</code></td><td><code>agentos-mcp</code></td><td>Resilient connection wrapper with auto-reconnect and health state</td></tr><tr><td><code>McpClient</code></td><td><code>agentos-mcp</code></td><td>Raw stdio/HTTP connection holding a single <code>Mutex&lt;McpConnection&gt;</code></td></tr><tr><td><code>McpSupervisor</code></td><td><code>agentos-mcp</code></td><td>Multi-server orchestrator that owns boot-time and runtime-attached servers in one place</td></tr><tr><td><code>McpToolAdapter</code></td><td><code>agentos-mcp</code></td><td><code>AgentTool</code> implementation wrapping a single MCP tool via <code>McpServerHandle</code></td></tr><tr><td><code>McpSecurityGate</code></td><td><code>agentos-mcp</code></td><td>Injection scanner and per-server rate limiter for MCP output</td></tr><tr><td><code>OAuthTokenProvider</code></td><td><code>agentos-mcp</code></td><td>OAuth credential lifecycle (auth-code flow, refresh, vault storage)</td></tr><tr><td><code>McpServer</code></td><td><code>agentos-mcp</code></td><td>Outbound server — serves <code>agentos mcp serve</code></td></tr><tr><td><code>A2AClient</code> / <code>A2ATaskExecutor</code></td><td><code>agentos-mcp</code></td><td>Agent-to-Agent protocol client that wraps remote delegations as local tools</td></tr><tr><td><code>McpServerConfig</code></td><td><code>agentos-kernel</code></td><td>Config struct for <code>[[mcp.servers]]</code> entries</td></tr><tr><td><code>KernelCommand::McpStatus</code> / <code>McpAttach</code> / <code>McpDetach</code> / <code>McpOAuthStore</code></td><td><code>agentos-bus</code></td><td>Bus commands for the runtime MCP CLI</td></tr><tr><td><code>McpServerStatus</code></td><td><code>agentos-bus</code></td><td>Per-server health data (name, connected, tool_count, last_error)</td></tr></tbody></table></div>
+<h3 id="mcpserverhandle-concurrency-model" class="anchored"><a class="hanchor" href="#mcpserverhandle-concurrency-model" aria-label="link">#</a>McpServerHandle concurrency model</h3>
+<p>The handle uses two internal locks:</p>
+<ul><li><code>Mutex&lt;Option&lt;Arc&lt;McpClient&gt;&gt;&gt;</code> — held briefly to get/swap the live client reference; <strong>never held during I/O</strong></li><li><code>Mutex&lt;Option&lt;String&gt;&gt;</code> — holds the last error string for <code>agentos mcp status</code></li></ul>
+<p>The <code>McpClient::conn</code> mutex serializes actual reads and writes, ensuring request/response pairs never interleave across concurrent calls.</p>
+<h3 id="connection-error-detection" class="anchored"><a class="hanchor" href="#connection-error-detection" aria-label="link">#</a>Connection error detection</h3>
+<p>The following error message substrings trigger a reconnect:</p>
+<ul><li><code>&quot;closed connection&quot;</code>, <code>&quot;did not respond&quot;</code>, <code>&quot;Failed to spawn&quot;</code>, <code>&quot;broken pipe&quot;</code>, <code>&quot;BrokenPipe&quot;</code></li></ul>
+<p>Protocol-level errors (JSON-RPC error responses from a live server) pass through without triggering reconnect.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-04.html">CLI Reference Complete</a> — full CLI reference including <code>mcp</code> commands</li><li><a class="wikilink" href="ch-07.html">Tool System</a> — how tools are registered, trusted, and executed</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — capability tokens and permission enforcement</li><li><a class="wikilink" href="ch-16.html">Configuration Reference</a> — <code>[mcp]</code> config section</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-21.html"><span class="pn-dir">← Previous</span><span class="pn-title">User Notifications and Channels</span></a><a class="pn pn-next" href="ch-23.html"><span class="pn-dir">Next →</span><span class="pn-title">REST API Reference</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#inbound-connecting-external-mcp-servers" data-target="inbound-connecting-external-mcp-servers">Inbound: Connecting External MCP Servers</a></li><li class="toc-h3"><a href="#configuration" data-target="configuration">Configuration</a></li><li class="toc-h3"><a href="#boot-time-behavior" data-target="boot-time-behavior">Boot-time behavior</a></li><li class="toc-h3"><a href="#security-model" data-target="security-model">Security model</a></li><li class="toc-h3"><a href="#auto-reconnect" data-target="auto-reconnect">Auto-reconnect</a></li><li class="toc-h2"><a href="#outbound-agentos-as-an-mcp-server" data-target="outbound-agentos-as-an-mcp-server">Outbound: AgentOS as an MCP Server</a></li><li class="toc-h3"><a href="#agentos-mcp-serve" data-target="agentos-mcp-serve"><code>agentos mcp serve</code></a></li><li class="toc-h3"><a href="#claude-desktop-integration" data-target="claude-desktop-integration">Claude Desktop integration</a></li><li class="toc-h2"><a href="#cli-reference" data-target="cli-reference">CLI Reference</a></li><li class="toc-h3"><a href="#mcp-list" data-target="mcp-list"><code>mcp list</code></a></li><li class="toc-h3"><a href="#mcp-serve" data-target="mcp-serve"><code>mcp serve</code></a></li><li class="toc-h3"><a href="#mcp-status" data-target="mcp-status"><code>mcp status</code></a></li><li class="toc-h3"><a href="#mcp-attach-mcp-detach" data-target="mcp-attach-mcp-detach"><code>mcp attach</code> / <code>mcp detach</code></a></li><li class="toc-h3"><a href="#mcp-tools-mcp-call" data-target="mcp-tools-mcp-call"><code>mcp tools</code> / <code>mcp call</code></a></li><li class="toc-h2"><a href="#oauth-credentials" data-target="oauth-credentials">OAuth Credentials</a></li><li class="toc-h2"><a href="#mcp-security-gate" data-target="mcp-security-gate">MCP Security Gate</a></li><li class="toc-h2"><a href="#a2a-agent-to-agent-protocol" data-target="a2a-agent-to-agent-protocol">A2A — Agent-to-Agent Protocol</a></li><li class="toc-h2"><a href="#internals" data-target="internals">Internals</a></li><li class="toc-h3"><a href="#key-types" data-target="key-types">Key types</a></li><li class="toc-h3"><a href="#mcpserverhandle-concurrency-model" data-target="mcpserverhandle-concurrency-model">McpServerHandle concurrency model</a></li><li class="toc-h3"><a href="#connection-error-detection" data-target="connection-error-detection">Connection error detection</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

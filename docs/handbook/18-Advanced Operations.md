@@ -76,7 +76,7 @@ Device lifecycle changes are recorded in the audit log:
 
 ### HAL Drivers
 
-The HAL ships **16 drivers** — some always available, others feature-gated at compile time. IoT drivers (`mqtt`, `homeassistant`) integrate with the HAL device-twin model: an agent sets a desired state, the safety engine validates the request, and an actuator update is dispatched.
+The HAL ships **20 drivers** — some always available, others feature-gated at compile time. IoT drivers (`mqtt`, `homeassistant`) integrate with the HAL device-twin model: an agent sets a desired state, the safety engine validates the request, and an actuator update is dispatched.
 
 | Driver | Feature Gate | Description |
 |--------|-------------|-------------|
@@ -87,6 +87,10 @@ The HAL ships **16 drivers** — some always available, others feature-gated at 
 | `sensor` | — (always) | Thermal sensor readings |
 | `gpu` | — (always) | GPU metrics (VRAM, temperature, utilization) |
 | `log_reader` | — (always) | System and application log reading |
+| `mounts` | — (always) | Mounted filesystems via procfs mountinfo + statvfs |
+| `network_sockets` | — (always) | Open TCP/UDP sockets via procfs `/proc/net` (perm `network.sockets:r`) |
+| `open_files` | — (always) | Per-process open file descriptors via procfs fd walk (perm `system.open_files:r`) |
+| `services` | — (always) | systemd service list/status/logs via zbus D-Bus (read-only) |
 | `audio` | `audio` | Audio capture and playback via PipeWire/PulseAudio |
 | `bluetooth` | `bluetooth` | Bluetooth device scanning, pairing, and connection |
 | `display` | `display` | Display output configuration (resolution, refresh rate) |
@@ -480,7 +484,7 @@ Each agent has an Ed25519 keypair used for cryptographic identity. The keypair i
 ### Viewing an Agent's Identity
 
 ```bash
-agentos identity show --agent <name>
+agentos identity show <name>
 ```
 
 Output:
@@ -497,7 +501,7 @@ The public key is safe to share. The signing key (private key) is held only in k
 ### Revoking an Identity
 
 ```bash
-agentos identity revoke --agent <name>
+agentos identity revoke <name>
 ```
 
 This permanently revokes the agent's cryptographic identity and all associated permissions. The agent will need to be reconnected to generate a new keypair and receive new permissions.

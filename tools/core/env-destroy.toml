@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name = "env-destroy"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Destroy a managed workspace and all its installed packages"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "write_scoped"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = [
@@ -20,11 +21,11 @@ outputs = ["content.json"]
 input = "EnvDestroyIntent"
 output = "EnvDestroyResult"
 
-[input_schema]
+[payload_schema]
 required = ["name"]
 type = "object"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 description = "Name of the workspace to destroy"
 type = "string"
 

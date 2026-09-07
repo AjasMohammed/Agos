@@ -59,11 +59,14 @@ pub enum SafetyCondition {
         /// Threshold value.
         threshold: f64,
     },
-    /// Block during certain hours (24h format).
-    /// Example: block door unlock between 23:00 and 06:00.
+    /// Block during certain hours (24h format), evaluated in **UTC** —
+    /// `allowed_start_hour`/`allowed_end_hour` are compared against
+    /// `chrono::Utc::now().hour()`, not the host's local timezone. Convert
+    /// local policy hours to UTC when authoring rules.
+    /// Example: block door unlock between 23:00 and 06:00 UTC.
     #[serde(rename = "time_window")]
     TimeWindow {
-        /// Actions are ALLOWED between start_hour and end_hour.
+        /// Actions are ALLOWED between start_hour and end_hour (UTC).
         /// Outside this window, the rule blocks.
         allowed_start_hour: u32,
         allowed_end_hour: u32,
@@ -98,6 +101,19 @@ impl SafetyEngine {
             let config: SafetyConfig = toml::from_str(&config_str).map_err(|e| {
                 AgentOSError::HalError(format!("Failed to parse safety config: {e}"))
             })?;
+            // The only agent-facing actuation path (`hardware-set-desired`)
+            // always evaluates with action = "set_state", so a rule keyed on
+            // any other action never fires. Surface that loudly.
+            for rule in &config.rules {
+                if rule.action != "*" && rule.action != "set_state" {
+                    tracing::warn!(
+                        rule = %rule.name,
+                        action = %rule.action,
+                        "Safety rule action is neither \"set_state\" nor \"*\" — \
+                         it will never match the hardware-set-desired tool and is inert"
+                    );
+                }
+            }
             tracing::info!(count = config.rules.len(), "Loaded safety rules");
             config.rules
         } else {
@@ -163,12 +179,30 @@ impl SafetyEngine {
             } => {
                 let reported = match self.twin_registry.get_reported(sensor_device_id).await {
                     Some(v) => v,
-                    None => return true, // No data → assume safe (conservative)
+                    None => {
+                        // No data for a guard sensor → we cannot confirm the safe
+                        // condition holds, so fail CLOSED (treat as violated) and
+                        // block actuation. A safety interlock that can't read its
+                        // sensor must never silently permit the action. Matches the
+                        // unknown-operator handling below.
+                        tracing::warn!(
+                            sensor = %sensor_device_id,
+                            "Safety guard sensor has no reported state; failing closed (blocking)"
+                        );
+                        return false;
+                    }
                 };
 
                 let value = match reported.get(field).and_then(|v| v.as_f64()) {
                     Some(v) => v,
-                    None => return true, // Field missing → assume safe
+                    None => {
+                        tracing::warn!(
+                            sensor = %sensor_device_id,
+                            rule_field = %field,
+                            "Safety guard sensor field missing/non-numeric; failing closed (blocking)"
+                        );
+                        return false;
+                    }
                 };
 
                 match op.as_str() {
@@ -179,8 +213,14 @@ impl SafetyEngine {
                     "eq" => (value - threshold).abs() < f64::EPSILON,
                     "neq" => (value - threshold).abs() >= f64::EPSILON,
                     _ => {
-                        tracing::warn!(op = %op, rule_field = %field, "Unknown comparison operator in safety rule");
-                        true // Unknown op → don't block (fail-open for unknown config, fail-closed for known threats)
+                        tracing::warn!(
+                            op = %op,
+                            rule_field = %field,
+                            "Unknown comparison operator in safety rule; failing closed (blocking)"
+                        );
+                        // Unknown op → block. A typo'd operator must never
+                        // silently disable an operator-authored safety rule.
+                        false
                     }
                 }
             }
@@ -366,7 +406,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_missing_sensor_data_passes() {
+    async fn test_unknown_operator_fails_closed() {
+        let (twins, _tmp) = setup();
+        twins
+            .update_reported("sensor_1", "sensor", json!({"temperature": 20.0}))
+            .await
+            .unwrap();
+
+        let engine = SafetyEngine::with_rules(
+            vec![SafetyRule {
+                name: "typo".into(),
+                description: "operator typo'd the comparison".into(),
+                device_type: "*".into(),
+                action: "*".into(),
+                condition: SafetyCondition::ReportedThreshold {
+                    sensor_device_id: "sensor_1".into(),
+                    field: "temperature".into(),
+                    op: "approx".into(),
+                    threshold: 75.0,
+                },
+                error_message: "Blocked".into(),
+                escalation: false,
+            }],
+            twins,
+        );
+
+        // Unknown operator must BLOCK, never silently disable the rule.
+        let err = engine
+            .evaluate("heater", "heater", "set_state", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.rule_name, "typo");
+    }
+
+    #[tokio::test]
+    async fn test_missing_sensor_data_blocks() {
         let (twins, _tmp) = setup();
         // No sensor data reported
 
@@ -388,11 +462,12 @@ mod tests {
             twins,
         );
 
-        // No data → assume safe
+        // No data for a guard sensor → fail CLOSED: a safety interlock that
+        // cannot read its sensor must block actuation, not permit it.
         assert!(engine
             .evaluate("heater", "heater", "set_state", &json!({}))
             .await
-            .is_ok());
+            .is_err());
     }
 
     #[test]

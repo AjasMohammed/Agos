@@ -32,7 +32,7 @@ pub async fn list_connectors(State(state): State<AppState>, jar: CookieJar) -> R
         oauth_creds.iter().map(|c| c.connector_id.clone()).collect();
 
     // Also check oauth_providers.toml for configured-but-not-yet-connected providers
-    let provider_configs = super::oauth::load_provider_configs();
+    let provider_configs = super::oauth::load_provider_configs().await;
 
     let mut connectors: Vec<ConnectorView> = Vec::new();
 

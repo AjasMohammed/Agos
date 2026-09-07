@@ -18,7 +18,7 @@ impl SensorDriver {
         Self
     }
 
-    fn read_temperatures(&self) -> Vec<Value> {
+    fn read_temperatures() -> Vec<Value> {
         let mut readings = Vec::new();
 
         // Read from /sys/class/thermal/thermal_zone*/temp
@@ -86,7 +86,12 @@ impl HalDriver for SensorDriver {
 
         match action {
             "read_temperature" => {
-                let readings = self.read_temperatures();
+                // sysfs reads are blocking I/O — keep them off the runtime.
+                let readings = tokio::task::spawn_blocking(Self::read_temperatures)
+                    .await
+                    .map_err(|e| {
+                        AgentOSError::HalError(format!("sensor read task panicked: {e}"))
+                    })?;
                 Ok(json!({ "temperatures": readings }))
             }
             other => Err(AgentOSError::HalError(format!(

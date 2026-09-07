@@ -1,0 +1,38 @@
+tags = ["read"]
+risk_class = "readonly_scoped"
+
+[manifest]
+name        = "sys-monitor"
+version     = "1.0.0"
+description = "Return live system monitoring stats (CPU load, memory usage, process counts) via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "system"
+search_hints = ["cpu load", "memory usage", "disk space", "how busy is the machine"]
+
+[manifest.usage_hints]
+use_for = ["Checking current CPU/memory load", "Lightweight host health snapshot"]
+prefer_over = ["shell-exec top", "shell-exec free", "shell-exec uptime"]
+quick_example = {}
+
+[capabilities_required]
+permissions = ["hardware.system:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "SysMonitorQuery"
+output = "SysMonitorResult"
+
+[payload_schema]
+type = "object"
+description = "No input required"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

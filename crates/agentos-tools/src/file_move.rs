@@ -46,20 +46,22 @@ impl AgentTool for FileMove {
 
         tracing::debug!(from = from_str, to = to_str, "file-move: starting");
 
-        let canonical_data_dir =
-            context
-                .data_dir
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-move".into(),
                     reason: format!("Data directory error: {}", e),
                 })?;
 
-        // SECURITY: resolve source, checking workspace paths first.
+        // SECURITY: file-move deletes the source — both endpoints need write access.
         let from_resolved = crate::traits::resolve_tool_path(
             from_str,
-            &context.data_dir,
-            &context.workspace_paths,
+            &agent_root,
+            &context.workspace_paths_writable,
         )?;
         let canonical_from =
             from_resolved
@@ -70,7 +72,7 @@ impl AgentTool for FileMove {
                 })?;
 
         let from_in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| canonical_from.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -79,7 +81,7 @@ impl AgentTool for FileMove {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_from))
             .unwrap_or(false);
-        if !canonical_from.starts_with(&canonical_data_dir)
+        if !canonical_from.starts_with(&canonical_agent_root)
             && !from_in_workspace
             && !from_in_storage_zone
         {
@@ -99,14 +101,17 @@ impl AgentTool for FileMove {
             });
         }
 
-        // SECURITY: resolve destination, checking workspace paths first.
+        // SECURITY: destination must also be in the writable workspace list.
         // The destination may not exist yet → use lexical normalize_path.
-        let to_resolved =
-            crate::traits::resolve_tool_path(to_str, &context.data_dir, &context.workspace_paths)?;
+        let to_resolved = crate::traits::resolve_tool_path(
+            to_str,
+            &agent_root,
+            &context.workspace_paths_writable,
+        )?;
         let normalized_to = normalize_path(&to_resolved);
 
         let to_in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| normalized_to.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -115,7 +120,7 @@ impl AgentTool for FileMove {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &normalized_to))
             .unwrap_or(false);
-        if !normalized_to.starts_with(&canonical_data_dir)
+        if !normalized_to.starts_with(&canonical_agent_root)
             && !to_in_workspace
             && !to_in_storage_zone
         {
@@ -200,7 +205,7 @@ impl AgentTool for FileMove {
                         reason: format!("Cannot resolve destination parent: {}", e),
                     })?;
             let parent_in_workspace = context
-                .workspace_paths
+                .workspace_paths_writable
                 .iter()
                 .any(|wp| canonical_parent.starts_with(wp));
             // KMC Phase 3: check dynamic storage zones
@@ -209,7 +214,7 @@ impl AgentTool for FileMove {
                 .as_ref()
                 .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_parent))
                 .unwrap_or(false);
-            if !canonical_parent.starts_with(&canonical_data_dir)
+            if !canonical_parent.starts_with(&canonical_agent_root)
                 && !parent_in_workspace
                 && !parent_in_storage_zone
             {

@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "agent-message"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Send a message to another named agent via the AgentMessageBus"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
+search_hints = ["send a message to another agent", "tell a peer agent"]
 
 [capabilities_required]
 permissions = ["agent.message:x"]
@@ -17,15 +20,15 @@ outputs = ["status"]
 input  = "AgentMessageIntent"
 output = "AgentMessageResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["to", "content"]
 
-[input_schema.properties.to]
+[payload_schema.properties.to]
 type = "string"
 description = "Target agent name"
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Message text to send"
 

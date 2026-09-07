@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebSocket Guide · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#connecting" data-target="connecting">Connecting</a><a class="nav-sub" href="#heartbeat" data-target="heartbeat">Heartbeat</a><a class="nav-sub" href="#frame-format" data-target="frame-format">Frame Format</a><a class="nav-sub" href="#available-channels" data-target="available-channels">Available Channels</a><a class="nav-sub" href="#complete-example-task-monitoring" data-target="complete-example-task-monitoring">Complete Example: Task Monitoring</a><a class="nav-sub" href="#complete-example-chat" data-target="complete-example-chat">Complete Example: Chat</a><a class="nav-sub" href="#reconnection" data-target="reconnection">Reconnection</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 24 · WebSocket Guide</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 24</div><h1 class="ch-title">WebSocket Guide</h1><p class="ch-summary">Real-time event subscriptions, chat streaming (token-level `TextChunk` events), task control — frame protocol, available channels, reconnection patterns</p></div>
+    <article class="prose"><h1 id="websocket-guide" class="anchored"><a class="hanchor" href="#websocket-guide" aria-label="link">#</a>WebSocket Guide</h1>
+<blockquote><p>Real-time bidirectional communication with AgentOS — subscribe to kernel events, exchange chat messages, and send task actions over a single persistent connection.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>The WebSocket endpoint upgrades a standard HTTP connection into a persistent JSON message stream. It is the preferred interface for:</p>
+<ul><li><strong>Real-time event feeds</strong> — watch task completions, agent state changes, audit events</li><li><strong>Chat</strong> — send a message to an agent and receive the full reply in one frame (non-streaming; for token-level streaming use the REST <code>POST /api/v1/chat/completions</code> SSE endpoint)</li><li><strong>Interactive notifications</strong> — respond to <code>ask-user</code> questions from agents without polling</li><li><strong>Task control</strong> — cancel running tasks mid-execution</li></ul>
+<p>The WebSocket endpoint is public (on the same port as the REST API) but requires authentication via query parameter.</p>
+<hr>
+<h2 id="connecting" class="anchored"><a class="hanchor" href="#connecting" aria-label="link">#</a>Connecting</h2>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>GET /api/v1/ws?token=agos_&lt;64-hex-chars&gt;
+</pre></div>
+</div>
+<p>The API key is passed as a query parameter because the WebSocket HTTP upgrade does not support custom headers in all clients. The key must be a valid, non-revoked, non-expired <code>agos_*</code> key.</p>
+<blockquote><p><strong>Security note — log redaction required before public exposure.</strong> URL query parameters (including <code>?token=…</code>) are recorded verbatim by HTTP server access logs, reverse proxies, CDNs, and browser history. Before exposing this endpoint on a public or shared network, configure your reverse proxy (nginx, Caddy, etc.) to redact or strip the <code>token</code> query parameter from access logs. Failure to do so means long-lived API keys will appear in plaintext in multiple external systems.</p>
+<p>If your deployment cannot guarantee log redaction, consider issuing a short-lived, single-use ticket via <code>POST /api/v1/auth/ws-ticket</code> (planned) so the long-lived key never appears in the URL.</p></blockquote>
+<p><strong>Example (JavaScript):</strong></p>
+<div class="code-block" data-lang="javascript"><div class="code-bar"><span class="code-lang">javascript</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s1">&#39;ws://localhost:8080/api/v1/ws?token=agos_abc123...&#39;</span><span class="p">);</span>
+
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;connected&#39;</span><span class="p">);</span>
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;frame:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">data</span><span class="p">));</span>
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onclose</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;disconnected&#39;</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Example (Python):</strong></p>
+<div class="code-block" data-lang="python"><div class="code-bar"><span class="code-lang">python</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">websockets</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+    <span class="n">uri</span> <span class="o">=</span> <span class="s2">&quot;ws://localhost:8080/api/v1/ws?token=agos_abc123...&quot;</span>
+    <span class="k">async</span> <span class="k">with</span> <span class="n">websockets</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="n">uri</span><span class="p">)</span> <span class="k">as</span> <span class="n">ws</span><span class="p">:</span>
+        <span class="c1"># Subscribe to task events</span>
+        <span class="k">await</span> <span class="n">ws</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span>
+            <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;subscribe&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;channel&quot;</span><span class="p">:</span> <span class="s2">&quot;tasks&quot;</span>
+        <span class="p">}))</span>
+        <span class="k">async</span> <span class="k">for</span> <span class="n">message</span> <span class="ow">in</span> <span class="n">ws</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">message</span><span class="p">))</span>
+
+<span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>On successful connection the server immediately begins processing frames. On auth failure, the upgrade returns <code>401 Unauthorized</code> before the WebSocket handshake completes.</p>
+<hr>
+<h2 id="heartbeat" class="anchored"><a class="hanchor" href="#heartbeat" aria-label="link">#</a>Heartbeat</h2>
+<p>The server sends a <code>pong</code> frame every 30 seconds to keep the connection alive through proxies and NAT. Clients may optionally send <code>ping</code> frames:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ping&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>Server response:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pong&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="frame-format" class="anchored"><a class="hanchor" href="#frame-format" aria-label="link">#</a>Frame Format</h2>
+<p>All frames are UTF-8 JSON objects with a <code>type</code> discriminator field. Binary frames are ignored.</p>
+<h3 id="client-server-frames" class="anchored"><a class="hanchor" href="#client-server-frames" aria-label="link">#</a>Client → Server Frames</h3>
+<h4 id="subscribe-subscribe-to-a-channel" class="anchored"><a class="hanchor" href="#subscribe-subscribe-to-a-channel" aria-label="link">#</a><code>subscribe</code> — Subscribe to a channel</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;subscribe&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;channel&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tasks&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>channel</code></td><td>string</td><td>Yes</td><td>Channel name (see <a class="wikilink" href="ch-24.html#available-channels">Available Channels</a>)</td></tr><tr><td><code>filter</code></td><td>object</td><td>No</td><td>Channel-specific filter (reserved for future use)</td></tr></tbody></table></div>
+<p>Server confirms with a <code>subscribed</code> frame:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;subscribed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;channel&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tasks&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;subscription_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sub_0&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Subscription IDs are assigned per-connection as sequential integers: <code>sub_0</code>, <code>sub_1</code>, <code>sub_2</code>, ....</p>
+<hr>
+<h4 id="unsubscribe-cancel-a-subscription" class="anchored"><a class="hanchor" href="#unsubscribe-cancel-a-subscription" aria-label="link">#</a><code>unsubscribe</code> — Cancel a subscription</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unsubscribe&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;subscription_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sub_0&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Server confirms with <code>unsubscribed</code>:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unsubscribed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;subscription_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sub_0&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="chatsend-send-a-chat-message" class="anchored"><a class="hanchor" href="#chatsend-send-a-chat-message" aria-label="link">#</a><code>chat.send</code> — Send a chat message</h4>
+<p>Sends a message to an agent. The full reply arrives in a single <code>chat.done</code> frame — this is <strong>not</strong> streamed token-by-token.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chat.send&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_xyz&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;agent_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;worker&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Summarize the quarterly report&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>session_id</code></td><td>string</td><td>Yes</td><td>Client-generated session identifier (for correlating response chunks)</td></tr><tr><td><code>agent_name</code></td><td>string</td><td>Yes</td><td>Target agent name</td></tr><tr><td><code>message</code></td><td>string</td><td>Yes</td><td>User message text</td></tr></tbody></table></div>
+<hr>
+<h4 id="chatcancel-cancel-a-streaming-response" class="anchored"><a class="hanchor" href="#chatcancel-cancel-a-streaming-response" aria-label="link">#</a><code>chat.cancel</code> — Cancel a streaming response</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chat.cancel&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_xyz&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Server confirms with <code>chat.cancelled</code>:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chat.cancelled&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_xyz&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="taskcancel-cancel-a-running-task" class="anchored"><a class="hanchor" href="#taskcancel-cancel-a-running-task" aria-label="link">#</a><code>task.cancel</code> — Cancel a running task</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;task.cancel&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="notificationrespond-respond-to-an-agent-question" class="anchored"><a class="hanchor" href="#notificationrespond-respond-to-an-agent-question" aria-label="link">#</a><code>notification.respond</code> — Respond to an agent question</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;notification.respond&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;notif_uuid&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Yes, proceed with the deployment.&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="callout callout-note"><div class="callout-title">No dedicated ack frame</div><p><code>task.cancel</code> and <code>notification.respond</code> do not return a dedicated acknowledgement frame. Success is confirmed via an <code>event</code> frame: <code>task.cancel</code> emits <code>{ &quot;channel&quot;: &quot;tasks&quot;, &quot;event&quot;: &quot;task.cancelled&quot; }</code> and <code>notification.respond</code> emits <code>{ &quot;channel&quot;: &quot;notifications&quot;, &quot;event&quot;: &quot;notification.responded&quot; }</code>.</p></div>
+<hr>
+<h3 id="server-client-frames" class="anchored"><a class="hanchor" href="#server-client-frames" aria-label="link">#</a>Server → Client Frames</h3>
+<h4 id="event-real-time-channel-event" class="anchored"><a class="hanchor" href="#event-real-time-channel-event" aria-label="link">#</a><code>event</code> — Real-time channel event</h4>
+<p>Delivered for all active subscriptions when a matching event occurs.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;channel&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tasks&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;event&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;TaskCompleted&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;agent_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;worker&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="chatdone-response-complete" class="anchored"><a class="hanchor" href="#chatdone-response-complete" aria-label="link">#</a><code>chat.done</code> — Response complete</h4>
+<p>The full reply to a <code>chat.send</code> arrives in this single frame. There is no token-level streaming over WebSocket.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;chat.done&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_xyz&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;The quarterly report shows...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tool_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The <code>tool_calls</code> array contains any tool calls the agent made during inference (may be empty).</p>
+<div class="callout callout-note"><div class="callout-title">WebSocket chat is non-streaming</div><p>WebSocket <code>chat.send</code> is currently non-streaming — the full response arrives in one <code>chat.done</code> frame. For token-level streaming use the REST <code>POST /api/v1/chat/completions</code> SSE endpoint with <code>stream: true</code>.</p></div>
+<hr>
+<h4 id="error-protocol-or-processing-error" class="anchored"><a class="hanchor" href="#error-protocol-or-processing-error" aria-label="link">#</a><code>error</code> — Protocol or processing error</h4>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;error&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;code&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;INVALID_FRAME&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Failed to parse JSON: missing field &#39;type&#39;&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Common error codes:</p>
+<div class="table-wrap"><table><thead><tr><th>Code</th><th>Description</th></tr></thead><tbody><tr><td><code>INVALID_FRAME</code></td><td>Malformed JSON frame (e.g. failed to parse, missing/unknown <code>type</code>)</td></tr><tr><td><code>UNKNOWN_SUBSCRIPTION</code></td><td><code>unsubscribe</code> referenced a subscription id that does not exist</td></tr><tr><td><code>BAD_REQUEST</code></td><td>Invalid task or notification id (e.g. on <code>task.cancel</code> / <code>notification.respond</code>)</td></tr></tbody></table></div>
+<p>In addition, service errors are propagated with the service's own error code (from <code>e.error_code()</code>).</p>
+<hr>
+<h2 id="available-channels" class="anchored"><a class="hanchor" href="#available-channels" aria-label="link">#</a>Available Channels</h2>
+<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Events pushed</th><th>Description</th></tr></thead><tbody><tr><td><code>tasks</code></td><td><code>TaskStarted</code>, <code>TaskCompleted</code>, <code>TaskFailed</code>, <code>TaskCancelled</code></td><td>Task lifecycle changes for all agents</td></tr><tr><td><code>agents</code></td><td><code>AgentConnected</code>, <code>AgentDisconnected</code>, <code>AgentStatusChanged</code></td><td>Agent registry changes</td></tr><tr><td><code>audit</code></td><td>All 146 event types</td><td>Full audit log stream (high volume — use filters)</td></tr><tr><td><code>costs</code></td><td><code>BudgetAlert</code>, <code>HardLimitExceeded</code>, <code>CostAttribution</code></td><td>Budget threshold events</td></tr><tr><td><code>notifications</code></td><td><code>NotificationCreated</code>, <code>EscalationCreated</code></td><td>Operator inbox events</td></tr></tbody></table></div>
+<hr>
+<h2 id="complete-example-task-monitoring" class="anchored"><a class="hanchor" href="#complete-example-task-monitoring" aria-label="link">#</a>Complete Example: Task Monitoring</h2>
+<div class="code-block" data-lang="javascript"><div class="code-bar"><span class="code-lang">javascript</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s1">&#39;ws://localhost:8080/api/v1/ws?token=agos_...&#39;</span><span class="p">);</span>
+
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Subscribe to task events</span>
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;subscribe&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;tasks&#39;</span><span class="w"> </span><span class="p">}));</span>
+<span class="p">};</span>
+
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;subscribed&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Subscribed to </span><span class="si">${</span><span class="nx">frame</span><span class="p">.</span><span class="nx">channel</span><span class="si">}</span><span class="sb"> (</span><span class="si">${</span><span class="nx">frame</span><span class="p">.</span><span class="nx">subscription_id</span><span class="si">}</span><span class="sb">)`</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Now start a task via REST API</span>
+<span class="w">      </span><span class="nx">fetch</span><span class="p">(</span><span class="s1">&#39;/api/v1/tasks/run&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;POST&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s1">&#39;Authorization&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Bearer agos_...&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;Content-Type&#39;</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;application/json&#39;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">agent_name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;worker&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">prompt</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Analyze sales data&#39;</span><span class="w"> </span><span class="p">})</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="s1">&#39;event&#39;</span><span class="o">:</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">channel</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;tasks&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Task event: </span><span class="si">${</span><span class="nx">frame</span><span class="p">.</span><span class="nx">event</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="nx">frame</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="complete-example-chat" class="anchored"><a class="hanchor" href="#complete-example-chat" aria-label="link">#</a>Complete Example: Chat</h2>
+<p>WebSocket chat is non-streaming — send a <code>chat.send</code> frame and wait for the single <code>chat.done</code> frame carrying the full reply. (For token-level streaming, use the REST <code>POST /api/v1/chat/completions</code> SSE endpoint with <code>stream: true</code>.)</p>
+<div class="code-block" data-lang="javascript"><div class="code-bar"><span class="code-lang">javascript</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s1">&#39;ws://localhost:8080/api/v1/ws?token=agos_...&#39;</span><span class="p">);</span>
+
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;chat.send&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">session_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;session-1&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">agent_name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;worker&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Write a haiku about Rust&#39;</span>
+<span class="w">  </span><span class="p">}));</span>
+<span class="p">};</span>
+
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;chat.done&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">frame</span><span class="p">.</span><span class="nx">session_id</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;session-1&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">tool_calls</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">frame</span><span class="p">.</span><span class="nx">tool_calls</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;tool calls:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">frame</span><span class="p">.</span><span class="nx">tool_calls</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;error&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="nx">frame</span><span class="p">.</span><span class="nx">code</span><span class="p">,</span><span class="w"> </span><span class="nx">frame</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="reconnection" class="anchored"><a class="hanchor" href="#reconnection" aria-label="link">#</a>Reconnection</h2>
+<p>The WebSocket connection can close due to network interruptions, server restarts, or idle timeouts. Implement exponential backoff reconnection:</p>
+<div class="code-block" data-lang="javascript"><div class="code-bar"><span class="code-lang">javascript</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kd">let</span><span class="w"> </span><span class="nx">retryDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">connect</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s1">&#39;ws://localhost:8080/api/v1/ws?token=agos_...&#39;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">onopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">retryDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1000</span><span class="p">;</span><span class="w"> </span><span class="c1">// reset on successful connection</span>
+<span class="w">    </span><span class="c1">// Re-subscribe to channels after reconnect</span>
+<span class="w">    </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;subscribe&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">channel</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;tasks&#39;</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="nx">ws</span><span class="p">.</span><span class="nx">onclose</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">setTimeout</span><span class="p">(</span><span class="nx">connect</span><span class="p">,</span><span class="w"> </span><span class="nx">retryDelay</span><span class="p">);</span>
+<span class="w">    </span><span class="nx">retryDelay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">min</span><span class="p">(</span><span class="nx">retryDelay</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w"> </span><span class="mf">30000</span><span class="p">);</span><span class="w"> </span><span class="c1">// cap at 30s</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="nx">connect</span><span class="p">();</span>
+</pre></div>
+</div>
+<p>Subscriptions are not automatically restored after reconnection — re-send <code>subscribe</code> frames after the <code>onopen</code> event.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-23.html">REST API Reference</a> — REST endpoints for mutations and queries</li><li><a class="wikilink" href="ch-25.html">API Authentication and Keys</a> — API key management</li><li><a class="wikilink" href="ch-12.html">Event System</a> — Kernel event types and the internal event bus</li><li><a class="wikilink" href="ch-21.html">User Notifications and Channels</a> — <code>ask-user</code>, <code>notify-user</code>, and notification inbox</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-23.html"><span class="pn-dir">← Previous</span><span class="pn-title">REST API Reference</span></a><a class="pn pn-next" href="ch-25.html"><span class="pn-dir">Next →</span><span class="pn-title">API Authentication and Keys</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#connecting" data-target="connecting">Connecting</a></li><li class="toc-h2"><a href="#heartbeat" data-target="heartbeat">Heartbeat</a></li><li class="toc-h2"><a href="#frame-format" data-target="frame-format">Frame Format</a></li><li class="toc-h3"><a href="#client-server-frames" data-target="client-server-frames">Client → Server Frames</a></li><li class="toc-h3"><a href="#server-client-frames" data-target="server-client-frames">Server → Client Frames</a></li><li class="toc-h2"><a href="#available-channels" data-target="available-channels">Available Channels</a></li><li class="toc-h2"><a href="#complete-example-task-monitoring" data-target="complete-example-task-monitoring">Complete Example: Task Monitoring</a></li><li class="toc-h2"><a href="#complete-example-chat" data-target="complete-example-chat">Complete Example: Chat</a></li><li class="toc-h2"><a href="#reconnection" data-target="reconnection">Reconnection</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WASM Tools Development · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a><div class="nav-subs"><a class="nav-sub" href="#wasm-tool-protocol" data-target="wasm-tool-protocol">WASM Tool Protocol</a><a class="nav-sub" href="#rust-wasm-tool" data-target="rust-wasm-tool">Rust WASM Tool</a><a class="nav-sub" href="#python-wasm-tool" data-target="python-wasm-tool">Python WASM Tool</a><a class="nav-sub" href="#tool-manifest-for-wasm" data-target="tool-manifest-for-wasm">Tool Manifest for WASM</a><a class="nav-sub" href="#wasmtime-sandbox-guarantees" data-target="wasmtime-sandbox-guarantees">Wasmtime Sandbox Guarantees</a><a class="nav-sub" href="#sdk-tool-macro" data-target="sdk-tool-macro">SDK <code>#[tool]</code> Macro</a><a class="nav-sub" href="#testing-tools-locally" data-target="testing-tools-locally">Testing Tools Locally</a><a class="nav-sub" href="#publishing-workflow" data-target="publishing-workflow">Publishing Workflow</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 17 · WASM Tools Development</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 17</div><h1 class="ch-title">WASM Tools Development</h1><p class="ch-summary">WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro</p></div>
+    <article class="prose"><h1 id="wasm-tools-development" class="anchored"><a class="hanchor" href="#wasm-tools-development" aria-label="link">#</a>WASM Tools Development</h1>
+<blockquote><p>Custom tools extend AgentOS without modifying the kernel. They run as WebAssembly modules under Wasmtime isolation, or as native Rust code using the <code>#[tool]</code> SDK macro — each approach has different tradeoffs in portability, isolation, and development complexity.</p></blockquote>
+<hr>
+<h2 id="wasm-tool-protocol" class="anchored"><a class="hanchor" href="#wasm-tool-protocol" aria-label="link">#</a>WASM Tool Protocol</h2>
+<p>When the kernel runs a WASM tool it follows this sequence:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>1. Generate unique output path: {data_dir}/tool-out/{task_id}-{uuid}.json
+2. Serialize input payload → JSON bytes → WASM stdin
+3. Set AGENTOS_OUTPUT_FILE env var → unique output path
+4. Wasmtime instantiates the module and calls _start
+5. Module writes JSON result to $AGENTOS_OUTPUT_FILE
+6. Kernel reads JSON from that file, then deletes it (RAII guard)
+</pre></div>
+</div>
+<p><strong>Exit codes:</strong> The kernel does not use the exit code as a success signal. The presence of valid JSON at <code>AGENTOS_OUTPUT_FILE</code> is what determines success. A non-zero exit or absent output file is treated as an error. <strong>Stderr</strong> is captured and included in the error message when the module fails.</p>
+<p><strong>Your module must:</strong></p>
+<ul><li>Read its JSON input payload from <strong>stdin</strong></li><li>Compute a result</li><li>Write a valid JSON object to the file path stored in <code>AGENTOS_OUTPUT_FILE</code></li></ul>
+<p><strong>Your module must not:</strong></p>
+<ul><li>Write result data to stdout (it is ignored)</li><li>Assume filesystem access (no preopened directories are granted)</li><li>Assume network access (no socket capability unless <code>sandbox.network = true</code> in the manifest)</li></ul>
+<hr>
+<h2 id="rust-wasm-tool" class="anchored"><a class="hanchor" href="#rust-wasm-tool" aria-label="link">#</a>Rust WASM Tool</h2>
+<p>Target: <code>wasm32-wasip1</code> (WASI preview 1).</p>
+<h3 id="install-the-target" class="anchored"><a class="hanchor" href="#install-the-target" aria-label="link">#</a>Install the target</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>rustup<span class="w"> </span>target<span class="w"> </span>add<span class="w"> </span>wasm32-wasip1
+</pre></div>
+</div>
+<h3 id="cargotoml" class="anchored"><a class="hanchor" href="#cargotoml" aria-label="link">#</a><code>Cargo.toml</code></h3>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[package]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;hello-tool&quot;</span>
+<span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;0.1.0&quot;</span>
+<span class="n">edition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;2021&quot;</span>
+
+<span class="k">[[bin]]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;hello-tool&quot;</span>
+<span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;src/main.rs&quot;</span>
+
+<span class="k">[dependencies]</span>
+<span class="n">serde_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;1&quot;</span>
+</pre></div>
+</div>
+<h3 id="srcmainrs" class="anchored"><a class="hanchor" href="#srcmainrs" aria-label="link">#</a><code>src/main.rs</code></h3>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">use</span><span class="w"> </span><span class="n">std</span><span class="p">::</span><span class="n">env</span><span class="p">;</span>
+<span class="k">use</span><span class="w"> </span><span class="n">std</span><span class="p">::</span><span class="n">io</span><span class="p">::{</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">Read</span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Read the JSON payload from stdin.</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">input</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">String</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">    </span><span class="n">io</span><span class="p">::</span><span class="n">stdin</span><span class="p">().</span><span class="n">read_to_string</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">input</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;read stdin&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">serde_json</span><span class="p">::</span><span class="n">from_str</span><span class="p">(</span><span class="o">&amp;</span><span class="n">input</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;parse JSON payload&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 2. Extract input fields.</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">payload</span><span class="p">[</span><span class="s">&quot;query&quot;</span><span class="p">].</span><span class="n">as_str</span><span class="p">().</span><span class="n">unwrap_or</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">).</span><span class="n">to_lowercase</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// 3. Do the work.</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">serde_json</span><span class="p">::</span><span class="n">json</span><span class="o">!</span><span class="p">({</span>
+<span class="w">        </span><span class="s">&quot;matched&quot;</span><span class="p">:</span><span class="w"> </span><span class="nc">query</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">),</span>
+<span class="w">        </span><span class="s">&quot;echo&quot;</span><span class="p">:</span><span class="w"> </span><span class="nc">query</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// 4. Write JSON result to AGENTOS_OUTPUT_FILE.</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">out_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">env</span><span class="p">::</span><span class="n">var</span><span class="p">(</span><span class="s">&quot;AGENTOS_OUTPUT_FILE&quot;</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;AGENTOS_OUTPUT_FILE must be set by the kernel&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">std</span><span class="p">::</span><span class="n">fs</span><span class="p">::</span><span class="n">write</span><span class="p">(</span><span class="o">&amp;</span><span class="n">out_path</span><span class="p">,</span><span class="w"> </span><span class="n">serde_json</span><span class="p">::</span><span class="n">to_string</span><span class="p">(</span><span class="o">&amp;</span><span class="n">result</span><span class="p">).</span><span class="n">unwrap</span><span class="p">())</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;write output file&quot;</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="build" class="anchored"><a class="hanchor" href="#build" aria-label="link">#</a>Build</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32-wasip1<span class="w"> </span>--release
+<span class="c1"># Binary: target/wasm32-wasip1/release/hello-tool.wasm</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="python-wasm-tool" class="anchored"><a class="hanchor" href="#python-wasm-tool" aria-label="link">#</a>Python WASM Tool</h2>
+<blockquote><p><strong>Status:</strong> Python-to-WASM compilation via py2wasm is planned but not yet implemented. Currently, only Rust WASM tools targeting <code>wasm32-wasip1</code> are supported.</p></blockquote>
+<p>Python tools can be compiled to WASM with <strong>py2wasm</strong> (Nuitka-based) or run inside a WASM Python interpreter.</p>
+<h3 id="install-py2wasm" class="anchored"><a class="hanchor" href="#install-py2wasm" aria-label="link">#</a>Install py2wasm</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>py2wasm
+</pre></div>
+</div>
+<h3 id="hello-toolpy" class="anchored"><a class="hanchor" href="#hello-toolpy" aria-label="link">#</a><code>hello_tool.py</code></h3>
+<div class="code-block" data-lang="python"><div class="code-bar"><span class="code-lang">python</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+    <span class="c1"># 1. Read JSON payload from stdin.</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+
+    <span class="c1"># 2. Extract input fields.</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;query&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="c1"># 3. Do the work.</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;matched&quot;</span><span class="p">:</span> <span class="s2">&quot;hello&quot;</span> <span class="ow">in</span> <span class="n">query</span><span class="p">,</span>
+        <span class="s2">&quot;echo&quot;</span><span class="p">:</span> <span class="n">query</span><span class="p">,</span>
+    <span class="p">}</span>
+
+    <span class="c1"># 4. Write JSON result to AGENTOS_OUTPUT_FILE.</span>
+    <span class="n">out_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;AGENTOS_OUTPUT_FILE&quot;</span><span class="p">]</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">out_path</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+<h3 id="compile-to-wasm" class="anchored"><a class="hanchor" href="#compile-to-wasm" aria-label="link">#</a>Compile to WASM</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>py2wasm<span class="w"> </span>hello_tool.py<span class="w"> </span>-o<span class="w"> </span>hello-tool.wasm
+</pre></div>
+</div>
+<p>The resulting <code>hello-tool.wasm</code> is used exactly the same way as the Rust-compiled module — place it next to your manifest and set <code>wasm_path</code> accordingly.</p>
+<hr>
+<h2 id="tool-manifest-for-wasm" class="anchored"><a class="hanchor" href="#tool-manifest-for-wasm" aria-label="link">#</a>Tool Manifest for WASM</h2>
+<p>WASM tools use all the standard manifest fields plus an <code>[executor]</code> section pointing to the compiled module.</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[manifest]</span>
+<span class="n">name</span><span class="w">        </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;hello-tool&quot;</span>
+<span class="n">version</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;0.1.0&quot;</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Returns a greeting match based on the input query&quot;</span>
+<span class="n">author</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;alice@example.com&quot;</span>
+<span class="n">trust_tier</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;community&quot;</span>
+<span class="n">author_pubkey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;&lt;64 hex chars&gt;&quot;</span><span class="w">    </span><span class="c1"># set by `agentos tool sign`</span>
+<span class="n">signature</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;&lt;128 hex chars&gt;&quot;</span><span class="w">  </span><span class="c1"># set by `agentos tool sign`</span>
+
+<span class="k">[capabilities_required]</span>
+<span class="n">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[]</span><span class="w">                    </span><span class="c1"># no special permissions needed for this example</span>
+
+<span class="k">[capabilities_provided]</span>
+<span class="n">outputs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;content.text&quot;</span><span class="p">]</span>
+
+<span class="k">[intent_schema]</span>
+<span class="n">input</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;HelloInput&quot;</span>
+<span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;HelloOutput&quot;</span>
+
+<span class="k">[sandbox]</span>
+<span class="n">network</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">fs_write</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">gpu</span><span class="w">           </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">max_memory_mb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span><span class="w">     </span><span class="c1"># Wasmtime ResourceLimiter enforces this cap</span>
+<span class="n">max_cpu_ms</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="mi">5000</span><span class="w">   </span><span class="c1"># epoch interruption fires after this many milliseconds</span>
+
+<span class="k">[executor]</span>
+<span class="n">type</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;wasm&quot;</span>
+<span class="n">wasm_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;hello-tool.wasm&quot;</span><span class="w">   </span><span class="c1"># relative to this manifest&#39;s directory</span>
+</pre></div>
+</div>
+<p>The <code>.wasm</code> binary and the manifest must be in the same directory (or adjust <code>wasm_path</code> to a relative path within the directory). When <code>agentos tool install</code> is called, the kernel resolves <code>wasm_path</code> relative to the manifest's location, pre-compiles the module with Wasmtime, and registers it.</p>
+<hr>
+<h2 id="wasmtime-sandbox-guarantees" class="anchored"><a class="hanchor" href="#wasmtime-sandbox-guarantees" aria-label="link">#</a>Wasmtime Sandbox Guarantees</h2>
+<p>The WASM runtime (<code>crates/agentos-wasm</code>) provides these isolation guarantees for every module invocation:</p>
+<h3 id="capability-isolation" class="anchored"><a class="hanchor" href="#capability-isolation" aria-label="link">#</a>Capability isolation</h3>
+<p>WASI capabilities are constructed from scratch for each invocation using <code>WasiCtxBuilder</code>. The module receives:</p>
+<ul><li><strong>stdin</strong> — the serialized JSON payload bytes</li><li><strong>stderr</strong> — captured pipe for error/log output (included in error messages)</li><li><strong><code>AGENTOS_OUTPUT_FILE</code></strong> — environment variable pointing to the unique output path</li></ul>
+<p>The module does <strong>not</strong> receive:</p>
+<ul><li>Preopened host filesystem directories</li><li>Network socket capability (unless <code>sandbox.network = true</code>)</li><li>Any other environment variables from the host</li></ul>
+<h3 id="memory-limits" class="anchored"><a class="hanchor" href="#memory-limits" aria-label="link">#</a>Memory limits</h3>
+<p><code>WasiState</code> implements Wasmtime's <code>ResourceLimiter</code> trait. When the WASM module attempts to grow its linear memory past <strong>256 MiB</strong>, <code>memory_growing()</code> returns <code>false</code> — the growth is denied and the module typically traps with an out-of-memory error.</p>
+<h3 id="epoch-interruption-cpu-time-limit" class="anchored"><a class="hanchor" href="#epoch-interruption-cpu-time-limit" aria-label="link">#</a>Epoch interruption (CPU time limit)</h3>
+<p>Before calling <code>_start</code>, the kernel executes:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="n">store</span><span class="p">.</span><span class="n">set_epoch_deadline</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>A background Tokio task sleeps for <code>max_cpu_ms</code> milliseconds, then calls:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="n">engine</span><span class="p">.</span><span class="n">increment_epoch</span><span class="p">();</span>
+</pre></div>
+</div>
+<p>If the module is still executing, Wasmtime interrupts it. The kernel catches the trap (which contains "epoch" in the message) and returns a timeout error to the calling agent.</p>
+<h3 id="output-file-cleanup" class="anchored"><a class="hanchor" href="#output-file-cleanup" aria-label="link">#</a>Output file cleanup</h3>
+<p>A <code>TempOutputFile</code> RAII guard wraps the output path. When the guard is dropped — after the result is read, or on any error path — it deletes the file. Output files from timed-out or crashed modules are always cleaned up.</p>
+<hr>
+<h2 id="sdk-tool-macro" class="anchored"><a class="hanchor" href="#sdk-tool-macro" aria-label="link">#</a>SDK <code>#[tool]</code> Macro</h2>
+<p>For native Rust tools that compile directly into the kernel (not WASM modules), the <code>agentos-sdk</code> crate provides the <code>#[tool]</code> proc macro. This is the simplest way to write a built-in tool.</p>
+<h3 id="cargotoml-2" class="anchored"><a class="hanchor" href="#cargotoml-2" aria-label="link">#</a><code>Cargo.toml</code></h3>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[dependencies]</span>
+<span class="n">agentos-sdk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;../agentos-sdk&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="n">agentos-tools</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;../agentos-tools&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="n">agentos-types</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;../agentos-types&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="n">serde_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;1&quot;</span>
+<span class="n">async-trait</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;0.1&quot;</span>
+</pre></div>
+</div>
+<h3 id="usage" class="anchored"><a class="hanchor" href="#usage" aria-label="link">#</a>Usage</h3>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">use</span><span class="w"> </span><span class="n">agentos_sdk</span><span class="p">::</span><span class="n">tool</span><span class="p">;</span>
+<span class="k">use</span><span class="w"> </span><span class="n">agentos_tools</span><span class="p">::</span><span class="n">traits</span><span class="p">::</span><span class="n">ToolExecutionContext</span><span class="p">;</span>
+<span class="k">use</span><span class="w"> </span><span class="n">agentos_types</span><span class="p">::</span><span class="n">AgentOSError</span><span class="p">;</span>
+
+<span class="cp">#[tool(</span>
+<span class="cp">    name = </span><span class="s">&quot;word-count&quot;</span><span class="cp">,</span>
+<span class="cp">    version = </span><span class="s">&quot;1.0.0&quot;</span><span class="cp">,</span>
+<span class="cp">    description = </span><span class="s">&quot;Count the number of words in a text string&quot;</span><span class="cp">,</span>
+<span class="cp">    permissions = </span><span class="s">&quot;fs.user_data:r&quot;</span>
+<span class="cp">)]</span>
+<span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">word_count</span><span class="p">(</span>
+<span class="w">    </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span>
+<span class="w">    </span><span class="n">_context</span><span class="p">:</span><span class="w"> </span><span class="nc">ToolExecutionContext</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">payload</span><span class="p">[</span><span class="s">&quot;text&quot;</span><span class="p">].</span><span class="n">as_str</span><span class="p">().</span><span class="n">unwrap_or</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">text</span><span class="p">.</span><span class="n">split_whitespace</span><span class="p">().</span><span class="n">count</span><span class="p">();</span>
+<span class="w">    </span><span class="nb">Ok</span><span class="p">(</span><span class="n">serde_json</span><span class="p">::</span><span class="n">json</span><span class="o">!</span><span class="p">({</span><span class="w"> </span><span class="s">&quot;word_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="nc">count</span><span class="w"> </span><span class="p">}))</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Permission syntax:</strong> <code>&quot;resource:ops&quot;</code> where ops are <code>r</code> (Read), <code>w</code> (Write), <code>x</code> (Execute), or compounds <code>rw</code>, <code>rx</code>, <code>wx</code>, <code>rwx</code>. Unknown op suffixes produce a compile error.</p>
+<p><strong>What the macro generates:</strong></p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">WordCount</span><span class="p">;</span>
+
+<span class="cp">#[async_trait]</span>
+<span class="k">impl</span><span class="w"> </span><span class="n">AgentTool</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">WordCount</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;word-count&quot;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span>
+<span class="w">        </span><span class="n">context</span><span class="p">:</span><span class="w"> </span><span class="nc">ToolExecutionContext</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">word_count</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="p">).</span><span class="k">await</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">required_permissions</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="p">(</span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">PermissionOp</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="fm">vec!</span><span class="p">[(</span><span class="s">&quot;fs.user_data&quot;</span><span class="p">.</span><span class="n">to_string</span><span class="p">(),</span><span class="w"> </span><span class="n">PermissionOp</span><span class="p">::</span><span class="n">Read</span><span class="p">)]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">WordCount</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">version</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">&#39;</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;1.0.0&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">description</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">&#39;</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;Count the number of words...&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Register with <code>ToolRunner</code>:</strong></p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="n">runner</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="nb">Box</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">WordCount</span><span class="p">));</span>
+</pre></div>
+</div>
+<blockquote><p><strong>Note:</strong> The <code>#[tool]</code> macro is for native Rust tools compiled into the kernel binary. It does not produce a WASM module. WASM tools use the stdin/stdout protocol described above and need a separate <code>[executor]</code> section in their manifest.</p></blockquote>
+<hr>
+<h2 id="testing-tools-locally" class="anchored"><a class="hanchor" href="#testing-tools-locally" aria-label="link">#</a>Testing Tools Locally</h2>
+<h3 id="testing-a-wasm-binary-standalone" class="anchored"><a class="hanchor" href="#testing-a-wasm-binary-standalone" aria-label="link">#</a>Testing a WASM binary standalone</h3>
+<p>Simulate the kernel's execution protocol using the <code>wasmtime</code> CLI:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Build</span>
+cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32-wasip1<span class="w"> </span>--release
+
+<span class="c1"># Create a test payload</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;query&quot;: &quot;hello world&quot;}&#39;</span><span class="w"> </span>&gt;<span class="w"> </span>/tmp/input.json
+
+<span class="c1"># Run exactly as the kernel would</span>
+<span class="nv">AGENTOS_OUTPUT_FILE</span><span class="o">=</span>/tmp/output.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>wasmtime<span class="w"> </span>run<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--env<span class="w"> </span><span class="nv">AGENTOS_OUTPUT_FILE</span><span class="o">=</span>/tmp/output.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>target/wasm32-wasip1/release/hello-tool.wasm<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>&lt;<span class="w"> </span>/tmp/input.json
+
+<span class="c1"># Inspect the result</span>
+cat<span class="w"> </span>/tmp/output.json
+<span class="c1"># {&quot;matched&quot;:true,&quot;echo&quot;:&quot;hello world&quot;}</span>
+</pre></div>
+</div>
+<h3 id="testing-via-the-kernel" class="anchored"><a class="hanchor" href="#testing-via-the-kernel" aria-label="link">#</a>Testing via the kernel</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Start the kernel</span>
+agentos<span class="w"> </span>serve
+
+<span class="c1"># 2. Sign and install your tool</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>my-tool.toml<span class="w"> </span>--key<span class="w"> </span>my-keypair.json
+agentos<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>my-tool.toml
+
+<span class="c1"># 3. Confirm it appears</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>list
+
+<span class="c1"># 4. Run an agent that exercises the tool</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>my-agent<span class="w"> </span>--goal<span class="w"> </span><span class="s2">&quot;Use hello-tool to check &#39;hello world&#39;&quot;</span>
+</pre></div>
+</div>
+<h3 id="unit-testing-the-protocol-native-binary" class="anchored"><a class="hanchor" href="#unit-testing-the-protocol-native-binary" aria-label="link">#</a>Unit testing the protocol (native binary)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># For a native binary (useful in CI before cross-compiling):</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;query&quot;: &quot;test&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="nv">AGENTOS_OUTPUT_FILE</span><span class="o">=</span>/tmp/out.json<span class="w"> </span>./target/debug/hello-tool
+cat<span class="w"> </span>/tmp/out.json
+</pre></div>
+</div>
+<p>For Python tools:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;query&quot;: &quot;test&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="nv">AGENTOS_OUTPUT_FILE</span><span class="o">=</span>/tmp/out.json<span class="w"> </span>python<span class="w"> </span>hello_tool.py
+cat<span class="w"> </span>/tmp/out.json
+</pre></div>
+</div>
+<hr>
+<h2 id="publishing-workflow" class="anchored"><a class="hanchor" href="#publishing-workflow" aria-label="link">#</a>Publishing Workflow</h2>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Generate a keypair (one-time)</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>keygen<span class="w"> </span>--output<span class="w"> </span>my-keypair.json
+<span class="c1"># Store my-keypair.json securely — never commit to version control.</span>
+
+<span class="c1"># 2. Build the WASM binary</span>
+cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32-wasip1<span class="w"> </span>--release
+cp<span class="w"> </span>target/wasm32-wasip1/release/hello-tool.wasm<span class="w"> </span>./hello-tool.wasm
+
+<span class="c1"># 3. Create the manifest (set trust_tier = &quot;community&quot;)</span>
+<span class="c1"># ... edit hello-tool.toml ...</span>
+
+<span class="c1"># 4. Sign the manifest</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>hello-tool.toml<span class="w"> </span>--key<span class="w"> </span>my-keypair.json
+
+<span class="c1"># 5. Verify the signature</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>verify<span class="w"> </span>hello-tool.toml
+<span class="c1"># OK  hello-tool (trust_tier=community)</span>
+
+<span class="c1"># 6. Distribute: share hello-tool.toml and hello-tool.wasm together</span>
+<span class="c1"># Users install with:</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>hello-tool.toml
+
+<span class="c1"># 7. If you need to revoke a release:</span>
+<span class="c1">#    Ask the AgentOS project to add your pubkey to the CRL.</span>
+<span class="c1">#    Kernels with the updated CRL will reject all tools signed with that key.</span>
+</pre></div>
+</div>
+<p>The manifest and <code>.wasm</code> binary must be distributed together in the same directory (or adjust <code>wasm_path</code>). The kernel verifies the signature during <code>install</code> — installation fails if the manifest has been tampered with after signing. A tampered <code>version</code>, <code>name</code>, <code>author</code>, or sandbox field invalidates the signature.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-07.html">Tool System</a> — Tool manifests, trust tiers, signing, built-in tools reference</li><li><a class="wikilink" href="ch-03.html">Architecture Overview</a> — How the kernel dispatches tool execution</li><li><span class="wikilink-dead">Security Reference</span> — Capability tokens and PermissionSet</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-16.html"><span class="pn-dir">← Previous</span><span class="pn-title">Configuration Reference</span></a><a class="pn pn-next" href="ch-18.html"><span class="pn-dir">Next →</span><span class="pn-title">Advanced Operations</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#wasm-tool-protocol" data-target="wasm-tool-protocol">WASM Tool Protocol</a></li><li class="toc-h2"><a href="#rust-wasm-tool" data-target="rust-wasm-tool">Rust WASM Tool</a></li><li class="toc-h3"><a href="#install-the-target" data-target="install-the-target">Install the target</a></li><li class="toc-h3"><a href="#cargotoml" data-target="cargotoml"><code>Cargo.toml</code></a></li><li class="toc-h3"><a href="#srcmainrs" data-target="srcmainrs"><code>src/main.rs</code></a></li><li class="toc-h3"><a href="#build" data-target="build">Build</a></li><li class="toc-h2"><a href="#python-wasm-tool" data-target="python-wasm-tool">Python WASM Tool</a></li><li class="toc-h3"><a href="#install-py2wasm" data-target="install-py2wasm">Install py2wasm</a></li><li class="toc-h3"><a href="#hello-toolpy" data-target="hello-toolpy"><code>hello_tool.py</code></a></li><li class="toc-h3"><a href="#compile-to-wasm" data-target="compile-to-wasm">Compile to WASM</a></li><li class="toc-h2"><a href="#tool-manifest-for-wasm" data-target="tool-manifest-for-wasm">Tool Manifest for WASM</a></li><li class="toc-h2"><a href="#wasmtime-sandbox-guarantees" data-target="wasmtime-sandbox-guarantees">Wasmtime Sandbox Guarantees</a></li><li class="toc-h3"><a href="#capability-isolation" data-target="capability-isolation">Capability isolation</a></li><li class="toc-h3"><a href="#memory-limits" data-target="memory-limits">Memory limits</a></li><li class="toc-h3"><a href="#epoch-interruption-cpu-time-limit" data-target="epoch-interruption-cpu-time-limit">Epoch interruption (CPU time limit)</a></li><li class="toc-h3"><a href="#output-file-cleanup" data-target="output-file-cleanup">Output file cleanup</a></li><li class="toc-h2"><a href="#sdk-tool-macro" data-target="sdk-tool-macro">SDK <code>#[tool]</code> Macro</a></li><li class="toc-h3"><a href="#cargotoml-2" data-target="cargotoml-2"><code>Cargo.toml</code></a></li><li class="toc-h3"><a href="#usage" data-target="usage">Usage</a></li><li class="toc-h2"><a href="#testing-tools-locally" data-target="testing-tools-locally">Testing Tools Locally</a></li><li class="toc-h3"><a href="#testing-a-wasm-binary-standalone" data-target="testing-a-wasm-binary-standalone">Testing a WASM binary standalone</a></li><li class="toc-h3"><a href="#testing-via-the-kernel" data-target="testing-via-the-kernel">Testing via the kernel</a></li><li class="toc-h3"><a href="#unit-testing-the-protocol-native-binary" data-target="unit-testing-the-protocol-native-binary">Unit testing the protocol (native binary)</a></li><li class="toc-h2"><a href="#publishing-workflow" data-target="publishing-workflow">Publishing Workflow</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

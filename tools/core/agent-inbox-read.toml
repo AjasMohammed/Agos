@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-inbox-read"
@@ -6,7 +7,8 @@ version     = "1.0.0"
 description = "Read a single inbox notification by ID, returning its full body. Marks the entry as read."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+category    = "agent"
+search_hints = ["read an inbox message", "open a message sent to me"]
 
 [capabilities_required]
 permissions = []
@@ -18,11 +20,11 @@ outputs = ["id", "kind", "title", "body", "created_at"]
 input  = "AgentInboxReadIntent"
 output = "AgentInboxReadResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type        = "string"
 description = "Inbox entry ID from agent-inbox-list"
 

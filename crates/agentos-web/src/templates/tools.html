@@ -46,7 +46,7 @@
     </div>
 
     {% if tools|length == 0 %}
-    {% with icon="⚙", title="No tools installed", message="Install a tool to extend agent capabilities. Tools are loaded from TOML manifests in allowed directories." %}
+    {% with icon="", title="No tools installed", message="Install a tool to extend agent capabilities. Tools are loaded from TOML manifests in allowed directories." %}
     {% include "partials/empty_state.html" %}
     {% endwith %}
     {% endif %}

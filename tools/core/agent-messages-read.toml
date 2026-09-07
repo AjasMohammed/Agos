@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-messages-read"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Read a single direct message by ID and mark it as read."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+category    = "agent"
 
 [capabilities_required]
 permissions = []
@@ -18,11 +19,11 @@ outputs = ["id", "from", "from_agent_id", "body", "created_at"]
 input  = "AgentMessagesReadIntent"
 output = "AgentMessagesReadResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type        = "string"
 description = "Message ID from agent-messages-list"
 

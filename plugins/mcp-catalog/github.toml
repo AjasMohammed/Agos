@@ -1,0 +1,31 @@
+id = "github"
+display_name = "GitHub"
+description = "Search repositories, read and create issues and pull requests, and manage GitHub via MCP."
+trust_tier = "verified"
+homepage = "https://github.com/modelcontextprotocol/servers/tree/main/src/github"
+
+[mcp]
+transport = "stdio"
+
+[install]
+strategy = "npx"
+package = "@modelcontextprotocol/server-github"
+runtime = "node"
+min_runtime_version = "18"
+
+[auth]
+type = "api_key"
+# The server reads the token from this env var; the kernel injects it from the
+# vault at attach time. Seed it first: agentos secret set github_token <PAT>
+env = "GITHUB_PERSONAL_ACCESS_TOKEN"
+credential = "vault:github_token"
+
+[tools]
+default_risk_class = "readonly_external"
+
+[tools.overrides]
+create_issue = "write_scoped"
+create_or_update_file = "write_scoped"
+create_pull_request = "write_scoped"
+push_files = "write_scoped"
+merge_pull_request = "control_plane"

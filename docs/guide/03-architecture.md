@@ -11,7 +11,7 @@ This document explains how all the pieces of AgentOS fit together — from the k
 │                      AgentOS                              │
 │                                                          │
 │  ┌──────────────┐                                        │
-│  │  agentctl    │  (CLI — clap-based)                    │
+│  │  agentos    │  (CLI — clap-based)                    │
 │  │  CLI Client  │                                        │
 │  └──────┬───────┘                                        │
 │         │ Unix Domain Socket (Intent Bus)                 │
@@ -93,13 +93,13 @@ agentos-cli
 | **agentos-wasm**       | WASM tool execution via Wasmtime        | `WasmExecutor`, `WasmModule`                                                                                                                       |
 | **agentos-web**        | Web UI server (Axum + HTMX)            | `WebServer`, task/agent/audit views, chat interface                                                                                                |
 | **agentos-kernel**     | Central orchestrator — the "brain"      | `Kernel`, `TaskScheduler`, `ContextCompiler`, `AgentRegistry`, `ToolRegistry`, `TaskRouter`, `CostTracker`, `IntentValidator`, `EventDispatch`     |
-| **agentos-cli**        | User-facing CLI (`agentctl`)            | `Cli`, `Commands`, all command handlers                                                                                                            |
+| **agentos-cli**        | User-facing CLI (`agentos`)            | `Cli`, `Commands`, all command handlers                                                                                                            |
 
 ---
 
 ## Kernel Boot Sequence
 
-When you run `agentctl start`, the following happens:
+When you run `agentos start`, the following happens:
 
 ```
 1. Parse CLI arguments and load config (config/default.toml)
@@ -133,7 +133,7 @@ When you run `agentctl start`, the following happens:
 This is what happens when you run a task:
 
 ```
-agentctl task run --agent analyst "Read file.txt and summarize it"
+agentos task run --agent analyst "Read file.txt and summarize it"
          │
          ▼
 [1] CLI serializes → KernelCommand::RunTask { agent_name, prompt }

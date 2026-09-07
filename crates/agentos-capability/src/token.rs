@@ -10,9 +10,18 @@ fn update_length_prefixed(mac: &mut HmacSha256, data: &[u8]) {
     mac.update(data);
 }
 
+/// Domain-separation tag bound into every token MAC. Prevents a signature
+/// produced by another use of the same signing key (e.g. `EventBus::sign_data`)
+/// from ever being valid as a token signature, and vice versa.
+const TOKEN_DOMAIN_TAG: &[u8] = b"agentos.capability-token.v1";
+
 /// Feed all security-relevant token fields into the HMAC instance.
 /// This is the single canonical field layout — used by both signing and verification.
 fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
+    // Domain separation first, so the token MAC lives in a distinct namespace
+    // from any other data signed with the same key.
+    update_length_prefixed(mac, TOKEN_DOMAIN_TAG);
+
     // Fixed-width UUID fields (16 bytes each)
     mac.update(token.task_id.as_uuid().as_bytes());
     mac.update(token.agent_id.as_uuid().as_bytes());
@@ -37,7 +46,17 @@ fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
     mac.update(&(sorted_entries.len() as u32).to_le_bytes());
     for entry in &sorted_entries {
         update_length_prefixed(mac, entry.resource.as_bytes());
-        mac.update(&[entry.read as u8, entry.write as u8, entry.execute as u8]);
+        mac.update(&[
+            entry.read as u8,
+            entry.write as u8,
+            entry.execute as u8,
+            // query/observe must be signed too — otherwise these permission bits
+            // are forgeable on a token at rest (checkpoints) or in transit
+            // (IntentMessage.sender_token), silently elevating Query/Observe
+            // access the kernel never issued.
+            entry.query as u8,
+            entry.observe as u8,
+        ]);
         // Sign expires_at so time-limited permissions can't be made permanent
         match &entry.expires_at {
             Some(dt) => {
@@ -63,7 +82,9 @@ fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
 
 /// Compute the HMAC-SHA256 signature for a token.
 /// Signs over ALL security-relevant fields with length-prefixed encoding:
-/// task_id | agent_id | allowed_tools | allowed_intents | permissions (entries + deny_entries) | issued_at | expires_at
+/// task_id | agent_id | allowed_tools | allowed_intents | permissions (entries
+/// incl. read/write/execute/query/observe + expires_at, plus deny_entries) |
+/// issued_at | expires_at
 pub fn compute_signature(signing_key: &[u8; 32], token: &CapabilityToken) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(signing_key).expect("HMAC can take any size key");
     feed_token_fields(&mut mac, token);

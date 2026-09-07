@@ -4,7 +4,7 @@ FROM rust:1.91-slim-bookworm AS builder
 
 # pkg-config + libssl-dev needed by transitive deps (fastembed/hf-hub) that
 # pull in openssl-sys. OPENSSL_STATIC=1 bakes libssl/libcrypto into the binary
-# so the distroless runtime image needs no shared libssl.
+# so the debian bookworm-slim runtime image needs no shared libssl.
 # clang + mold — required by .cargo/config.toml which selects clang as the
 # linker driver with `-fuse-ld=mold`. mold cuts link time for the monolithic
 # agentos binary from tens of seconds down to ~1-2s.

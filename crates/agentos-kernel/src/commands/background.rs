@@ -4,6 +4,21 @@ use agentos_types::*;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+/// Timeout budget for a background task. Mirrors the branch `cmd_run_task` and
+/// `api_submit_task` already apply — an autonomous task is expected to run past
+/// the 1h non-autonomous default, and `check_timeouts` has no autonomous
+/// exemption, so it must carry the autonomous budget on the task itself.
+pub(crate) fn background_task_timeout(
+    kernel: &crate::config::KernelSettings,
+    autonomous: bool,
+) -> Duration {
+    if autonomous {
+        Duration::from_secs(kernel.autonomous_mode.task_timeout_secs)
+    } else {
+        Duration::from_secs(kernel.default_task_timeout_secs)
+    }
+}
+
 impl Kernel {
     pub(crate) async fn create_background_task(
         &self,
@@ -29,8 +44,32 @@ impl Kernel {
         let mut target_permissions = registry.compute_effective_permissions(&agent.id);
         drop(registry);
 
-        // Background tasks run autonomously — grant shell execution permission
-        target_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        // Bounded tasks (schedule-fired RunTask, etc.) cap iterations to prevent
+        // small-model tool-call loops. Unbounded tasks (user-launched
+        // `agentos run-bg`) keep autonomous semantics.
+        let (autonomous, max_iterations) = if bounded {
+            (false, Some(10u32))
+        } else {
+            (true, None)
+        };
+
+        // SECURITY: only a genuinely autonomous task (operator-launched
+        // `run-bg`) gets the implicit shell grant, exactly as `cmd_run_task`
+        // gates it. A bounded task is schedule-fired and its prompt comes from
+        // whatever asked for the schedule, so granting here turned
+        // `schedule.job:w` / `schedule.timer:w` into a one-call route to
+        // `process.exec` that no permission check ever saw — defeating the
+        // "process.exec is never granted by default" invariant in
+        // `default_permissions_for_agent`. An agent that legitimately needs
+        // shell from a schedule holds `process.exec:x` explicitly.
+        if autonomous {
+            target_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        }
+        // Same branch `cmd_run_task` / `api_submit_task` apply: an autonomous
+        // task gets the autonomous budget, or the TimeoutChecker kills
+        // long-running background work at the 1h non-autonomous default. The
+        // capability token must outlive the task, so both use it.
+        let task_timeout = background_task_timeout(&self.config.kernel, autonomous);
 
         let task_id = TaskID::new();
         let capability_token = self
@@ -53,18 +92,9 @@ impl Kernel {
                     IntentTypeFlag::Unsubscribe,
                 ]),
                 target_permissions,
-                Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+                task_timeout,
             )
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
-
-        // Bounded tasks (schedule-fired RunTask, etc.) cap iterations to prevent
-        // small-model tool-call loops. Unbounded tasks (user-launched
-        // `agentos run-bg`) keep autonomous semantics.
-        let (autonomous, max_iterations) = if bounded {
-            (false, Some(10u32))
-        } else {
-            (true, None)
-        };
 
         let task = AgentTask {
             id: task_id,
@@ -75,7 +105,7 @@ impl Kernel {
             priority: 5,
             created_at: chrono::Utc::now(),
             started_at: None,
-            timeout: Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            timeout: task_timeout,
             original_prompt: prompt.clone(),
             history: Vec::new(),
             parent_task: None,
@@ -90,6 +120,9 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
+            // Operator/schedule-originated root task.
+            chain_depth: 0,
         };
 
         self.background_pool
@@ -177,12 +210,15 @@ impl Kernel {
 
     pub(crate) async fn cmd_kill_background(&self, name: String) -> KernelResponse {
         if let Some(task) = self.resolve_background_task(&name).await {
-            match self
-                .scheduler
-                .update_state(&task.id, TaskState::Cancelled)
-                .await
-            {
-                Ok(_) => {
+            // Delegate to the shared cancel path. Flipping the scheduler state
+            // alone is not a kill: the executor's ONLY cancellation-detection
+            // point is `context_manager.get_context` returning `TaskNotFound`,
+            // so leaving the context in place lets the loop run to completion
+            // and fire every remaining tool side effect. `cmd_cancel_task` also
+            // finishes the trace, releases the checkout/work item, cleans up
+            // subscriptions and cascades to children.
+            match self.cmd_cancel_task(task.id).await {
+                KernelResponse::Success { .. } => {
                     self.background_pool
                         .fail(&task.id, "Killed by user".to_string())
                         .await;
@@ -200,14 +236,48 @@ impl Kernel {
                     });
                     KernelResponse::Success { data: None }
                 }
-                Err(e) => KernelResponse::Error {
-                    message: e.to_string(),
-                },
+                other => other,
             }
         } else {
             KernelResponse::Error {
                 message: format!("Background task '{}' not found", name),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::background_task_timeout;
+    use crate::config::{KernelConfig, KernelSettings};
+    use std::time::Duration;
+
+    /// Parse the shipped defaults rather than hand-building settings — the point
+    /// of the check is that the real config's autonomous budget is applied.
+    fn shipped_kernel_settings() -> KernelSettings {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/default.toml");
+        let content = std::fs::read_to_string(&path).expect("config/default.toml must exist");
+        toml::from_str::<KernelConfig>(&content)
+            .expect("config/default.toml must parse")
+            .kernel
+    }
+
+    #[test]
+    fn autonomous_background_task_gets_the_autonomous_timeout() {
+        let k = shipped_kernel_settings();
+        assert_eq!(
+            background_task_timeout(&k, true),
+            Duration::from_secs(k.autonomous_mode.task_timeout_secs)
+        );
+        assert_eq!(
+            background_task_timeout(&k, false),
+            Duration::from_secs(k.default_task_timeout_secs)
+        );
+        assert!(
+            background_task_timeout(&k, true) > background_task_timeout(&k, false),
+            "an unbounded `run-bg` task is autonomous — it must not be killed at \
+             the 1h non-autonomous default"
+        );
     }
 }

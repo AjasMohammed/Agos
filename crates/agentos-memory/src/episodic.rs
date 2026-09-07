@@ -29,6 +29,7 @@ impl EpisodicStore {
         let conn = Connection::open(&db_path).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to open episodic memory DB: {}", e))
         })?;
+        crate::restrict_db_permissions(&db_path);
 
         conn.execute_batch(
             "
@@ -48,6 +49,16 @@ impl EpisodicStore {
             CREATE INDEX IF NOT EXISTS idx_episodes_agent ON episodic_events(agent_id);
             CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodic_events(entry_type);
             CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodic_events(timestamp);
+            -- Consolidation's input query filters on (entry_type, timestamp) and
+            -- orders by timestamp. With only the single-column indexes SQLite
+            -- picks `idx_episodes_type`, walks every row of that type, and then
+            -- sorts in a temp B-tree — the `since` bound cannot narrow it, so the
+            -- cost grows with total rows of that type rather than with the window
+            -- actually being consolidated. Measured on a 317 MB store with ~100k
+            -- `system_event` rows: 577 ms -> 3 ms, and the sort disappears
+            -- because this index already supplies the order. ~3.5% size cost.
+            CREATE INDEX IF NOT EXISTS idx_episodes_type_ts
+                ON episodic_events(entry_type, timestamp);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS episodic_fts USING fts5(
                 summary,
@@ -217,6 +228,46 @@ impl EpisodicStore {
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("Task history task panicked: {}", e)))?
+    }
+
+    /// Most-recent episodes for an agent (or all agents when `agent_id` is
+    /// None), newest first — the plain-timeline browse the FTS `recall_*`
+    /// methods don't provide. Read-only; used by the operator memory browser.
+    pub async fn recent(
+        &self,
+        agent_id: Option<&AgentID>,
+        limit: usize,
+    ) -> Result<Vec<EpisodicEntry>, AgentOSError> {
+        let db = self.db.clone();
+        let agent_id_str = agent_id.map(|a| a.as_uuid().to_string());
+        let limit_val = Self::to_i64_limit(limit);
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock episodic db for reading".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, task_id, agent_id, entry_type, content, summary, metadata, timestamp, trace_id
+                     FROM episodic_events
+                     WHERE (?1 IS NULL OR agent_id = ?1)
+                     ORDER BY timestamp DESC LIMIT ?2",
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("Failed to prepare query: {}", e)))?;
+            let iter = stmt
+                .query_map(params![agent_id_str, limit_val], Self::row_to_episode)
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to query recent episodes: {}", e))
+                })?;
+            let mut out = Vec::new();
+            for row in iter {
+                out.push(row.map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to parse episode row: {}", e))
+                })?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Recent episodes task panicked: {}", e)))?
     }
 
     /// Full-text search within a task's event history.
@@ -587,6 +638,10 @@ impl EpisodicStore {
                     AgentOSError::StorageError(format!("Failed to sweep old episodes: {}", e))
                 })?;
 
+            if deleted > 0 {
+                crate::compact_fts_index(&conn, "episodic_fts")?;
+            }
+
             Ok(deleted)
         })
         .await
@@ -862,6 +917,53 @@ impl EpisodicStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn sweep_compacts_the_fts_index() {
+        let dir = TempDir::new().unwrap();
+        let mem = EpisodicStore::open(dir.path()).unwrap();
+        let agent_id = AgentID::new();
+        let trace_id = TraceID::new();
+
+        for i in 0..200 {
+            mem.record(EpisodeRecordInput {
+                task_id: &TaskID::new(),
+                agent_id: &agent_id,
+                entry_type: EpisodeType::UserPrompt,
+                content: &format!("episode number {i} with enough words to index"),
+                summary: Some("indexed"),
+                metadata: None,
+                trace_id: &trace_id,
+            })
+            .await
+            .unwrap();
+        }
+
+        let index_rows = || {
+            let conn = mem.db.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM episodic_fts_data", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let before = index_rows();
+
+        // Zero max_age puts the cutoff at "now", so every row just written is
+        // older than it and gets swept.
+        let deleted = mem
+            .sweep_old_entries(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 200);
+
+        // Without compaction the delete trigger only appends tombstones, so the
+        // index would be no smaller here than before the sweep.
+        let after = index_rows();
+        assert!(
+            after < before,
+            "fts index should shrink after a sweep: {before} -> {after}"
+        );
+    }
 
     #[tokio::test]
     async fn test_episodic_memory_record_and_query() {

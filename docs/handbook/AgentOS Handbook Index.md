@@ -23,18 +23,18 @@ status: complete
 | 04 | [[04-CLI Reference Complete]] | All 38 `agentos` command groups with flags, arguments, and examples — includes `team`, `skill`, `mcp` (attach/detach/oauth-store/a2a-*), `a2a` (card/discover/delegate/tasks), `workspace`, `provider`, `plugin`, `onboard`, `doctor`, `config`, `init`, plus `start`, `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, and `web` |
 | 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, agent registry, multi-agent coordination (sub-agents, teams) |
 | 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator), checkpointing & resume |
-| 07 | [[07-Tool System]] | All 127 built-in tools across 16 domains — file I/O, memory tiers, scratchpad, multi-agent coordination, task management, HAL device tools, agent inbox (6 tools), schedule inspection (4), tool discovery/pagination (4), host introspection (4), manifests, trust tiers, signing |
-| 08 | [[08-Security Model]] | 7 defense layers, capability tokens, permission enforcement, injection scanner, risk levels, hooks (`AuditHook`, `ApprovalHook`) |
+| 07 | [[07-Tool System]] | All 132 built-in tools across 16 domains — file I/O, memory tiers, scratchpad, multi-agent coordination, task management, HAL device tools, agent inbox (6 tools), schedule inspection (4), tool discovery/pagination (4), host introspection (4), manifests, trust tiers, signing |
+| 08 | [[08-Security Model]] | 8 core defense layers (+ KMC), capability tokens, permission enforcement, injection scanner, risk levels, hooks (`AuditHook`, `ApprovalHook`) |
 | 09 | [[09-Secrets and Vault]] | AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode, OAuth credential storage |
 | 10 | [[10-Memory System]] | 4 memory tiers, automatic extraction, consolidation, context budget management |
 | 11 | [[11-Pipeline and Workflows]] | Multi-step YAML pipelines, wave-based parallel execution, step dependencies, failure handling, budget enforcement, variable sanitization |
 | 12 | [[12-Event System]] | Event types, subscriptions, filter predicates, event-triggered tasks, throttle policy |
 | 13 | [[13-Cost Tracking]] | Per-agent token costs, budget enforcement, model pricing table, cost CLI |
-| 14 | [[14-Audit Log]] | 110 event types across 25 categories — task lifecycle, MCP, OAuth, containers, IoT device twins, checkpoint recovery, append-only SQLite chain, Merkle verification, export, snapshots |
+| 14 | [[14-Audit Log]] | 146 event types across 37 categories — task lifecycle, MCP, OAuth, containers, IoT device twins, checkpoint recovery, append-only SQLite chain, Merkle verification, export, snapshots |
 | 15 | [[15-LLM Configuration]] | Four native adapters (Ollama, OpenAI, Anthropic, Gemini) plus the 20-entry provider catalog (DeepSeek, Groq, Mistral, xAI, Cohere, Cerebras, OpenRouter, Together, Fireworks, NVIDIA, Hyperbolic, Azure, and more) — connecting, env vars, FallbackAdapter, RetryPolicy, CircuitBreaker |
 | 16 | [[16-Configuration Reference]] | Every config key in `config/default.toml` with type, default value, and description |
 | 17 | [[17-WASM Tools Development]] | WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro |
-| 18 | [[18-Advanced Operations]] | HAL (16 drivers incl. audio, bluetooth, webcam, printer, display, raw USB, GPU, MQTT, Home Assistant), device twins & safety engine, consent store, resource locks, snapshots, escalation, identity |
+| 18 | [[18-Advanced Operations]] | HAL (20 drivers incl. audio, bluetooth, webcam, printer, display, raw USB, GPU, MQTT, Home Assistant, mounts, sockets, open-files, services), device twins & safety engine, consent store, resource locks, snapshots, escalation, identity |
 | 19 | [[19-Troubleshooting and FAQ]] | 33+ common errors with solutions, debug logging, health checks, platform notes |
 | 20 | [[20-LLM Agent Testing]] | `agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration |
 | 21 | [[21-User Notifications and Channels]] | Agent-to-operator messaging — `notify-user`, `ask-user`, delivery channels (Telegram, ntfy, email), notification inbox CLI |

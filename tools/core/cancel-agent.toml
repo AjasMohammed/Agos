@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "cancel-agent"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Cancel a spawned sub-agent that is going off-track or no longer needed. Transitions the child to Cancelled state and cascades to any grandchildren."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "agent"
 capability_tags = ["multi-agent", "coordination", "cancellation", "intervention"]
 
 [capabilities_required]
@@ -19,15 +20,15 @@ outputs = ["cancellation_result"]
 input  = "CancelAgentIntent"
 output = "CancelAgentResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_id"]
 
-[input_schema.properties.task_id]
+[payload_schema.properties.task_id]
 type = "string"
 description = "Task ID of the spawned sub-agent to cancel."
 
-[input_schema.properties.reason]
+[payload_schema.properties.reason]
 type = "string"
 description = "Reason for cancellation (logged in audit). Default: 'Cancelled by parent agent'."
 

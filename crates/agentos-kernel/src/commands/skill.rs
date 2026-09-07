@@ -15,10 +15,17 @@ impl Kernel {
             Ok((manifest, prompt)) => {
                 let name = manifest.skill.name.clone();
                 let version = manifest.skill.version.clone();
-                let mut registry = self.skill_registry.write().await;
-                match registry.install(manifest, prompt) {
+                let install_result = {
+                    let mut registry = self.skill_registry.write().await;
+                    registry.install(manifest, prompt)
+                };
+                match install_result {
                     Ok(()) => {
                         tracing::info!(skill = %name, version = %version, "Skill installed");
+                        // Keep the agent-manual's live skills snapshot in sync
+                        // with the registry. Same pattern channel register/
+                        // deregister uses — see `refresh_connected_channels_snapshot`.
+                        self.refresh_installed_skills_snapshot().await;
                         KernelResponse::Success {
                             data: Some(json!({
                                 "skill_name": name,
@@ -38,10 +45,14 @@ impl Kernel {
     }
 
     pub(crate) async fn cmd_skill_remove(&self, name: String) -> KernelResponse {
-        let mut registry = self.skill_registry.write().await;
-        match registry.remove(&name) {
+        let remove_result = {
+            let mut registry = self.skill_registry.write().await;
+            registry.remove(&name)
+        };
+        match remove_result {
             Ok(()) => {
                 tracing::info!(skill = %name, "Skill removed");
+                self.refresh_installed_skills_snapshot().await;
                 KernelResponse::Success { data: None }
             }
             Err(e) => KernelResponse::Error {
@@ -83,24 +94,53 @@ impl Kernel {
     pub(crate) async fn cmd_skill_run(
         &self,
         name: String,
-        _input: Option<String>,
+        input: Option<String>,
     ) -> KernelResponse {
-        let registry = self.skill_registry.read().await;
-        match registry.get(&name) {
-            Some(_skill) => {
-                // Phase 2: actual skill execution (spawn agent with skill prompt + tools + budget).
-                // For now, return a placeholder indicating the skill was found.
-                KernelResponse::Error {
-                    message: format!(
-                        "Skill '{}' found but execution is not yet implemented (Phase 2)",
-                        name
-                    ),
+        // Compose the skill's system prompt + the user's input into a single
+        // task prompt and delegate to the standard task entry point.
+        //
+        // Limitations (the task runs with default agent routing + settings):
+        // - The skill's `tools.required` allowlist is advisory here (mirrors
+        //   `skill-prompt`); a hard scope would need a `tool_categories`
+        //   override on the spawned task.
+        // - The skill manifest's `agent.default_provider` / `default_model`
+        //   and `budget.*` caps are NOT yet threaded into the task — it uses
+        //   the routed agent's provider/model and the kernel's default
+        //   limits. Tracked for a follow-up; documented so callers aren't
+        //   surprised that a tight per-skill budget isn't enforced at runtime.
+        let (prompt_body, version) = {
+            let registry = self.skill_registry.read().await;
+            match registry.get(&name) {
+                Some(skill) => (
+                    skill.system_prompt.clone(),
+                    skill.manifest.skill.version.clone(),
+                ),
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Skill '{}' not found", name),
+                    }
                 }
             }
-            None => KernelResponse::Error {
-                message: format!("Skill '{}' not found", name),
-            },
-        }
+        };
+
+        let composed_prompt = match input.as_deref() {
+            Some(text) if !text.trim().is_empty() => format!(
+                "# Skill: {name} (v{version})\n\n{prompt_body}\n\n# Request\n\n{text}"
+            ),
+            _ => format!(
+                "# Skill: {name} (v{version})\n\n{prompt_body}\n\n# Request\n\nExecute this skill's primary objective."
+            ),
+        };
+
+        tracing::info!(skill = %name, version = %version, "Running skill via task pipeline");
+        self.cmd_run_task(
+            None,
+            composed_prompt,
+            false,
+            false,
+            agentos_types::ThinkingLevel::Off,
+        )
+        .await
     }
 
     pub(crate) async fn cmd_skill_status(&self, name: String) -> KernelResponse {

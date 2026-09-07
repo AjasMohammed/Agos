@@ -115,18 +115,13 @@ pub async fn create(
     };
 
     // Route through kernel command dispatch for audit logging and scope resolution.
-    // TODO: Migrate to state.service.set_secret() once SetSecretRequest supports
-    // Agent(<uuid>) and Tool(<uuid>) scope variants beyond "global" and "kernel".
-    //
-    // SECURITY NOTE: api_set_secret takes a plain String, so a copy of the secret
-    // value is allocated on the heap for the duration of the kernel call. The
-    // ZeroizingString (`secret_value`) zeroes its own allocation on drop, but cannot
-    // zero the copy passed here. This is a pre-existing limitation of the kernel API
-    // signature — tracked for fix when the above TODO is resolved.
-    let secret_str = secret_value.as_str().to_string();
+    // Scope is already a final `SecretScope` here (this form takes UUIDs, not names),
+    // so no `scope_raw` for the kernel to resolve. The copy handed to the kernel is
+    // `Zeroizing`, so both it and `secret_value` zero their allocations on drop.
+    let secret_str = zeroize::Zeroizing::new(secret_value.as_str().to_string());
     match state
         .kernel
-        .api_set_secret(form.name, secret_str, scope)
+        .api_set_secret(form.name, secret_str, scope, None)
         .await
     {
         Ok(()) => {

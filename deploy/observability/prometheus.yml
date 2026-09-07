@@ -1,0 +1,17 @@
+# Prometheus scrape config for AgentOS.
+# The kernel serves /metrics on `kernel.health_port` (default 9091).
+#
+#   - Docker / compose:   target "agentos:9091" (service DNS, default below)
+#   - systemd / host:     change target to "localhost:9091" (or the host IP)
+#   - Kubernetes:         use a ServiceMonitor / podAnnotations instead
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: agentos
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["agentos:9091"]
+        labels:
+          service: agentos

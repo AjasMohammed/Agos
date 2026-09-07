@@ -164,7 +164,9 @@ impl ConnectorProxy {
                 reason: format!(
                     "HTTP {}: {}",
                     status.as_u16(),
-                    &body_str[..body_str.len().min(500)]
+                    // char-safe truncation — byte slicing an external response
+                    // body can panic mid-UTF-8-sequence
+                    body_str.chars().take(500).collect::<String>()
                 ),
             });
         }

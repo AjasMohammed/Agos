@@ -2,11 +2,20 @@ use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Mutex;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::hal::HalDriver;
 use crate::types::ProcessEntry;
 use chrono::TimeZone;
+
+/// Only what `ProcessEntry` reads. Default `everything()` also copies environ,
+/// cwd, exe and every thread for every process on each refresh.
+fn process_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+}
 
 pub struct ProcessDriver {
     sys: Mutex<System>,
@@ -20,6 +29,9 @@ impl Default for ProcessDriver {
 
 impl ProcessDriver {
     pub fn new() -> Self {
+        // sysinfo keeps every /proc/<pid>/stat (and per-thread stat) open across
+        // refreshes, capped at RLIMIT_NOFILE/2 — 20k+ fds on a busy box. Reopen instead.
+        sysinfo::set_open_files_limit(0);
         Self {
             sys: Mutex::new(System::new_all()),
         }
@@ -27,10 +39,18 @@ impl ProcessDriver {
 
     pub fn list_processes(&self, opts: ListOpts) -> Result<ProcessListResult, AgentOSError> {
         let mut sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh());
 
         let mut processes = Vec::new();
         for (pid, process) in sys.processes() {
+            // sysinfo refreshes tasks as well as processes on Linux, and every
+            // thread reports its parent's RSS (shared address space). Listing
+            // them made a 16-thread `rustc` look like 16 × 2.4 GB processes and
+            // put TIDs in front of `process-manager kill`.
+            if process.thread_kind().is_some() {
+                continue;
+            }
+
             let start_time = chrono::Utc
                 .timestamp_opt(process.start_time() as i64, 0)
                 .single()
@@ -144,7 +164,7 @@ impl ProcessDriver {
         }
 
         let mut sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh());
 
         let pid = Pid::from_u32(target_pid);
         if let Some(process) = sys.process(pid) {
@@ -224,13 +244,59 @@ mod tests {
     #[test]
     fn test_process_list_returns_self() {
         let driver = ProcessDriver::new();
+        // Filter by our own executable name: an unfiltered listing is capped at
+        // 500 entries sorted by memory, and the tiny test binary falls below
+        // the cutoff on busy hosts (>500 processes). The filter also matches
+        // the full command line, so a kernel-truncated comm name is fine.
+        let exe = std::env::current_exe().unwrap();
+        let exe_name = exe.file_name().unwrap().to_string_lossy().to_string();
         let opts = ListOpts {
+            name_contains: Some(exe_name),
             limit: Some(500),
             ..Default::default()
         };
         let procs = driver.list_processes(opts).unwrap();
         let self_pid = std::process::id();
         assert!(procs.processes.iter().any(|p| p.pid == self_pid));
+    }
+
+    /// Threads are not processes. sysinfo refreshes tasks alongside processes
+    /// on Linux and each thread reports its parent's RSS, so an unfiltered list
+    /// showed a multi-threaded `rustc` as N identical multi-GB entries.
+    ///
+    /// `/proc/<tid>` exists for threads too, so the directory is no test — the
+    /// discriminator is `Tgid`, which equals the pid only for a group leader.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_list_excludes_threads() {
+        let driver = ProcessDriver::new();
+        let procs = driver
+            .list_processes(ListOpts {
+                limit: Some(2000),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!procs.processes.is_empty());
+        let mut checked = 0usize;
+        for p in &procs.processes {
+            // Racy by nature: a process listed a moment ago may have exited.
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", p.pid)) else {
+                continue;
+            };
+            let tgid: u32 = status
+                .lines()
+                .find_map(|l| l.strip_prefix("Tgid:"))
+                .and_then(|v| v.trim().parse().ok())
+                .expect("every /proc status has a Tgid");
+            assert_eq!(
+                tgid, p.pid,
+                "pid {} ({}) is a thread of {}, not a process",
+                p.pid, p.name, tgid
+            );
+            checked += 1;
+        }
+        // Under `hidepid=2` every read fails and the loop above asserts nothing.
+        assert!(checked > 0, "no /proc/<pid>/status was readable");
     }
 
     #[test]

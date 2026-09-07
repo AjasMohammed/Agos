@@ -7,6 +7,12 @@ struct ToolAttrs {
     version: String,
     description: String,
     permissions: Vec<String>,
+    /// Optional input type used to auto-derive a JSON Schema for the tool's
+    /// payload. When provided, the generated struct exposes a
+    /// `payload_schema()` constructor that returns the schema as
+    /// `serde_json::Value`, suitable for embedding in the tool's manifest or
+    /// in a registry registration call.
+    input_type: Option<syn::Path>,
 }
 
 impl ToolAttrs {
@@ -15,6 +21,7 @@ impl ToolAttrs {
         let mut version = None;
         let mut description = None;
         let mut permissions = Vec::new();
+        let mut input_type: Option<syn::Path> = None;
 
         let parser = syn::punctuated::Punctuated::<Meta, Token![,]>::parse_terminated;
         let metas = parser.parse2(input)?;
@@ -71,6 +78,30 @@ impl ToolAttrs {
                                     .collect();
                             }
                         }
+                        "input" => {
+                            // input = MyInputType — used by schemars to derive a JSON Schema.
+                            // Accept either a bare path (`input = MyInput`) or a string literal
+                            // (`input = "crate::path::MyInput"`) for ergonomics.
+                            match &nv.value {
+                                syn::Expr::Path(p) => {
+                                    input_type = Some(p.path.clone());
+                                }
+                                syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(s),
+                                    ..
+                                }) => {
+                                    let parsed: syn::Path = syn::parse_str(&s.value())
+                                        .map_err(|e| syn::Error::new_spanned(s, e.to_string()))?;
+                                    input_type = Some(parsed);
+                                }
+                                other => {
+                                    return Err(syn::Error::new_spanned(
+                                        other,
+                                        "expected a type path or string literal for `input`",
+                                    ));
+                                }
+                            }
+                        }
                         other => {
                             return Err(syn::Error::new_spanned(
                                 &nv.path,
@@ -91,6 +122,7 @@ impl ToolAttrs {
             version: version.unwrap_or_else(|| "0.1.0".to_string()),
             description: description.unwrap_or_default(),
             permissions,
+            input_type,
         })
     }
 }
@@ -233,6 +265,24 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Optional auto-derived JSON Schema constructor. Only emitted when the
+    // macro was invoked with `input = TypeName` and that type implements
+    // `schemars::JsonSchema`. The constructor returns a `serde_json::Value`
+    // suitable for embedding in a `ToolManifest.payload_schema`.
+    let schema_fn = match &attrs.input_type {
+        Some(ty) => quote! {
+            /// JSON Schema (draft-07) for this tool's payload, derived from
+            /// `#ty` via `schemars`. Embed in `ToolManifest.payload_schema`.
+            pub fn payload_schema() -> serde_json::Value {
+                let schema = schemars::schema_for!(#ty);
+                serde_json::to_value(&schema).expect(
+                    "schemars-derived schema must serialise to JSON",
+                )
+            }
+        },
+        None => quote! {},
+    };
+
     let expanded = quote! {
         // Keep the original function available
         #func
@@ -267,6 +317,8 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
             pub fn description() -> &'static str {
                 #tool_description
             }
+
+            #schema_fn
         }
     };
 

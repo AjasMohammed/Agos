@@ -139,7 +139,7 @@ pub async fn login_page(State(state): State<AppState>, jar: CookieJar) -> Respon
 {csrf_field}
 <label for="token">Auth Token</label>
 <input name="token" id="token" type="password"
-       placeholder="Paste the token printed at startup" required>
+       placeholder="Paste your Web UI auth token" required>
 <button type="submit">Login</button>
 </form>
 </main></body></html>"#

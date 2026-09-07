@@ -20,6 +20,7 @@ pub async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
     let uptime_secs = state.service.get_uptime().await.as_secs() as i64;
     let uptime_display = format_uptime(uptime_secs);
     let bg_running = state.kernel.background_pool.list_running().await.len();
+    let pending_escalations = state.kernel.escalation_manager.list_pending().await.len();
     let recent_audit = fetch_recent_audit(&state, 10).await;
     let recent_audit = match recent_audit {
         Ok(v) => v,
@@ -50,6 +51,7 @@ pub async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
         uptime_secs,
         uptime_display,
         bg_running,
+        pending_escalations,
     };
 
     super::render(&state.templates, "dashboard.html", ctx)
@@ -75,6 +77,7 @@ pub async fn stats_partial(State(state): State<AppState>) -> Response {
     let uptime_display = format_uptime(uptime_secs);
     // TODO(streaming): background_pool not exposed in KernelService
     let bg_running = state.kernel.background_pool.list_running().await.len();
+    let pending_escalations = state.kernel.escalation_manager.list_pending().await.len();
 
     let ctx = context! {
         agent_count,
@@ -83,6 +86,7 @@ pub async fn stats_partial(State(state): State<AppState>) -> Response {
         total_task_count,
         uptime_display,
         bg_running,
+        pending_escalations,
     };
     super::render(&state.templates, "partials/dashboard_stats.html", ctx)
 }

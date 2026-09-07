@@ -2,6 +2,11 @@ use crate::kernel::Kernel;
 use agentos_hal::DeviceStatus;
 use agentos_types::{EventSeverity, EventSource, EventType};
 
+/// Capture-consent window opened when an operator approves a webcam/audio
+/// device for an agent. Generous compared to the old per-session TTLs because
+/// the grant is an explicit operator action; revoking the device closes it.
+const OPERATOR_CAPTURE_CONSENT_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 impl Kernel {
     /// List all registered hardware devices.
     pub async fn cmd_hal_list_devices(&self) -> Vec<serde_json::Value> {
@@ -96,6 +101,17 @@ impl Kernel {
                     .escalation_manager
                     .auto_resolve_device_escalation(device_id, Some(&agent_id), true)
                     .await;
+                // Operator approval of a privacy-sensitive capture device also
+                // opens the driver-level consent window for this agent. The
+                // drivers check (authenticated agent, device key) against this
+                // store; agents cannot grant it themselves.
+                if device_id.starts_with("webcam:") || device_id.starts_with("audio:") {
+                    self.capture_consent.grant(
+                        &agent_id.to_string(),
+                        device_id,
+                        OPERATOR_CAPTURE_CONSENT_TTL,
+                    );
+                }
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: agentos_types::TraceID::new(),
@@ -145,6 +161,13 @@ impl Kernel {
                     .escalation_manager
                     .auto_resolve_device_escalation(device_id, None, false)
                     .await;
+                // Close every agent's capture-consent window on the
+                // quarantined device.
+                for (agent, resource, _) in self.capture_consent.list() {
+                    if resource == device_id {
+                        self.capture_consent.revoke(&agent, &resource);
+                    }
+                }
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: agentos_types::TraceID::new(),
@@ -197,6 +220,9 @@ impl Kernel {
 
         self.hardware_registry
             .revoke_agent_access(device_id, &agent_id);
+        // Close any open capture-consent window alongside the device grant.
+        self.capture_consent
+            .revoke(&agent_id.to_string(), device_id);
 
         self.emit_event(
             EventType::DeviceDisconnected,

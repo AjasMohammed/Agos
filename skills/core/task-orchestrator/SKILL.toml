@@ -1,0 +1,26 @@
+[skill]
+name = "task-orchestrator"
+version = "0.1.0"
+description = "Decomposes complex work into sub-tasks and coordinates a fleet of sub-agents — spawning, delegating, polling, and aggregating their results"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["task_received", "delegation_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["orchestrator"]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+[tools]
+required = ["spawn-agent", "await-agents", "agent-list", "task-status"]
+optional = ["agent-call", "task-delegate", "poll-agent", "cancel-agent", "agent-message"]
+
+[permissions]
+required = ["agent.spawn:x", "agent.call:x", "agent.message:x", "agent.registry:r", "task.query:r"]
+
+[budget]
+max_cost_per_run = 1.50
+max_tokens_per_run = 80000

@@ -40,7 +40,11 @@ impl McpToolAdapter {
 }
 
 /// Sanitize an MCP tool name into a valid AgentOS permission resource component.
-fn sanitize_tool_name(name: &str) -> String {
+///
+/// Public because the kernel synthesizes each MCP tool's *manifest* permission
+/// string separately from the adapter's *enforced* one; both must land on the
+/// same resource or the tool is advertised under a name nothing grants.
+pub fn sanitize_tool_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' {

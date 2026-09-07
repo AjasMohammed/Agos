@@ -1,0 +1,27 @@
+# Curated Python package allowlist for managed environments.
+# Packages not on this list require operator approval via escalation.
+# Policy: set `python_policy = "open"` in config to allow any package.
+
+packages = [
+    # Web frameworks
+    "flask", "django", "fastapi", "uvicorn", "gunicorn", "starlette",
+    # HTTP clients
+    "requests", "httpx", "aiohttp", "urllib3",
+    # Data science
+    "numpy", "pandas", "scipy", "scikit-learn", "matplotlib", "seaborn",
+    # Testing
+    "pytest", "pytest-cov", "pytest-asyncio", "pytest-mock", "coverage",
+    # Data validation & ORM
+    "pydantic", "sqlalchemy", "alembic", "marshmallow",
+    # CLI
+    "click", "typer", "rich", "argparse",
+    # Config / serialization
+    "python-dotenv", "toml", "pyyaml", "orjson", "ujson",
+    # Image / text processing
+    "pillow", "beautifulsoup4", "lxml", "markdown",
+    # Async / task queues
+    "celery", "redis", "boto3", "aiobotocore",
+    # Utilities
+    "jinja2", "python-dateutil", "cryptography", "paramiko",
+    "tqdm", "tenacity", "loguru",
+]

@@ -1,13 +1,13 @@
 # CLI Reference
 
-`agentctl` is the command-line interface for managing AgentOS. All commands communicate with the running kernel over a Unix domain socket.
+`agentos` is the command-line interface for managing AgentOS. All commands communicate with the running kernel over a Unix domain socket.
 
 ---
 
 ## Global Options
 
 ```
-agentctl [--config <path>] <command>
+agentos [--config <path>] <command>
 ```
 
 | Option     | Default               | Description                           |
@@ -19,7 +19,7 @@ agentctl [--config <path>] <command>
 ## `start` — Boot the Kernel
 
 ```bash
-agentctl start [--vault-passphrase <passphrase>]
+agentos start [--vault-passphrase <passphrase>]
 ```
 
 Boots the AgentOS kernel. Initializes all subsystems (vault, audit log, tool registry, bus server) and starts accepting connections.
@@ -31,7 +31,7 @@ Boots the AgentOS kernel. Initializes all subsystems (vault, audit log, tool reg
 **Example:**
 
 ```bash
-agentctl start
+agentos start
 # Enter vault passphrase: ••••••••
 # 🚀 Booting AgentOS kernel...
 # ✅ Kernel started
@@ -46,7 +46,7 @@ agentctl start
 Connect a new LLM agent to the kernel.
 
 ```bash
-agentctl agent connect --provider <provider> --model <model> --name <name> [--base-url <url>]
+agentos agent connect --provider <provider> --model <model> --name <name> [--base-url <url>]
 ```
 
 | Option       | Description                                                                                 |
@@ -62,13 +62,13 @@ For cloud providers (OpenAI, Anthropic, Gemini), you will be prompted to enter a
 
 ```bash
 # Local Ollama
-agentctl agent connect --provider ollama --model llama3.2 --name local-agent
+agentos agent connect --provider ollama --model llama3.2 --name local-agent
 
 # OpenAI
-agentctl agent connect --provider openai --model gpt-4o --name researcher
+agentos agent connect --provider openai --model gpt-4o --name researcher
 
 # Custom OpenAI-compatible endpoint
-agentctl agent connect --provider custom --model my-model --name custom-agent \
+agentos agent connect --provider custom --model my-model --name custom-agent \
   --base-url http://localhost:8080/v1
 ```
 
@@ -77,7 +77,7 @@ agentctl agent connect --provider custom --model my-model --name custom-agent \
 List all connected agents with their status.
 
 ```bash
-agentctl agent list
+agentos agent list
 ```
 
 ### `agent disconnect`
@@ -85,7 +85,7 @@ agentctl agent list
 Disconnect an agent by its UUID.
 
 ```bash
-agentctl agent disconnect <agent-id>
+agentos agent disconnect <agent-id>
 ```
 
 ---
@@ -97,7 +97,7 @@ agentctl agent disconnect <agent-id>
 Submit a task to an agent for execution.
 
 ```bash
-agentctl task run [--agent <name>] "<prompt>"
+agentos task run [--agent <name>] "<prompt>"
 ```
 
 | Option    | Description                                                                              |
@@ -107,8 +107,8 @@ agentctl task run [--agent <name>] "<prompt>"
 **Examples:**
 
 ```bash
-agentctl task run --agent analyst "Summarize the error logs"
-agentctl task run "What is 2 + 2?"
+agentos task run --agent analyst "Summarize the error logs"
+agentos task run "What is 2 + 2?"
 ```
 
 ### `task list`
@@ -116,7 +116,7 @@ agentctl task run "What is 2 + 2?"
 List all tasks (active and completed).
 
 ```bash
-agentctl task list
+agentos task list
 ```
 
 ### `task logs`
@@ -124,7 +124,7 @@ agentctl task list
 View logs for a specific task.
 
 ```bash
-agentctl task logs <task-id>
+agentos task logs <task-id>
 ```
 
 ### `task cancel`
@@ -132,7 +132,7 @@ agentctl task logs <task-id>
 Cancel a running task.
 
 ```bash
-agentctl task cancel <task-id>
+agentos task cancel <task-id>
 ```
 
 ---
@@ -144,7 +144,7 @@ agentctl task cancel <task-id>
 List all installed tools.
 
 ```bash
-agentctl tool list
+agentos tool list
 ```
 
 ### `tool install`
@@ -152,7 +152,7 @@ agentctl tool list
 Install a tool from a manifest file.
 
 ```bash
-agentctl tool install <manifest-path>
+agentos tool install <manifest-path>
 ```
 
 ### `tool remove`
@@ -160,7 +160,7 @@ agentctl tool install <manifest-path>
 Remove an installed tool.
 
 ```bash
-agentctl tool remove <tool-name>
+agentos tool remove <tool-name>
 ```
 
 ---
@@ -174,7 +174,7 @@ All secrets are encrypted with AES-256-GCM and stored in the vault. Values are n
 Store a new secret. You will be prompted to enter the value (hidden input).
 
 ```bash
-agentctl secret set <name> [--scope <scope>]
+agentos secret set <name> [--scope <scope>]
 ```
 
 | Option    | Description                                                        |
@@ -184,9 +184,9 @@ agentctl secret set <name> [--scope <scope>]
 **Examples:**
 
 ```bash
-agentctl secret set OPENAI_API_KEY
-agentctl secret set SLACK_TOKEN --scope agent:notifier
-agentctl secret set DB_PASSWORD --scope tool:database-query
+agentos secret set OPENAI_API_KEY
+agentos secret set SLACK_TOKEN --scope agent:notifier
+agentos secret set DB_PASSWORD --scope tool:database-query
 ```
 
 ### `secret list`
@@ -194,7 +194,7 @@ agentctl secret set DB_PASSWORD --scope tool:database-query
 List all secrets (names and metadata only — values are never shown).
 
 ```bash
-agentctl secret list
+agentos secret list
 ```
 
 ### `secret rotate`
@@ -202,7 +202,7 @@ agentctl secret list
 Replace a secret's value. The old value is securely overwritten.
 
 ```bash
-agentctl secret rotate <name>
+agentos secret rotate <name>
 ```
 
 ### `secret revoke`
@@ -210,7 +210,7 @@ agentctl secret rotate <name>
 Permanently delete a secret.
 
 ```bash
-agentctl secret revoke <name>
+agentos secret revoke <name>
 ```
 
 ---
@@ -222,7 +222,7 @@ agentctl secret revoke <name>
 Grant a permission to an agent.
 
 ```bash
-agentctl perm grant <agent-name> <permission> [--expires <duration>]
+agentos perm grant <agent-name> <permission> [--expires <duration>]
 ```
 
 Permissions use the format `<resource>:<ops>` where ops are `r` (read), `w` (write), `x` (execute).
@@ -230,9 +230,9 @@ Permissions use the format `<resource>:<ops>` where ops are `r` (read), `w` (wri
 **Examples:**
 
 ```bash
-agentctl perm grant analyst network.logs:r
-agentctl perm grant analyst fs.user_data:rw
-agentctl perm grant analyst process.list:r --expires 2h
+agentos perm grant analyst network.logs:r
+agentos perm grant analyst fs.user_data:rw
+agentos perm grant analyst process.list:r --expires 2h
 ```
 
 ### `perm revoke`
@@ -240,7 +240,7 @@ agentctl perm grant analyst process.list:r --expires 2h
 Revoke a permission from an agent.
 
 ```bash
-agentctl perm revoke <agent-name> <permission>
+agentos perm revoke <agent-name> <permission>
 ```
 
 ### `perm show`
@@ -248,7 +248,7 @@ agentctl perm revoke <agent-name> <permission>
 Show all permissions for an agent.
 
 ```bash
-agentctl perm show <agent-name>
+agentos perm show <agent-name>
 ```
 
 ### `perm profile create`
@@ -256,7 +256,7 @@ agentctl perm show <agent-name>
 Create a reusable permission profile.
 
 ```bash
-agentctl perm profile create <name> --description "<desc>" --permissions "<perm1>,<perm2>,..."
+agentos perm profile create <name> --description "<desc>" --permissions "<perm1>,<perm2>,..."
 ```
 
 ### `perm profile delete`
@@ -264,7 +264,7 @@ agentctl perm profile create <name> --description "<desc>" --permissions "<perm1
 Delete a permission profile.
 
 ```bash
-agentctl perm profile delete <name>
+agentos perm profile delete <name>
 ```
 
 ### `perm profile list`
@@ -272,7 +272,7 @@ agentctl perm profile delete <name>
 List all permission profiles.
 
 ```bash
-agentctl perm profile list
+agentos perm profile list
 ```
 
 ### `perm profile assign`
@@ -280,7 +280,7 @@ agentctl perm profile list
 Assign a permission profile to an agent (grants all permissions in the profile).
 
 ```bash
-agentctl perm profile assign <agent-name> <profile-name>
+agentos perm profile assign <agent-name> <profile-name>
 ```
 
 ---
@@ -292,7 +292,7 @@ agentctl perm profile assign <agent-name> <profile-name>
 Create a new role with description and optional permissions.
 
 ```bash
-agentctl role create <name> --description "<desc>" [--permissions "<perm1>,<perm2>,..."]
+agentos role create <name> --description "<desc>" [--permissions "<perm1>,<perm2>,..."]
 ```
 
 ### `role delete`
@@ -300,7 +300,7 @@ agentctl role create <name> --description "<desc>" [--permissions "<perm1>,<perm
 Delete a role.
 
 ```bash
-agentctl role delete <name>
+agentos role delete <name>
 ```
 
 ### `role list`
@@ -308,7 +308,7 @@ agentctl role delete <name>
 List all roles.
 
 ```bash
-agentctl role list
+agentos role list
 ```
 
 ### `role assign`
@@ -316,7 +316,7 @@ agentctl role list
 Assign a role to an agent.
 
 ```bash
-agentctl role assign <agent-name> <role-name>
+agentos role assign <agent-name> <role-name>
 ```
 
 ### `role revoke`
@@ -324,7 +324,7 @@ agentctl role assign <agent-name> <role-name>
 Revoke a role from an agent.
 
 ```bash
-agentctl role unassign <agent-name> <role-name>
+agentos role unassign <agent-name> <role-name>
 ```
 
 ---
@@ -336,7 +336,7 @@ agentctl role unassign <agent-name> <role-name>
 Create a recurring scheduled task (cron-like).
 
 ```bash
-agentctl schedule create \
+agentos schedule create \
   --name <job-name> \
   --cron "<cron-expression>" \
   --agent <agent-name> \
@@ -347,7 +347,7 @@ agentctl schedule create \
 **Example:**
 
 ```bash
-agentctl schedule create \
+agentos schedule create \
   --name daily-log-summary \
   --cron "0 0 8 * * *" \
   --agent analyst \
@@ -360,7 +360,7 @@ agentctl schedule create \
 List all scheduled jobs.
 
 ```bash
-agentctl schedule list
+agentos schedule list
 ```
 
 ### `schedule pause`
@@ -368,7 +368,7 @@ agentctl schedule list
 Pause a scheduled job.
 
 ```bash
-agentctl schedule pause <job-name>
+agentos schedule pause <job-name>
 ```
 
 ### `schedule resume`
@@ -376,7 +376,7 @@ agentctl schedule pause <job-name>
 Resume a paused scheduled job.
 
 ```bash
-agentctl schedule resume <job-name>
+agentos schedule resume <job-name>
 ```
 
 ### `schedule delete`
@@ -384,7 +384,7 @@ agentctl schedule resume <job-name>
 Delete a scheduled job.
 
 ```bash
-agentctl schedule delete <job-name>
+agentos schedule delete <job-name>
 ```
 
 ---
@@ -396,7 +396,7 @@ agentctl schedule delete <job-name>
 Start a one-shot background task.
 
 ```bash
-agentctl bg run \
+agentos bg run \
   --name <task-name> \
   --agent <agent-name> \
   --task "<prompt>" \
@@ -412,7 +412,7 @@ agentctl bg run \
 List all running background tasks.
 
 ```bash
-agentctl bg list
+agentos bg list
 ```
 
 ### `bg logs`
@@ -420,7 +420,7 @@ agentctl bg list
 View logs for a background task.
 
 ```bash
-agentctl bg logs <task-name>
+agentos bg logs <task-name>
 ```
 
 ### `bg kill`
@@ -428,7 +428,7 @@ agentctl bg logs <task-name>
 Terminate a running background task.
 
 ```bash
-agentctl bg kill <task-name>
+agentos bg kill <task-name>
 ```
 
 ---
@@ -438,7 +438,7 @@ agentctl bg kill <task-name>
 Show the current system status: uptime, connected agents, active tasks, installed tools, and total audit entries.
 
 ```bash
-agentctl status
+agentos status
 ```
 
 ---
@@ -450,13 +450,13 @@ agentctl status
 View recent audit log entries.
 
 ```bash
-agentctl audit logs --last <count>
+agentos audit logs --last <count>
 ```
 
 **Example:**
 
 ```bash
-agentctl audit logs --last 50
+agentos audit logs --last 50
 ```
 
 ---

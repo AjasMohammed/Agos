@@ -6,7 +6,7 @@
 
 {% if created_secret %}
 <article class="secret-flash" role="alert" style="border-left: 4px solid var(--pico-color-amber-500);">
-    <header><strong>⚠ Copy this signing secret now — it will not be shown again</strong></header>
+    <header><strong>Copy this signing secret now — it will not be shown again</strong></header>
     {% if rotated_from %}
     <p><strong>Rotated from endpoint:</strong> <code>{{ rotated_from }}</code></p>
     {% endif %}

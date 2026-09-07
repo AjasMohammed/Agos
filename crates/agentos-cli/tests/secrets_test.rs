@@ -56,7 +56,7 @@ async fn test_secrets_full_lifecycle() {
     let response = client
         .send_command(KernelCommand::SetSecret {
             name: "TEST_KEY".into(),
-            value: "super-secret-123".into(),
+            value: zeroize::Zeroizing::new("super-secret-123".to_string()),
             scope: SecretScope::Global,
             scope_raw: None,
         })
@@ -90,7 +90,7 @@ async fn test_secrets_full_lifecycle() {
     let response = client
         .send_command(KernelCommand::RotateSecret {
             name: "TEST_KEY".into(),
-            new_value: "new-secret-456".into(),
+            new_value: zeroize::Zeroizing::new("new-secret-456".to_string()),
         })
         .await
         .unwrap();

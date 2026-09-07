@@ -11,7 +11,7 @@
     // Format raw tool call data for human-readable display.
     // Strips XML wrapper tags, unwraps MCP content envelopes,
     // and recursively parses nested stringified JSON.
-    function formatToolData(raw) {
+    function parseToolData(raw) {
         if (!raw || typeof raw !== "string") return raw || "";
         var s = raw.trim();
 
@@ -72,8 +72,48 @@
 
         parsed = deepResolve(parsed, 0);
 
-        if (typeof parsed === "string") return parsed;
-        try { return JSON.stringify(parsed, null, 2); } catch (_) { return s; }
+        return parsed;
+    }
+
+    function renderToolDataHtml(raw) {
+        var parsed = parseToolData(raw);
+
+        function render(value, depth) {
+            if (value === null || typeof value === "undefined") {
+                return '<span class="chat-tool-empty">empty</span>';
+            }
+            if (typeof value === "boolean" || typeof value === "number") {
+                return '<span class="chat-tool-scalar">' + escapeHtml(value) + '</span>';
+            }
+            if (typeof value === "string") {
+                if (!value) return '<span class="chat-tool-empty">empty string</span>';
+                var escaped = escapeHtml(value);
+                return value.indexOf("\n") !== -1 || value.length > 120
+                    ? '<pre class="chat-tool-text">' + escaped + '</pre>'
+                    : '<span class="chat-tool-string">' + escaped + '</span>';
+            }
+            if (Array.isArray(value)) {
+                if (value.length === 0) return '<span class="chat-tool-empty">empty list</span>';
+                return '<ol class="chat-tool-list">' + value.map(function (item) {
+                    return '<li>' + render(item, depth + 1) + '</li>';
+                }).join("") + '</ol>';
+            }
+            if (typeof value === "object") {
+                var keys = Object.keys(value);
+                if (keys.length === 0) return '<span class="chat-tool-empty">empty object</span>';
+                return '<dl class="chat-tool-kv">' + keys.map(function (key) {
+                    var child = value[key];
+                    var nested = child && typeof child === "object";
+                    var rendered = nested && depth < 4
+                        ? '<details class="chat-tool-nested" open><summary>View ' + escapeHtml(key) + '</summary>' + render(child, depth + 1) + '</details>'
+                        : render(child, depth + 1);
+                    return '<dt>' + escapeHtml(key) + '</dt><dd>' + rendered + '</dd>';
+                }).join("") + '</dl>';
+            }
+            return '<span class="chat-tool-string">' + escapeHtml(String(value)) + '</span>';
+        }
+
+        return '<div class="chat-tool-formatted">' + render(parsed, 0) + '</div>';
     }
 
     function renderMarkdownLite(raw) {
@@ -155,6 +195,34 @@
         }
     }
 
+    // Promote /artifacts/<uuid> links to cards. Runs on the SANITIZED fragment and
+    // only ever reads href + textContent, building its own nodes — agent text is
+    // never re-inserted as HTML. The href is re-checked against the exact route
+    // shape so nothing else can wear the card affordance.
+    var ARTIFACT_HREF = /^\/artifacts\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+    function decorateArtifactLinks(root) {
+        if (!root) return;
+        var links = root.querySelectorAll('a[href^="/artifacts/"]');
+        for (var i = 0; i < links.length; i++) {
+            var a = links[i];
+            if (!ARTIFACT_HREF.test(a.getAttribute("href") || "")) continue;
+            var card = document.createElement("a");
+            card.className = "artifact-card";
+            card.href = a.getAttribute("href");
+            var icon = document.createElement("span");
+            icon.className = "artifact-card-icon";
+            icon.setAttribute("aria-hidden", "true");
+            icon.textContent = "▤";
+            var label = document.createElement("span");
+            label.className = "artifact-card-label";
+            label.textContent = a.textContent || "Artifact";
+            card.appendChild(icon);
+            card.appendChild(label);
+            a.replaceWith(card);
+        }
+    }
+
     function renderMarkdownInto(el) {
         if (!el) return;
         var attrRaw = el.getAttribute("data-raw-markdown");
@@ -166,6 +234,7 @@
         }
         el.innerHTML = renderMarkdown(el.dataset.rawMarkdown);
         highlightCode(el);
+        decorateArtifactLinks(el);
     }
 
     function renderAllMarkdown(root) {
@@ -230,6 +299,7 @@
                 renderQueued = false;
                 if (currentTextEl) {
                     currentTextEl.innerHTML = renderMarkdown(currentTextEl.dataset.rawMarkdown || "");
+                    decorateArtifactLinks(currentTextEl);
                     pendingHighlightRoot = currentTextEl;
                 }
                 if (pendingHighlightRoot) {
@@ -276,7 +346,7 @@
             el.open = true;
             el.innerHTML =
                 '<summary><small><strong></strong><span class="chat-tool-summary-status"></span></small></summary>' +
-                '<pre class="chat-tool-result"><code class="chat-tool-stream-preview"></code></pre>';
+                '<div class="chat-tool-result"><div class="chat-tool-stream-preview"></div></div>';
             var titleEl = el.querySelector("strong");
             if (titleEl) titleEl.textContent = toolName || "tool";
             var statusEl = el.querySelector(".chat-tool-summary-status");
@@ -290,7 +360,7 @@
             var statusEl = card.querySelector(".chat-tool-summary-status");
             if (statusEl) statusEl.textContent = label ? " · " + label : "";
             var previewEl = card.querySelector(".chat-tool-stream-preview");
-            if (previewEl) previewEl.textContent = formatToolData(preview || "");
+            if (previewEl) previewEl.innerHTML = renderToolDataHtml(preview || "");
         }
 
         function updateMeta(tokensUsed, costUsd) {
@@ -365,6 +435,7 @@
             if (existing === answer.trim()) {
                 textSegments().forEach(function (el) {
                     el.innerHTML = renderMarkdown(el.dataset.rawMarkdown || "");
+                    decorateArtifactLinks(el);
                     highlightCode(el);
                 });
                 scrollToBottom(true);
@@ -375,6 +446,7 @@
             currentTextEl = newTextSegment();
             currentTextEl.dataset.rawMarkdown = answer;
             currentTextEl.innerHTML = renderMarkdown(answer);
+            decorateArtifactLinks(currentTextEl);
             highlightCode(currentTextEl);
             scrollToBottom(true);
         }

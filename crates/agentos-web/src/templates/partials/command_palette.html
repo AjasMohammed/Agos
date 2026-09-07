@@ -1,0 +1,36 @@
+<div x-data="commandPalette()" x-init="init()" @keydown.escape.window="close()"
+     @show-command-palette.window="open()"
+     class="cmdk-root" x-show="show" x-cloak
+     role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="cmdk-backdrop" @click="close()"></div>
+    <div class="cmdk-panel" @click.stop>
+        <div class="cmdk-search">
+            <input type="text" x-model="query" x-ref="input"
+                   @keydown.arrow-down.prevent="moveDown()"
+                   @keydown.arrow-up.prevent="moveUp()"
+                   @keydown.enter.prevent="activate()"
+                   placeholder="Jump to a page, run an action…" aria-label="Search commands"
+                   autocomplete="off" spellcheck="false">
+            <kbd class="cmdk-hint">ESC</kbd>
+        </div>
+        <ul class="cmdk-list" role="listbox">
+            <template x-for="(item, idx) in filtered()" :key="item.href + ':' + item.label">
+                <li :class="{ 'cmdk-item': true, 'cmdk-item-active': idx === active }"
+                    @mouseenter="active = idx" @click="go(item.href)" role="option"
+                    :aria-selected="idx === active">
+                    <span class="cmdk-section" x-text="item.section"></span>
+                    <span class="cmdk-label" x-text="item.label"></span>
+                    <span class="cmdk-href" x-text="item.href"></span>
+                </li>
+            </template>
+            <template x-if="filtered().length === 0">
+                <li class="cmdk-empty">No matches</li>
+            </template>
+        </ul>
+        <div class="cmdk-foot muted">
+            <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+            <span><kbd>Enter</kbd> open</span>
+            <span><kbd>⌘ K</kbd> · <kbd>Ctrl K</kbd> toggle</span>
+        </div>
+    </div>
+</div>

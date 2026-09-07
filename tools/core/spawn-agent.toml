@@ -1,4 +1,5 @@
-tags = ["meta", "exec"]
+tags = ["exec"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "spawn-agent"
@@ -6,7 +7,8 @@ version     = "1.0.0"
 description = "Spawn a sub-agent to handle a specific subtask. The child runs independently and its result is injected back into your context when complete. Returns the task_id to use with await-agents."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "agent"
+search_hints = ["delegate part of this to a sub-agent", "fan out work", "start a helper agent"]
 
 [capabilities_required]
 permissions = ["agent.spawn:x"]
@@ -18,24 +20,24 @@ outputs = ["task_id"]
 input  = "SpawnAgentIntent"
 output = "SpawnAgentResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["agent", "prompt"]
 
-[input_schema.properties.agent]
+[payload_schema.properties.agent]
 type = "string"
 description = "Name of the registered agent to run."
 
-[input_schema.properties.prompt]
+[payload_schema.properties.prompt]
 type = "string"
 description = "Goal or prompt for the sub-agent."
 
-[input_schema.properties.permissions]
+[payload_schema.properties.permissions]
 type = "array"
 items = { type = "string" }
 description = "Permissions to request for the child (subset of your own). Defaults to inheriting parent permissions."
 
-[input_schema.properties.context_messages]
+[payload_schema.properties.context_messages]
 type = "integer"
 default = 10
 minimum = 0
@@ -49,3 +51,9 @@ gpu           = false
 max_memory_mb = 16
 max_cpu_ms    = 1000
 syscalls      = []
+
+[[examples]]
+description = "Spawn a sub-agent to handle a specific task"
+[examples.payload]
+agent = "researcher"
+prompt = "Summarise recent developments in LLM tooling"

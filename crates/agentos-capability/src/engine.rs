@@ -1,7 +1,7 @@
 use crate::token::compute_signature;
 use agentos_types::*;
 use rand::RngCore;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Duration;
 use zeroize::Zeroize;
@@ -15,6 +15,19 @@ pub struct CapabilityEngine {
     signing_key: [u8; 32],
     /// Per-agent permission sets. Key is AgentID.
     agent_permissions: RwLock<HashMap<AgentID, PermissionSet>>,
+    /// Agents whose capability tokens are no longer honoured.
+    ///
+    /// Permissions are HMAC-signed *into* each token, so dropping an entry from
+    /// `agent_permissions` cannot invalidate a token already in flight — before
+    /// this set, `revoke_agent` removed a key nothing ever inserted and every
+    /// outstanding token stayed valid until its own expiry. The sole caller,
+    /// `agent remove`, is permanent (identity revocation is key rotation, not
+    /// capability revocation), and AgentIDs are never reissued, so entries are
+    /// kept for the life of the process.
+    ///
+    /// Consulted on all three token paths — `issue_token`, `scope_for_child`,
+    /// and `validate_intent` — so a revoked agent can neither mint nor spend.
+    revoked_agents: RwLock<HashSet<AgentID>>,
 }
 
 impl Drop for CapabilityEngine {
@@ -31,6 +44,7 @@ impl CapabilityEngine {
         Self {
             signing_key,
             agent_permissions: RwLock::new(HashMap::new()),
+            revoked_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -39,6 +53,7 @@ impl CapabilityEngine {
         Self {
             signing_key,
             agent_permissions: RwLock::new(HashMap::new()),
+            revoked_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -122,6 +137,16 @@ impl CapabilityEngine {
     /// This effectively invalidates any tokens issued for the agent since they reference
     /// permissions that no longer exist.
     pub fn revoke_agent(&self, agent_id: &AgentID) {
+        {
+            let mut revoked = self.revoked_agents.write().unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "Recovered from poisoned lock in capability engine revocation path"
+                );
+                error.into_inner()
+            });
+            revoked.insert(*agent_id);
+        }
         let mut map = self.agent_permissions.write().unwrap_or_else(|error| {
             tracing::warn!(
                 error = %error,
@@ -130,6 +155,20 @@ impl CapabilityEngine {
             error.into_inner()
         });
         map.remove(agent_id);
+    }
+
+    /// Whether `agent_id` has been revoked. Shared by the three token paths.
+    fn is_revoked(&self, agent_id: &AgentID) -> bool {
+        self.revoked_agents
+            .read()
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "Recovered from poisoned lock in capability engine revocation path"
+                );
+                error.into_inner()
+            })
+            .contains(agent_id)
     }
 
     /// Get an agent's current permissions.
@@ -161,6 +200,15 @@ impl CapabilityEngine {
         effective_permissions: PermissionSet,
         ttl: Duration,
     ) -> Result<CapabilityToken, AgentOSError> {
+        // Refuse at mint time rather than letting `validate_intent` reject the
+        // token at first use — otherwise removing an agent surfaces as a
+        // confusing mid-task `InvalidToken` instead of a dispatch-time failure.
+        if self.is_revoked(&agent_id) {
+            return Err(AgentOSError::InvalidToken {
+                reason: "Agent has been revoked".into(),
+            });
+        }
+
         let issued_at = chrono::Utc::now();
         let expires_at = issued_at
             + chrono::Duration::from_std(ttl).map_err(|_| AgentOSError::KernelError {
@@ -202,7 +250,17 @@ impl CapabilityEngine {
             return Err(AgentOSError::TokenExpired);
         }
 
-        // 3. Check target tool is allowed (if the target is a tool)
+        // 3. Reject tokens belonging to a revoked agent. The signature above only
+        // proves the token was minted by this kernel, not that the agent is still
+        // trusted — without this, `agent remove` left every outstanding token
+        // usable until it expired on its own.
+        if self.is_revoked(&token.agent_id) {
+            return Err(AgentOSError::InvalidToken {
+                reason: "Agent has been revoked".into(),
+            });
+        }
+
+        // 4. Check target tool is allowed (if the target is a tool)
         if let IntentTarget::Tool(tool_id) = &intent.target {
             if !token.allowed_tools.contains(tool_id) {
                 return Err(AgentOSError::PermissionDenied {
@@ -212,7 +270,7 @@ impl CapabilityEngine {
             }
         }
 
-        // 4. Check intent type is allowed
+        // 5. Check intent type is allowed
         let intent_flag = match intent.intent_type {
             IntentType::Read => IntentTypeFlag::Read,
             IntentType::Write => IntentTypeFlag::Write,
@@ -234,7 +292,7 @@ impl CapabilityEngine {
             });
         }
 
-        // 5. Check required permissions
+        // 6. Check required permissions
         for (resource, op) in required_permissions {
             if !token.permissions.check(resource, *op) {
                 return Err(AgentOSError::PermissionDenied {
@@ -312,11 +370,26 @@ impl CapabilityEngine {
             return Err(AgentOSError::TokenExpired);
         }
 
-        // 3. Intersect parent permissions with what the child requested.
+        // 3. Reject a revoked parent. Signature + expiry only prove the token
+        //    was minted by this kernel and is still in date — a removed agent
+        //    with a task still in flight would otherwise mint a fully valid
+        //    child token carrying its intersected permissions.
+        if self.is_revoked(&parent_token.agent_id) {
+            tracing::warn!(
+                parent_task_id = %parent_token.task_id,
+                parent_agent_id = %parent_token.agent_id,
+                "scope_for_child: parent agent has been revoked"
+            );
+            return Err(AgentOSError::InvalidToken {
+                reason: "Parent agent has been revoked".into(),
+            });
+        }
+
+        // 4. Intersect parent permissions with what the child requested.
         //    This is the core security invariant: child ⊆ parent, always.
         let intersection = parent_token.permissions.intersect(requested);
 
-        // 4. Reject empty intersection — child asked for nothing the parent holds.
+        // 5. Reject empty intersection — child asked for nothing the parent holds.
         if intersection.is_empty() {
             tracing::warn!(
                 parent_task_id = %parent_token.task_id,
@@ -338,7 +411,7 @@ impl CapabilityEngine {
             "scope_for_child: issuing scoped child token"
         );
 
-        // 5. Issue a fresh token scoped to the child's own task/agent IDs.
+        // 6. Issue a fresh token scoped to the child's own task/agent IDs.
         //    Using child_task_id (not parent) prevents scheduler entry collision.
         self.issue_token(
             child_task_id,
@@ -350,6 +423,11 @@ impl CapabilityEngine {
         )
     }
 
+    /// Domain-separation tag for arbitrary-data (event) signatures. Distinct
+    /// from the capability-token domain (`token.rs`) so a signature produced by
+    /// one can never be replayed as the other under the same signing key.
+    const EVENT_DATA_DOMAIN_TAG: &'static [u8] = b"agentos.event-data.v1";
+
     /// Sign arbitrary bytes using the kernel's HMAC-SHA256 signing key.
     /// Used by the EventBus to sign `EventMessage` signatures.
     pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
@@ -359,6 +437,8 @@ impl CapabilityEngine {
 
         let mut mac =
             HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(&(Self::EVENT_DATA_DOMAIN_TAG.len() as u32).to_le_bytes());
+        mac.update(Self::EVENT_DATA_DOMAIN_TAG);
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
@@ -371,6 +451,8 @@ impl CapabilityEngine {
 
         let mut mac =
             HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(&(Self::EVENT_DATA_DOMAIN_TAG.len() as u32).to_le_bytes());
+        mac.update(Self::EVENT_DATA_DOMAIN_TAG);
         mac.update(data);
         mac.verify_slice(signature).is_ok()
     }
@@ -469,6 +551,114 @@ mod tests {
     }
 
     #[test]
+    fn revoked_agent_token_is_refused_even_though_it_still_verifies() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let intent = IntentMessage {
+            id: MessageID::new(),
+            sender_token: token.clone(),
+            intent_type: IntentType::Read,
+            target: IntentTarget::Kernel,
+            payload: SemanticPayload {
+                schema: "Test".to_string(),
+                data: serde_json::Value::Null,
+            },
+            context_ref: ContextID::new(),
+            priority: 0,
+            timeout_ms: 1000,
+            trace_id: TraceID::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        assert!(engine.validate_intent(&token, &intent, &[]).is_ok());
+
+        engine.revoke_agent(&agent_id);
+
+        // The signature still verifies and the token has not expired — revocation
+        // is the only thing standing between a removed agent and its live tokens.
+        assert!(engine.verify_signature(&token));
+        assert!(chrono::Utc::now() < token.expires_at);
+        assert!(matches!(
+            engine.validate_intent(&token, &intent, &[]),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
+    }
+
+    #[test]
+    fn revoked_agent_cannot_mint_a_child_token() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".into(), true, false, false, None);
+
+        let parent_token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms.clone(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let scope = |token: &CapabilityToken| {
+            engine.scope_for_child(
+                token,
+                TaskID::new(),
+                AgentID::new(),
+                &perms,
+                Duration::from_secs(300),
+            )
+        };
+
+        assert!(scope(&parent_token).is_ok());
+
+        engine.revoke_agent(&agent_id);
+
+        // Signature and expiry both still pass — revocation is the only thing
+        // stopping an in-flight task of a removed agent from minting children.
+        assert!(engine.verify_signature(&parent_token));
+        assert!(chrono::Utc::now() < parent_token.expires_at);
+        assert!(matches!(
+            scope(&parent_token),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
+    }
+
+    #[test]
+    fn revoked_agent_cannot_be_issued_a_fresh_token() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        engine.revoke_agent(&agent_id);
+
+        // Fail at dispatch, not at first use — a token minted here would only
+        // blow up later as a confusing mid-task InvalidToken.
+        assert!(matches!(
+            engine.issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            ),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
+    }
+
+    #[test]
     fn test_permission_denied_for_missing_resource() {
         let engine = CapabilityEngine::new();
         let mut perms = PermissionSet::new();
@@ -517,6 +707,67 @@ mod tests {
                 assert_eq!(resource, "network.outbound")
             }
             _ => panic!("Expected permission denied error"),
+        }
+    }
+
+    /// Mirrors the per-turn token the chat path mints (finding S1): a read-only
+    /// chat turn produces a token whose `allowed_intents` is `{Read}`. Such a
+    /// token must ALLOW an in-scope Read intent and DENY an out-of-scope Execute
+    /// intent — the scoped-intent narrowing that chat previously lacked entirely
+    /// (it ran at the agent's full standing permissions with no token at all).
+    #[test]
+    fn test_chat_style_scoped_intent_token() {
+        let engine = CapabilityEngine::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".into(), true, false, false, None);
+        let agent_id = AgentID::new();
+        engine.register_agent(agent_id, perms.clone());
+
+        // A read-only turn: allowed_intents scoped to {Read}, exactly as the
+        // chat loop derives from the turn's requested intents.
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms.clone(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let make_intent = |intent_type: IntentType| IntentMessage {
+            id: MessageID::new(),
+            sender_token: token.clone(),
+            intent_type,
+            target: IntentTarget::Kernel,
+            payload: SemanticPayload {
+                schema: "fs-read".to_string(),
+                data: serde_json::Value::Null,
+            },
+            context_ref: ContextID::new(),
+            priority: 5,
+            timeout_ms: 1000,
+            trace_id: TraceID::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        // In-scope Read with a held permission → allowed.
+        assert!(engine
+            .validate_intent(
+                &token,
+                &make_intent(IntentType::Read),
+                &[("fs.user_data".to_string(), PermissionOp::Read)],
+            )
+            .is_ok());
+
+        // Out-of-scope Execute intent → denied on intent_type, even though the
+        // agent's standing permissions might otherwise cover it.
+        match engine.validate_intent(&token, &make_intent(IntentType::Execute), &[]) {
+            Err(AgentOSError::PermissionDenied { resource, .. }) => {
+                assert_eq!(resource, "intent_type")
+            }
+            other => panic!("expected intent_type PermissionDenied, got {other:?}"),
         }
     }
 

@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "task-list"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "List tasks for the calling agent (filter=mine, default) or all active tasks system-wide (filter=active). Newest first, configurable limit (max 100)."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "task"
+search_hints = ["what tasks are running", "list tasks", "queue status"]
 
 [capabilities_required]
 permissions = ["task.query:r"]
@@ -17,16 +20,16 @@ outputs = ["content.structured"]
 input  = "TaskListQuery"
 output = "TaskListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.filter]
+[payload_schema.properties.filter]
 type = "string"
 enum = ["mine", "active"]
 default = "mine"
 description = "mine for caller tasks, active for global running/queued tasks"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 default = 20
 minimum = 1

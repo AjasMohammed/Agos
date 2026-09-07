@@ -143,7 +143,7 @@ impl ChannelAdapter for WebhookAdapter {
 // ── URL validation helpers ────────────────────────────────────────────────────
 
 /// Validate an outbound webhook URL. Requires HTTPS and blocks private IPs.
-pub(crate) fn validate_webhook_url(raw: &str) -> Result<(), AgentOSError> {
+pub fn validate_webhook_url(raw: &str) -> Result<(), AgentOSError> {
     validate_url_inner(raw, true, "webhook")
 }
 

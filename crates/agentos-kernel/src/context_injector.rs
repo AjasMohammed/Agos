@@ -8,29 +8,50 @@ impl Kernel {
     /// push user prompt, record to episodic memory, run injection scan, and build
     /// the adaptive retrieval plan.
     ///
-    /// Returns `(system_prompt, tools_desc, agent_directory, retrieval_plan)` on success.
+    /// Returns `(system_prompt, tools_desc, agent_directory, inbox_segment,
+    /// retrieval_plan)` on success. `inbox_segment` is returned rather than
+    /// appended to the system prompt: unread counts are dynamic, and the system
+    /// prompt sits inside the Anthropic prompt-cache prefix. The caller folds it
+    /// into the per-iteration `<turn_reminder>` instead.
+    ///
     /// Returns `Err` if execution should be aborted (e.g., high-confidence injection detected).
     pub(crate) async fn setup_task_context(
         &self,
         task: &AgentTask,
         task_trace_id: &TraceID,
-    ) -> anyhow::Result<(String, String, String, crate::retrieval_gate::RetrievalPlan)> {
+    ) -> anyhow::Result<(
+        String,
+        String,
+        String,
+        String,
+        crate::retrieval_gate::RetrievalPlan,
+    )> {
         // 1. Collect elements for CompilationInputs
-        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt();
-        // Append recently-used tool hint from the in-memory LRU (cap 10 per agent).
-        let tools_desc = {
-            let lru_guard = self.agent_tool_lru.read().await;
-            if let Some(recent) = lru_guard.get(&task.agent_id) {
-                if !recent.is_empty() {
-                    let names: Vec<&str> = recent.iter().map(|s| s.as_str()).collect();
-                    format!("{}\nRecently used: {}.", base_tools_desc, names.join(", "))
-                } else {
-                    base_tools_desc
-                }
-            } else {
-                base_tools_desc
-            }
-        };
+        // Tier-0 index: category counts + usage-ranked top-N names per category.
+        // Usage scores are loaded once per task setup (this fn runs once per
+        // task, not per iteration), so the rendered block is stable across the
+        // task's iterations and stays behind the Anthropic tools cache breakpoint.
+        let usage = agentos_tools::agent_manual::AgentManualTool::load_usage_scores_async(
+            self.data_dir.clone(),
+            task.agent_id,
+        )
+        .await;
+        let discovery = &self.config.tools.discovery;
+        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt_ranked(
+            &usage,
+            discovery.l0_max_names_per_category,
+            discovery.l0_max_tokens,
+            &task.capability_token.permissions,
+        );
+        // NOTE: no "Recently used:" hint is appended to the tool block. The
+        // LRU that produced it reordered as the agent worked, and this block
+        // sits inside the Anthropic prompt-cache prefix (breakpoint #1 is
+        // attached to the Tools block), so the hint busted the cached prefix on
+        // every task for zero new signal: `build_turn_reminder` already reports
+        // the last three tool outcomes per iteration, after every breakpoint.
+        // The LRU itself is gone — `tool_usage` (ToolUsageRank) is what actually
+        // feeds usage ranking and tool scoping.
+        let tools_desc = base_tools_desc;
         let agent_directory = self.build_agent_directory(&task.agent_id).await;
 
         // Build system prompt from the canonical builder — same prompt structure
@@ -53,8 +74,11 @@ impl Kernel {
             }
         };
 
-        let sub_agent = task.parent_task_id.map(|parent_id| SubAgentContext {
-            parent_task_id: parent_id.to_string(),
+        // The parent task id itself is NOT carried here — it is a fresh UUID
+        // per task and the sub-agent block sits inside the prompt-cache prefix.
+        // `build_turn_reminder` renders it per iteration from
+        // `task.parent_task_id` instead.
+        let sub_agent = task.parent_task_id.map(|_| SubAgentContext {
             spawn_depth: task.spawn_depth,
         });
 
@@ -76,7 +100,15 @@ impl Kernel {
             }
         };
 
-        let mut system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
+        let (native_tool_calling, uses_tool_gateway) = {
+            let active = self.active_llms.read().await;
+            match active.get(&task.agent_id) {
+                Some(llm) => (llm.supports_native_tool_calling(), llm.uses_tool_gateway()),
+                None => (false, false),
+            }
+        };
+
+        let system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
             agent_roles,
@@ -87,14 +119,18 @@ impl Kernel {
             enforce_final_tag: false,
             timezone: system_prompt::local_timezone_str(),
             connected_channels,
+            native_tool_calling,
+            uses_tool_gateway,
         });
+        // Returned to the caller rather than appended: unread counts change as
+        // notifications arrive, and appending them here would bust the cached
+        // system-prompt prefix. Rendered per iteration in the turn reminder.
         let inbox_segment = crate::agent_inbox_prompt::InboxPromptRenderer::new(
             self.agent_inbox.clone(),
             self.agent_message_inbox.clone(),
         )
-        .render_segment(task.agent_id)
+        .render_line(task.agent_id)
         .await;
-        system_prompt.push_str(&inbox_segment);
 
         // We initialize context with empty string; Compiler injects the true system prompt
         // into the compiled ContextWindow at each iteration.
@@ -205,11 +241,7 @@ impl Kernel {
                     Some(ThreatLevel::Medium) => EventSeverity::Warning,
                     Some(ThreatLevel::Low) | None => EventSeverity::Info,
                 };
-                let chain_depth = task
-                    .trigger_source
-                    .as_ref()
-                    .map(|ts| ts.chain_depth + 1)
-                    .unwrap_or(0);
+                let chain_depth = task.event_chain_depth();
                 self.emit_event_with_trace(
                     EventType::PromptInjectionAttempt,
                     EventSource::SecurityEngine,
@@ -276,6 +308,12 @@ impl Kernel {
         // iteration so mid-task memory writes are visible in subsequent compile passes.
         let retrieval_plan = self.retrieval_gate.classify(&task.original_prompt);
 
-        Ok((system_prompt, tools_desc, agent_directory, retrieval_plan))
+        Ok((
+            system_prompt,
+            tools_desc,
+            agent_directory,
+            inbox_segment,
+            retrieval_plan,
+        ))
     }
 }

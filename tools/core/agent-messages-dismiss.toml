@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "agent-messages-dismiss"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Permanently delete a direct message. Use after the message has been acted on."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "write_scoped"
+category    = "agent"
 
 [capabilities_required]
 permissions = []
@@ -18,11 +19,11 @@ outputs = ["dismissed", "id"]
 input  = "AgentMessagesDismissIntent"
 output = "AgentMessagesDismissResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type        = "string"
 description = "Message ID to dismiss"
 

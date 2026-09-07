@@ -44,4 +44,18 @@ impl IterationBuilder {
             snapshot_id: self.snapshot_id,
         }
     }
+
+    /// Non-consuming snapshot of the in-progress iteration, for live trace reads.
+    pub fn snapshot(&self) -> IterationTrace {
+        IterationTrace {
+            iteration: self.iteration,
+            started_at: self.started_at,
+            model: self.model.clone(),
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            stop_reason: self.stop_reason.clone(),
+            tool_calls: self.tool_calls.clone(),
+            snapshot_id: self.snapshot_id.clone(),
+        }
+    }
 }

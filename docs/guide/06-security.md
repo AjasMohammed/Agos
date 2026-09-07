@@ -27,7 +27,7 @@ The secrets vault is the most sensitive subsystem. It ensures API keys, tokens, 
 ### How Secrets Are Stored
 
 ```
-User enters secret → agentctl transmits over Unix domain socket
+User enters secret → agentos transmits over Unix domain socket
     → SecretsVault encrypts with AES-256-GCM
     → Master key derived from passphrase via Argon2id
     → Encrypted blob stored in vault DB (SQLite)
@@ -54,9 +54,9 @@ Secrets can be scoped to control who can use them:
 | `tool:<name>`  | Only the specified tool can use this secret     |
 
 ```bash
-agentctl secret set OPENAI_API_KEY                          # global scope
-agentctl secret set SLACK_TOKEN --scope agent:notifier      # agent-scoped
-agentctl secret set DB_PASSWORD --scope tool:database-query # tool-scoped
+agentos secret set OPENAI_API_KEY                          # global scope
+agentos secret set SLACK_TOKEN --scope agent:notifier      # agent-scoped
+agentos secret set DB_PASSWORD --scope tool:database-query # tool-scoped
 ```
 
 ---
@@ -127,8 +127,8 @@ Where operations are:
 By default, a newly connected agent has **no permissions**. Every permission must be explicitly granted:
 
 ```bash
-agentctl perm grant analyst fs.user_data:r    # can now read files
-agentctl perm grant analyst memory.semantic:rw # can read and write memory
+agentos perm grant analyst fs.user_data:r    # can now read files
+agentos perm grant analyst memory.semantic:rw # can read and write memory
 ```
 
 ### Time-Limited Permissions
@@ -136,7 +136,7 @@ agentctl perm grant analyst memory.semantic:rw # can read and write memory
 Permissions can auto-expire:
 
 ```bash
-agentctl perm grant analyst fs.system_logs:r --expires 2h
+agentos perm grant analyst fs.system_logs:r --expires 2h
 ```
 
 ### Permission Profiles
@@ -144,11 +144,11 @@ agentctl perm grant analyst fs.system_logs:r --expires 2h
 Reusable sets of permissions for common agent roles:
 
 ```bash
-agentctl perm profile create ops-agent \
+agentos perm profile create ops-agent \
   --description "Standard permissions for operational agents" \
   --permissions "network.logs:r,process.list:r,fs.app_logs:r"
 
-agentctl perm profile assign analyst ops-agent
+agentos perm profile assign analyst ops-agent
 ```
 
 ### Roles (RBAC)
@@ -156,11 +156,11 @@ agentctl perm profile assign analyst ops-agent
 Roles provide persistent, named permission sets that survive kernel restarts:
 
 ```bash
-agentctl role create analyst-role \
+agentos role create analyst-role \
   --description "Analyst agent role" \
   --permissions "fs.user_data:r,memory.semantic:rw"
 
-agentctl role assign analyst analyst-role
+agentos role assign analyst analyst-role
 ```
 
 ---
@@ -206,7 +206,7 @@ Every significant action in AgentOS is recorded in an append-only audit log:
 ### Viewing Audit Logs
 
 ```bash
-agentctl audit logs --last 100
+agentos audit logs --last 100
 ```
 
 The audit log is an append-only SQLite database. Only the kernel can write to it — no tool, agent, or external process can modify or delete entries.

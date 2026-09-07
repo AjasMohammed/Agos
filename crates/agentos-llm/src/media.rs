@@ -244,34 +244,96 @@ fn validate_base64_source(mime: &str, data: &str) -> Result<(String, String), Ag
     Ok((confirmed.to_string(), data.trim().to_string()))
 }
 
-async fn fetch_url_async(
+/// Shared HTTP client for image fetches with redirects DISABLED. We follow
+/// redirects manually so that `check_host_ssrf` runs on every hop — reqwest's
+/// default auto-follow would let a public URL 30x-redirect to an internal
+/// address (e.g. 169.254.169.254 cloud metadata) after the initial host passed
+/// the SSRF check.
+static IMAGE_FETCH_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn image_fetch_client() -> &'static reqwest::Client {
+    IMAGE_FETCH_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// Max redirect hops to follow when fetching an image URL.
+const MAX_IMAGE_REDIRECTS: usize = 5;
+
+/// Follow redirects manually, running `check_host_ssrf` on every hop, and
+/// return the first non-redirect response. `current` is updated in place to the
+/// final URL so the caller can use it for MIME sniffing.
+async fn loop_with_ssrf_checks(
     client: &reqwest::Client,
+    current: &mut url::Url,
+) -> Result<reqwest::Response, AgentOSError> {
+    for _hop in 0..=MAX_IMAGE_REDIRECTS {
+        match current.scheme() {
+            "http" | "https" => {}
+            s => {
+                return Err(AgentOSError::SchemaValidation(format!(
+                    "unsupported image URL scheme: {s}"
+                )))
+            }
+        }
+        let host = current
+            .host_str()
+            .ok_or_else(|| AgentOSError::SchemaValidation("image URL missing host".into()))?
+            .to_string();
+        check_host_ssrf(&host)?;
+
+        let resp =
+            client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(|e| AgentOSError::LLMError {
+                    provider: "image-fetch".into(),
+                    reason: format!("failed to fetch image URL: {e}"),
+                })?;
+
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| AgentOSError::LLMError {
+                    provider: "image-fetch".into(),
+                    reason: "redirect response missing Location header".into(),
+                })?;
+            // Resolve relative redirects against the current URL.
+            let next = current.join(location).map_err(|e| {
+                AgentOSError::SchemaValidation(format!("invalid redirect URL: {e}"))
+            })?;
+            *current = next;
+            continue;
+        }
+        return Ok(resp);
+    }
+    Err(AgentOSError::LLMError {
+        provider: "image-fetch".into(),
+        reason: format!("too many redirects (limit: {MAX_IMAGE_REDIRECTS})"),
+    })
+}
+
+async fn fetch_url_async(
+    _client: &reqwest::Client,
     url: &str,
     declared_mime: &str,
 ) -> Result<(String, String), AgentOSError> {
-    let parsed = url::Url::parse(url)
+    let client = image_fetch_client();
+    let mut current = url::Url::parse(url)
         .map_err(|e| AgentOSError::SchemaValidation(format!("invalid image URL: {e}")))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        s => {
-            return Err(AgentOSError::SchemaValidation(format!(
-                "unsupported image URL scheme: {s}"
-            )))
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AgentOSError::SchemaValidation("image URL missing host".into()))?;
-    check_host_ssrf(host)?;
 
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AgentOSError::LLMError {
-            provider: "image-fetch".into(),
-            reason: format!("failed to fetch image URL: {e}"),
-        })?;
+    // Manual redirect loop: validate the host of EVERY hop before connecting.
+    let resp = loop_with_ssrf_checks(client, &mut current).await?;
+
+    let url = current.as_str().to_string();
+    let url = url.as_str();
     if !resp.status().is_success() {
         return Err(AgentOSError::LLMError {
             provider: "image-fetch".into(),

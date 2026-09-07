@@ -3,6 +3,7 @@ use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
 use agentos_types::*;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Built-in delivery adapter kinds accepted as `notify-user` channel selectors.
@@ -80,13 +81,15 @@ pub(crate) enum KernelAction {
     },
     /// Update the agent's self-curated context memory document.
     ContextMemoryUpdate {
-        agent_id: String,
         content: String,
         reason: Option<String>,
     },
     /// Read the agent's current context memory document.
-    ContextMemoryRead {
-        agent_id: String,
+    ContextMemoryRead,
+    /// Full-text search over the agent's own past chat sessions.
+    ChatSearch {
+        query: String,
+        limit: usize,
     },
     /// Spawn a sub-agent task scoped to the current task's capabilities.
     SpawnAgent {
@@ -174,6 +177,15 @@ pub(crate) enum KernelAction {
         limit: u32,
         state_filter: Option<String>,
     },
+    /// List the calling agent's own schedules (cron / once / timer).
+    ListMySchedules {
+        kinds: Vec<String>,
+        include_inactive: bool,
+    },
+    /// Fetch the recorded output + audit logs for one scheduled run.
+    GetTaskLogs {
+        run_id: String,
+    },
     /// Create a recurring cron schedule.
     CreateSchedule {
         name: String,
@@ -199,9 +211,18 @@ pub(crate) enum KernelAction {
         /// Display name (e.g. "telegram-main") or `ChannelInstanceID` UUID.
         channel: String,
         /// Message body. Markdown is rendered per-platform when supported.
+        /// May be empty when an `attachment` is present.
         text: String,
         /// Optional thread/reply target (platform-specific).
         thread_id: Option<String>,
+        /// Optional media attachment (image/document by URL).
+        attachment: Option<MessageAttachment>,
+        /// Stored file id to resolve to bytes and upload directly (Telegram
+        /// multipart). Mutually exclusive with a URL `attachment`.
+        file_id: Option<String>,
+        /// Caption/filename applied to the resolved `file_id` attachment.
+        caption: Option<String>,
+        filename: Option<String>,
     },
     AgentInboxList {
         limit: u32,
@@ -248,6 +269,57 @@ pub(crate) struct KernelActionResult {
 }
 
 impl KernelAction {
+    /// Stable snake_case name of the action (audit + error messages).
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            KernelAction::DelegateTask { .. } => "delegate_task",
+            KernelAction::SendAgentMessage { .. } => "send_agent_message",
+            KernelAction::EscalateToHuman { .. } => "escalate",
+            KernelAction::SwitchPartition { .. } => "switch_partition",
+            KernelAction::MemoryBlockWrite { .. } => "memory_block_write",
+            KernelAction::MemoryBlockRead { .. } => "memory_block_read",
+            KernelAction::MemoryBlockList => "memory_block_list",
+            KernelAction::MemoryBlockDelete { .. } => "memory_block_delete",
+            KernelAction::NotifyUser { .. } => "notify_user",
+            KernelAction::AskUser { .. } => "ask_user",
+            KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
+            KernelAction::ContextMemoryUpdate { .. } => "context_memory_update",
+            KernelAction::ContextMemoryRead => "context_memory_read",
+            KernelAction::ChatSearch { .. } => "chat_search",
+            KernelAction::SpawnAgent { .. } => "spawn_agent",
+            KernelAction::AwaitAgents { .. } => "await_agents",
+            KernelAction::PollAgents { .. } => "poll_agents",
+            KernelAction::CancelAgent { .. } => "cancel_agent",
+            KernelAction::SpawnAsync { .. } => "spawn_async",
+            KernelAction::A2ADelegate { .. } => "a2a_delegate",
+            KernelAction::EventSubscribeAction { .. } => "event_subscribe",
+            KernelAction::EventUnsubscribeAction { .. } => "event_unsubscribe",
+            KernelAction::EventListSubscriptionsAction => "event_list_subscriptions",
+            KernelAction::EventListAvailableAction => "event_list_available",
+            KernelAction::SetTimer { .. } => "set_timer",
+            KernelAction::CancelTimer { .. } => "cancel_timer",
+            KernelAction::ListTimers => "list_timers",
+            KernelAction::ScheduleOnce { action, .. } => match action {
+                agentos_types::schedule::OnceJobAction::RunTask { .. } => "schedule_once:task",
+                agentos_types::schedule::OnceJobAction::NotifyUser { .. } => "schedule_once:notify",
+                agentos_types::schedule::OnceJobAction::RunTool { .. } => "schedule_once:tool",
+            },
+            KernelAction::CancelOnceJob { .. } => "cancel_once_job",
+            KernelAction::ListOnceJobs => "list_once_jobs",
+            KernelAction::GetScheduleRuns { .. } => "get_schedule_runs",
+            KernelAction::ListMySchedules { .. } => "list_my_schedules",
+            KernelAction::GetTaskLogs { .. } => "get_task_logs",
+            KernelAction::CreateSchedule { .. } => "create_schedule",
+            KernelAction::ControlSchedule { .. } => "control_schedule",
+            KernelAction::ChannelSend { .. } => "channel_send",
+            KernelAction::AgentInboxList { .. } => "agent_inbox_list",
+            KernelAction::AgentInboxRead { .. } => "agent_inbox_read",
+            KernelAction::AgentInboxDismiss { .. } => "agent_inbox_dismiss",
+            KernelAction::AgentMessagesList { .. } => "agent_messages_list",
+            KernelAction::AgentMessagesRead { .. } => "agent_messages_read",
+            KernelAction::AgentMessagesDismiss { .. } => "agent_messages_dismiss",
+        }
+    }
     /// Try to parse a kernel action from a tool result.
     /// Returns `None` if the result does not contain a `_kernel_action` field.
     pub fn from_tool_result(value: &serde_json::Value) -> Option<Self> {
@@ -405,9 +477,78 @@ impl KernelAction {
             }
             "channel_send" => {
                 let channel = value.get("channel")?.as_str()?;
-                let text = value.get("text")?.as_str()?;
-                if channel.trim().is_empty() || text.is_empty() {
-                    tracing::warn!("Dropping channel_send: channel/text must be non-empty");
+                let text = value
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let str_field = |key: &str| {
+                    value
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                };
+                let image_url = str_field("image_url");
+                let document_url = str_field("document_url");
+                let file_id = str_field("file_id");
+                let caption = str_field("caption");
+                let filename = str_field("filename");
+                // Album of image URLs (Telegram sendMediaGroup): 2–10 items.
+                let image_urls: Vec<String> = value["image_urls"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Build the URL attachment. Priority: image album → image → document.
+                // A `file_id` is resolved to bytes later in execute_channel_send.
+                let attachment = if image_urls.len() > 1 {
+                    let mut it = image_urls.into_iter();
+                    let first = it.next().unwrap();
+                    Some(MessageAttachment {
+                        url: first,
+                        kind: AttachmentKind::Image,
+                        filename: filename.clone(),
+                        caption: caption.clone(),
+                        inline: None,
+                        group_urls: it.collect(),
+                    })
+                } else {
+                    match (
+                        image_url.or_else(|| image_urls.into_iter().next()),
+                        document_url,
+                    ) {
+                        (Some(url), _) => Some(MessageAttachment {
+                            url,
+                            kind: AttachmentKind::Image,
+                            filename: filename.clone(),
+                            caption: caption.clone(),
+                            inline: None,
+                            group_urls: Vec::new(),
+                        }),
+                        (None, Some(url)) => Some(MessageAttachment {
+                            url,
+                            kind: AttachmentKind::Document,
+                            filename: filename.clone(),
+                            caption: caption.clone(),
+                            inline: None,
+                            group_urls: Vec::new(),
+                        }),
+                        (None, None) => None,
+                    }
+                };
+
+                if channel.trim().is_empty()
+                    || (text.is_empty() && attachment.is_none() && file_id.is_none())
+                {
+                    tracing::warn!(
+                        "Dropping channel_send: channel must be non-empty and a message needs text, an attachment, or a file_id"
+                    );
                     return None;
                 }
                 let thread_id = value
@@ -419,6 +560,10 @@ impl KernelAction {
                     channel: channel.to_string(),
                     text: text.to_string(),
                     thread_id,
+                    attachment,
+                    file_id,
+                    caption,
+                    filename,
                 })
             }
             "ask_user" => {
@@ -464,21 +609,25 @@ impl KernelAction {
                 })
             }
             "context_memory_update" => {
-                let agent_id = value.get("agent_id")?.as_str()?.to_string();
+                // No `agent_id`: these act on the calling agent, resolved from
+                // `task.agent_id` at dispatch. Parsing one from the envelope
+                // would make it look authoritative when it is not.
                 let content = value.get("content")?.as_str()?.to_string();
                 let reason = value
                     .get("reason")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                Some(Self::ContextMemoryUpdate {
-                    agent_id,
-                    content,
-                    reason,
-                })
+                Some(Self::ContextMemoryUpdate { content, reason })
             }
-            "context_memory_read" => {
-                let agent_id = value.get("agent_id")?.as_str()?.to_string();
-                Some(Self::ContextMemoryRead { agent_id })
+            "context_memory_read" => Some(Self::ContextMemoryRead),
+            "chat_search" => {
+                let query = value.get("query")?.as_str()?.to_string();
+                let limit = value
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10)
+                    .clamp(1, 50) as usize;
+                Some(Self::ChatSearch { query, limit })
             }
             "spawn_agent" => {
                 let agent = value.get("agent")?.as_str()?.to_string();
@@ -703,6 +852,29 @@ impl KernelAction {
                     state_filter,
                 })
             }
+            "list_my_schedules" => {
+                let kinds = value
+                    .get("kinds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let include_inactive = value
+                    .get("include_inactive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Some(Self::ListMySchedules {
+                    kinds,
+                    include_inactive,
+                })
+            }
+            "get_task_logs" => {
+                let run_id = value.get("run_id")?.as_str()?.to_string();
+                Some(Self::GetTaskLogs { run_id })
+            }
             "create_schedule" => {
                 let name = value.get("name")?.as_str()?.to_string();
                 let cron = value.get("cron")?.as_str()?.to_string();
@@ -769,51 +941,7 @@ impl Kernel {
         action: KernelAction,
         trace_id: TraceID,
     ) -> KernelActionResult {
-        let action_name = match &action {
-            KernelAction::DelegateTask { .. } => "delegate_task",
-            KernelAction::SendAgentMessage { .. } => "send_agent_message",
-            KernelAction::EscalateToHuman { .. } => "escalate",
-            KernelAction::SwitchPartition { .. } => "switch_partition",
-            KernelAction::MemoryBlockWrite { .. } => "memory_block_write",
-            KernelAction::MemoryBlockRead { .. } => "memory_block_read",
-            KernelAction::MemoryBlockList => "memory_block_list",
-            KernelAction::MemoryBlockDelete { .. } => "memory_block_delete",
-            KernelAction::NotifyUser { .. } => "notify_user",
-            KernelAction::AskUser { .. } => "ask_user",
-            KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
-            KernelAction::ContextMemoryUpdate { .. } => "context_memory_update",
-            KernelAction::ContextMemoryRead { .. } => "context_memory_read",
-            KernelAction::SpawnAgent { .. } => "spawn_agent",
-            KernelAction::AwaitAgents { .. } => "await_agents",
-            KernelAction::PollAgents { .. } => "poll_agents",
-            KernelAction::CancelAgent { .. } => "cancel_agent",
-            KernelAction::SpawnAsync { .. } => "spawn_async",
-            KernelAction::A2ADelegate { .. } => "a2a_delegate",
-            KernelAction::EventSubscribeAction { .. } => "event_subscribe",
-            KernelAction::EventUnsubscribeAction { .. } => "event_unsubscribe",
-            KernelAction::EventListSubscriptionsAction => "event_list_subscriptions",
-            KernelAction::EventListAvailableAction => "event_list_available",
-            KernelAction::SetTimer { .. } => "set_timer",
-            KernelAction::CancelTimer { .. } => "cancel_timer",
-            KernelAction::ListTimers => "list_timers",
-            KernelAction::ScheduleOnce { action, .. } => match action {
-                agentos_types::schedule::OnceJobAction::RunTask { .. } => "schedule_once:task",
-                agentos_types::schedule::OnceJobAction::NotifyUser { .. } => "schedule_once:notify",
-                agentos_types::schedule::OnceJobAction::RunTool { .. } => "schedule_once:tool",
-            },
-            KernelAction::CancelOnceJob { .. } => "cancel_once_job",
-            KernelAction::ListOnceJobs => "list_once_jobs",
-            KernelAction::GetScheduleRuns { .. } => "get_schedule_runs",
-            KernelAction::CreateSchedule { .. } => "create_schedule",
-            KernelAction::ControlSchedule { .. } => "control_schedule",
-            KernelAction::ChannelSend { .. } => "channel_send",
-            KernelAction::AgentInboxList { .. } => "agent_inbox_list",
-            KernelAction::AgentInboxRead { .. } => "agent_inbox_read",
-            KernelAction::AgentInboxDismiss { .. } => "agent_inbox_dismiss",
-            KernelAction::AgentMessagesList { .. } => "agent_messages_list",
-            KernelAction::AgentMessagesRead { .. } => "agent_messages_read",
-            KernelAction::AgentMessagesDismiss { .. } => "agent_messages_dismiss",
-        };
+        let action_name = action.name();
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -928,11 +1056,12 @@ impl Kernel {
                 self.execute_agent_rpc_call(task, &target_agent, &prompt, timeout_secs, trace_id)
                     .await
             }
-            KernelAction::ContextMemoryUpdate {
-                agent_id,
-                content,
-                reason,
-            } => {
+            KernelAction::ContextMemoryUpdate { content, reason } => {
+                // Bound to the kernel's own identity for this call. Taking the
+                // target from the tool-result envelope would let any tool that
+                // can be induced to echo attacker-shaped JSON rewrite ANOTHER
+                // agent's standing prompt.
+                let agent_id = task.agent_id.to_string();
                 // Injection scanning (spec §9)
                 let scan = self.injection_scanner.scan(&content);
                 if scan.max_threat == Some(crate::injection_scanner::ThreatLevel::High) {
@@ -1005,7 +1134,9 @@ impl Kernel {
                     },
                 }
             }
-            KernelAction::ContextMemoryRead { agent_id } => {
+            KernelAction::ContextMemoryRead => {
+                // Read own document only — see `ContextMemoryUpdate` above.
+                let agent_id = task.agent_id.to_string();
                 match self.context_memory_store.read(&agent_id).await {
                     Ok(Some(entry)) => KernelActionResult {
                         success: true,
@@ -1030,6 +1161,45 @@ impl Kernel {
                         result: serde_json::json!({
                             "error": e.to_string(),
                         }),
+                    },
+                }
+            }
+            KernelAction::ChatSearch { query, limit } => {
+                // Scope to the calling agent's own sessions, resolved from the
+                // kernel's own identity for this call — see the note on
+                // `ContextMemoryUpdate`.
+                let agent_name = {
+                    let registry = self.agent_registry.read().await;
+                    registry.get_by_id(&task.agent_id).map(|p| p.name.clone())
+                };
+                let Some(agent_name) = agent_name else {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": "chat-search: calling agent is not registered",
+                        }),
+                    };
+                };
+                let store = Arc::clone(&self.chat_store);
+                let hits = tokio::task::spawn_blocking(move || {
+                    store.search(&query, Some(&agent_name), limit)
+                })
+                .await;
+                match hits {
+                    Ok(Ok(hits)) => KernelActionResult {
+                        success: true,
+                        result: serde_json::json!({
+                            "count": hits.len(),
+                            "results": hits,
+                        }),
+                    },
+                    Ok(Err(e)) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": e.to_string() }),
+                    },
+                    Err(e) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": format!("chat-search task failed: {e}") }),
                     },
                 }
             }
@@ -1444,6 +1614,14 @@ impl Kernel {
                 self.execute_get_schedule_runs(task, schedule_id, limit, state_filter)
                     .await
             }
+            KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            } => {
+                self.execute_list_my_schedules(task, kinds, include_inactive)
+                    .await
+            }
+            KernelAction::GetTaskLogs { run_id } => self.execute_get_task_logs(task, run_id).await,
             KernelAction::CreateSchedule {
                 name,
                 cron,
@@ -1478,9 +1656,16 @@ impl Kernel {
                 channel,
                 text,
                 thread_id,
+                attachment,
+                file_id,
+                caption,
+                filename,
             } => {
-                self.execute_channel_send(task, channel, text, thread_id, trace_id)
-                    .await
+                self.execute_channel_send(
+                    task, channel, text, thread_id, attachment, file_id, caption, filename,
+                    trace_id,
+                )
+                .await
             }
         };
 
@@ -2267,6 +2452,7 @@ impl Kernel {
             read: false,
             thread_id: Some(task.id.to_string()),
             reply_to_external_id: None,
+            attachment: None,
         };
 
         let notification_id = msg.id;
@@ -2350,78 +2536,8 @@ impl Kernel {
             };
         }
 
-        let priority_parsed = parse_priority(&priority);
-        // Clamp to the range declared in the TOML manifest (10 s – 24 h).
-        let timeout_secs = timeout_secs.clamp(10, 86_400);
-        let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
-
-        let agent_name = {
-            let reg = self.agent_registry.read().await;
-            reg.get_by_id(&task.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| task.agent_id.to_string())
-        };
-        let subject_prefixed = format!("[{agent_name}] {}", question.as_str());
-        let subject_line: String = subject_prefixed.chars().take(80).collect();
-        let body_prefixed = format!("{agent_name} asks:\n\n{question}");
-
-        let msg = UserMessage {
-            id: NotificationID::new(),
-            from: NotificationSource::Agent(task.agent_id),
-            task_id: Some(task.id),
-            trace_id,
-            kind: UserMessageKind::Question {
-                question: question.clone(),
-                options,
-                free_text_allowed: true,
-            },
-            priority: priority_parsed,
-            subject: subject_line,
-            body: body_prefixed,
-            interaction: Some(InteractionRequest {
-                blocking: true,
-                timeout_secs,
-                auto_action: auto_action.clone(),
-                // max_concurrent enforcement is deferred; use the default of 3.
-                max_concurrent: 3,
-            }),
-            delivery_status: HashMap::new(),
-            response: None,
-            created_at: Utc::now(),
-            expires_at: Some(expires_at),
-            read: false,
-            thread_id: Some(task.id.to_string()),
-            reply_to_external_id: None,
-        };
-
-        let notification_id = msg.id;
-
-        // Deliver and obtain the blocking receiver.
-        let rx = match self.notification_router.deliver(msg).await {
-            Ok(Some(rx)) => rx,
-            Ok(None) => {
-                // Should not happen since blocking=true always produces a receiver.
-                tracing::error!(
-                    task_id = %task.id,
-                    "ask-user: blocking delivery returned no receiver"
-                );
-                return KernelActionResult {
-                    success: false,
-                    result: serde_json::json!({
-                        "error": "Internal error: blocking notification returned no receiver"
-                    }),
-                };
-            }
-            Err(e) => {
-                return KernelActionResult {
-                    success: false,
-                    result: serde_json::json!({ "error": e.to_string() }),
-                };
-            }
-        };
-
-        // Set task to Waiting so the running_count drops and new tasks can be
-        // scheduled while this one is parked.
+        // Park the task while the user is asked; the shared helper only knows
+        // about notifications, so the scheduler transition lives here.
         if let Err(e) = self
             .scheduler
             .update_state(&task.id, TaskState::Waiting)
@@ -2433,72 +2549,27 @@ impl Kernel {
                 "ask-user: failed to set task state to Waiting"
             );
         }
-
-        tracing::info!(
-            task_id = %task.id,
-            notification_id = %notification_id,
-            timeout_secs,
-            "ask-user: task parked, awaiting user response"
-        );
-
-        // Await user response with a generous safety timeout (sweep fires at most
-        // 10 minutes after expiry, so we add a 600 s buffer above timeout_secs).
-        let safety_timeout = Duration::from_secs(timeout_secs.saturating_add(600));
-        let response = tokio::select! {
-            result = tokio::time::timeout(safety_timeout, rx) => {
-                match result {
-                    Ok(Ok(resp)) => resp,
-                    Ok(Err(_recv_err)) => {
-                        // Oneshot sender was dropped (sweep fired and removed the entry).
-                        // Clean up in case there is a stale entry still in the map.
-                        self.notification_router
-                            .remove_waiting_task(&notification_id)
-                            .await;
-                        UserResponse {
-                            text: auto_action.clone(),
-                            responded_at: Utc::now(),
-                            channel: DeliveryChannel::cli(),
-                        }
-                    }
-                    Err(_timeout) => {
-                        // Safety timeout fired before sweep — remove the dead sender now
-                        // so it doesn't linger in waiting_tasks until the next sweep cycle.
-                        self.notification_router
-                            .remove_waiting_task(&notification_id)
-                            .await;
-                        tracing::warn!(
-                            task_id = %task.id,
-                            notification_id = %notification_id,
-                            "ask-user: safety timeout fired; returning auto_action"
-                        );
-                        UserResponse {
-                            text: auto_action.clone(),
-                            responded_at: Utc::now(),
-                            channel: DeliveryChannel::cli(),
-                        }
-                    }
-                }
-            }
-            _ = self.cancellation_token.cancelled() => {
-                // Kernel shutting down — clean up the dead sender.
-                self.notification_router
-                    .remove_waiting_task(&notification_id)
-                    .await;
-                tracing::info!(
-                    task_id = %task.id,
-                    "ask-user: kernel shutting down while waiting for user response"
-                );
-                UserResponse {
-                    text: "kernel_shutdown".to_string(),
-                    responded_at: Utc::now(),
-                    channel: DeliveryChannel::cli(),
-                }
-            }
+        let (notification_id, response) = match ask_user_blocking(
+            &self.notification_router,
+            &self.agent_registry,
+            &self.cancellation_token,
+            task.agent_id,
+            task.id,
+            trace_id,
+            AskUserArgs {
+                question,
+                options,
+                timeout_secs,
+                priority,
+                auto_action: auto_action.clone(),
+            },
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(failed) => return failed,
         };
 
-        // Restore task to Running — only if it hasn't been cancelled/failed while
-        // parked. A terminal state (Cancelled/Failed/Complete) means the operator
-        // explicitly stopped the task; we must not override that decision.
         let restored = self
             .scheduler
             .update_state_if_not_terminal(&task.id, TaskState::Running)
@@ -2594,33 +2665,29 @@ impl Kernel {
             };
         }
 
-        // 2. Compute child permissions (intersection of parent + target)
-        let child_permissions = task.capability_token.permissions.clone();
-        let mut effective_permissions = child_permissions.intersect(&target_permissions);
-        if task.autonomous {
-            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
-        }
-
-        // 3. Issue capability token for child task
-        let child_task_id = TaskID::new();
-        let child_token = match self.capability_engine.issue_token(
-            child_task_id,
-            target.id,
-            task.capability_token.allowed_tools.clone(),
-            task.capability_token.allowed_intents.clone(),
-            effective_permissions,
-            Duration::from_secs(timeout_secs),
-        ) {
-            Ok(token) => token,
+        // 2-3. Scope the child via the shared hardened path: depth cap, pure
+        //      parent∩target intersection (no process.exec re-grant), parent-token
+        //      signature/expiry verification, fresh child TaskID.
+        let (child_token, child_depth) = match self
+            .scope_child_task(
+                task,
+                target.id,
+                &target_permissions,
+                Duration::from_secs(timeout_secs),
+            )
+            .await
+        {
+            Ok(scoped) => scoped,
             Err(e) => {
                 return KernelActionResult {
                     success: false,
                     result: serde_json::json!({
-                        "error": format!("Failed to issue capability token: {}", e)
+                        "error": format!("Failed to scope child capabilities: {}", e)
                     }),
                 };
             }
         };
+        let child_task_id = child_token.task_id;
 
         // 4. Register the RPC call in the manager (get oneshot receiver)
         let rx = match self
@@ -2654,17 +2721,24 @@ impl Kernel {
             reasoning_hints: Some(crate::commands::task::infer_reasoning_hints(prompt)),
             max_iterations: None,
             trigger_source: None,
-            autonomous: task.autonomous,
-            parent_task_id: None,
-            spawn_depth: 0,
+            // Children are always bounded — never inherit parent autonomy.
+            autonomous: false,
+            parent_task_id: Some(task.id),
+            spawn_depth: child_depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
-            spawner_agent_id: None,
-            tool_categories: None,
+            spawner_agent_id: Some(task.agent_id),
+            tool_categories: task.tool_categories.clone(),
+            disable_tool_scoping: false,
+            // Inherit the caller's causal depth so an event-triggered agent-RPC
+            // chain still trips `max_chain_depth`.
+            chain_depth: task.event_chain_depth(),
         };
 
         self.scheduler.register_external(child_task.clone()).await;
+        // Register for cascade-cancel bookkeeping (parent → child edge).
+        self.scheduler.register_child(task.id, child_task_id).await;
         self.scheduler
             .update_state_if_not_terminal(&child_task_id, TaskState::Running)
             .await
@@ -2916,8 +2990,13 @@ impl Kernel {
             };
         }
 
+        // Fail closed: an unspecified throttle gets the same bounded default
+        // as kernel-seeded role subscriptions. The 2026-08-31 budget-loop
+        // incident ran on an agent-created Category sub stored with
+        // `throttle: None`. Explicit "none" remains an auditable opt-out.
         let throttle_policy = match throttle.as_deref() {
-            None | Some("") | Some("none") => ThrottlePolicy::None,
+            None | Some("") => crate::event_bus::default_role_subscription_throttle(),
+            Some("none") => ThrottlePolicy::None,
             Some(s) => match parse_throttle_str(s) {
                 Some(p) => p,
                 None => {
@@ -3751,8 +3830,26 @@ impl Kernel {
             }
         };
 
-        let filtered: Vec<&agentos_types::schedule::ScheduledRun> = match state_filter.as_deref() {
-            Some(s) => runs.iter().filter(|r| r.state.as_str() == s).collect(),
+        // Validate the optional state filter up front so a bad value fails
+        // loudly instead of silently returning an empty list. Accept any case.
+        let state_filter = match state_filter {
+            Some(s) => match agentos_types::schedule::RunState::parse(&s.to_ascii_lowercase()) {
+                Some(rs) => Some(rs),
+                None => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Invalid state filter '{}'. Valid values: running, complete, failed, missed.", s),
+                            "error_kind": "invalid_input",
+                        }),
+                    };
+                }
+            },
+            None => None,
+        };
+
+        let filtered: Vec<&agentos_types::schedule::ScheduledRun> = match state_filter {
+            Some(rs) => runs.iter().filter(|r| r.state == rs).collect(),
             None => runs.iter().collect(),
         };
 
@@ -3779,6 +3876,226 @@ impl Kernel {
                 "runs": out,
                 "count": out.len(),
                 "schedule_id": schedule_id.to_string(),
+            }),
+        }
+    }
+
+    /// List the calling agent's own schedules across all three kinds
+    /// (cron / once / timer). Only schedules whose `creator_agent_id` matches
+    /// the caller are returned — operator/CLI-created schedules (creator `None`)
+    /// are never visible to agents. `kinds` optionally narrows by kind; an
+    /// empty list means all. `include_inactive` adds paused/disabled cron jobs
+    /// and fired/cancelled once-jobs (default: active only).
+    async fn execute_list_my_schedules(
+        &self,
+        task: &AgentTask,
+        kinds: Vec<String>,
+        include_inactive: bool,
+    ) -> KernelActionResult {
+        let me = task.agent_id;
+        let want = |k: &str| kinds.is_empty() || kinds.iter().any(|x| x == k);
+        let owned = |c: &Option<AgentID>| *c == Some(me);
+        let mut out: Vec<serde_json::Value> = Vec::new();
+
+        // Cron schedules
+        if want("cron") || want("schedule") {
+            for job in self.schedule_manager.list_jobs().await {
+                if !owned(&job.creator_agent_id) {
+                    continue;
+                }
+                let active = job.state == agentos_types::schedule::ScheduleState::Active;
+                if !active && !include_inactive {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": job.id.to_string(),
+                    "name": job.name,
+                    "kind": "cron",
+                    "schedule": job.cron_expression,
+                    "timezone": job.timezone,
+                    "state": serde_json::to_value(job.state).unwrap_or(serde_json::Value::Null),
+                    "next_run_at": job.next_run_at.map(|t| t.to_rfc3339()),
+                    "last_run_at": job.last_run_at.map(|t| t.to_rfc3339()),
+                    "run_count": job.run_count,
+                    "delivery": serde_json::to_value(&job.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // One-shot jobs
+        if want("once") {
+            for job in self.schedule_manager.list_once_jobs().await {
+                if !owned(&job.creator_agent_id) {
+                    continue;
+                }
+                let active = job.state == agentos_types::schedule::OnceJobState::Pending;
+                if !active && !include_inactive {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": job.id.to_string(),
+                    "name": job.name,
+                    "kind": "once",
+                    "fire_at": job.fire_at.to_rfc3339(),
+                    "state": serde_json::to_value(job.state).unwrap_or(serde_json::Value::Null),
+                    "delivery": serde_json::to_value(&job.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // Timers (always pending while listed)
+        if want("timer") {
+            for timer in self.schedule_manager.list_timers().await {
+                if !owned(&timer.creator_agent_id) {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": timer.id.to_string(),
+                    "name": timer.name,
+                    "kind": "timer",
+                    "fire_at": timer.fire_at.to_rfc3339(),
+                    "state": "pending",
+                    "delivery": serde_json::to_value(&timer.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // Cap the response so a prolific agent's schedule list cannot exhaust
+        // the context window on a single tool result.
+        const MAX_SCHEDULES: usize = 200;
+        let total = out.len();
+        let truncated = total > MAX_SCHEDULES;
+        out.truncate(MAX_SCHEDULES);
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "schedules": out,
+                "count": out.len(),
+                "total": total,
+                "truncated": truncated,
+            }),
+        }
+    }
+
+    /// Fetch the recorded outcome plus audit-log trail for a single scheduled
+    /// run, identified by its `RunID`. Ownership is enforced via the run's
+    /// denormalised `creator_agent_id`: an agent may only inspect runs of its
+    /// own schedules.
+    async fn execute_get_task_logs(
+        &self,
+        task: &AgentTask,
+        run_id_str: String,
+    ) -> KernelActionResult {
+        let run_id = match run_id_str.parse::<RunID>() {
+            Ok(id) => id,
+            Err(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("'{}' is not a valid run_id (expected a UUID)", run_id_str),
+                        "error_kind": "invalid_input",
+                    }),
+                };
+            }
+        };
+
+        let store = match self.schedule_manager.store() {
+            Some(s) => s.clone(),
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": "Run-history store not configured on this kernel",
+                        "error_kind": "unavailable",
+                    }),
+                };
+            }
+        };
+
+        let run = match store.get_run(run_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Run '{}' not found", run_id_str),
+                        "error_kind": "not_found",
+                    }),
+                };
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "store_error",
+                    }),
+                };
+            }
+        };
+
+        // Ownership check: only the schedule's creator may read its run logs.
+        if run.creator_agent_id != Some(task.agent_id) {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!("Permission denied: run '{}' is not owned by the calling agent", run_id_str),
+                    "error_kind": "permission_denied",
+                }),
+            };
+        }
+
+        // Pull the audit-log trail for the backing task, if one was spawned.
+        // The audit query is a synchronous SQLite read, so run it off the async
+        // runtime via spawn_blocking (per the "never block the runtime" rule).
+        let logs: Vec<String> = match run.task_id {
+            Some(tid) => {
+                let audit = self.audit.clone();
+                tokio::task::spawn_blocking(move || {
+                    audit
+                        .query_since_for_task(&tid, 0, 500)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(|(_, e)| {
+                                    format!(
+                                        "[{}] {:?} {}",
+                                        e.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                                        e.event_type,
+                                        e.details
+                                    )
+                                })
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        // Direct notify/tool runs have no backing task, hence no audit trail.
+        let logs_note = if run.task_id.is_none() {
+            Some("No backing task for this run (direct notify/tool action) — no audit trail.")
+        } else {
+            None
+        };
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "run_id": run.run_id.to_string(),
+                "schedule_id": run.parent_id.to_string(),
+                "schedule_name": run.parent_name,
+                "state": run.state.as_str(),
+                "task_id": run.task_id.map(|t| t.to_string()),
+                "started_at": run.started_at.to_rfc3339(),
+                "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                "result": run.result,
+                "error": run.error,
+                "logs": logs,
+                "logs_note": logs_note,
             }),
         }
     }
@@ -4116,15 +4433,71 @@ impl Kernel {
     /// kind drives which transport handles the send. On miss, the error
     /// payload includes `available_channels` so the agent can self-correct
     /// in one shot.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_channel_send(
         &self,
         task: &AgentTask,
         channel: String,
         text: String,
         thread_id: Option<String>,
+        mut attachment: Option<MessageAttachment>,
+        file_id: Option<String>,
+        caption: Option<String>,
+        filename: Option<String>,
         trace_id: TraceID,
     ) -> KernelActionResult {
         use agentos_types::ChannelKind;
+
+        // Resolve a stored `file_id` to inline bytes via the image resolver
+        // (the web FileStore impl). Builds an inline attachment uploaded directly
+        // by the Telegram adapter. Errors are surfaced to the agent.
+        if let Some(fid) = file_id {
+            let resolver = self
+                .image_resolver
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let fid_for_blocking = fid.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let bytes = resolver.resolve_base64(&fid_for_blocking);
+                let name = resolver.resolve_filename(&fid_for_blocking);
+                (bytes, name)
+            })
+            .await;
+            match resolved {
+                Ok((Ok((mime, data_base64)), resolved_name)) => {
+                    let kind = if mime.starts_with("image/") {
+                        AttachmentKind::Image
+                    } else {
+                        AttachmentKind::Document
+                    };
+                    attachment = Some(MessageAttachment {
+                        url: String::new(),
+                        kind,
+                        filename: filename.or(resolved_name),
+                        caption,
+                        inline: Some(agentos_types::InlineAttachment { mime, data_base64 }),
+                        group_urls: Vec::new(),
+                    });
+                }
+                Ok((Err(e), _)) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Could not resolve file_id '{fid}': {e}"),
+                        }),
+                    };
+                }
+                Err(_) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("file_id '{fid}' resolution task failed"),
+                        }),
+                    };
+                }
+            }
+        }
 
         // Defense-in-depth permission check.
         if !task
@@ -4152,11 +4525,11 @@ impl Kernel {
                 }),
             };
         }
-        if text.is_empty() {
+        if text.is_empty() && attachment.is_none() {
             return KernelActionResult {
                 success: false,
                 result: serde_json::json!({
-                    "error": "channel-send 'text' must be non-empty"
+                    "error": "channel-send requires non-empty 'text' or an attachment"
                 }),
             };
         }
@@ -4242,56 +4615,91 @@ impl Kernel {
         let target_name = target.display_name.clone();
         let target_kind = target.kind.clone();
 
-        // Dispatch by kind. Notification-router-owned kinds wrap the text in a
-        // UserMessage and route via deliver_to_channel (single-target). The
-        // remaining kinds use the channel_manager outbound path.
-        let send_result: Result<(), AgentOSError> = match &target_kind {
-            ChannelKind::Telegram | ChannelKind::Ntfy | ChannelKind::Email => {
-                let agent_name = {
-                    let reg = self.agent_registry.read().await;
-                    reg.get_by_id(&task.agent_id)
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| task.agent_id.to_string())
-                };
-                let subject_line: String = format!("[{agent_name}]").chars().take(80).collect();
-                let msg = UserMessage {
-                    id: NotificationID::new(),
-                    from: NotificationSource::Agent(task.agent_id),
-                    task_id: Some(task.id),
-                    trace_id,
-                    kind: UserMessageKind::Notification,
-                    priority: NotificationPriority::Info,
-                    subject: subject_line,
-                    body: text.clone(),
-                    interaction: None,
-                    delivery_status: HashMap::new(),
-                    response: None,
-                    created_at: Utc::now(),
-                    expires_at: None,
-                    read: false,
-                    thread_id: thread_id.clone().or_else(|| Some(task.id.to_string())),
-                    reply_to_external_id: thread_id.clone(),
-                };
-                self.notification_router
-                    .deliver_to_channel(msg, &target_id.to_string())
-                    .await
-            }
-            _ => {
-                let outbound = agentos_channels::types::OutboundMessage {
-                    channel_instance_id: target_id.to_string(),
-                    content: agentos_channels::types::MessageContent::Text(text.clone()),
-                    thread_id: thread_id.clone(),
-                };
-                self.channel_manager
-                    .send(&target_id.to_string(), outbound)
-                    .await
-                    .map(|_| ())
-            }
+        let max_chars = match &target_kind {
+            ChannelKind::Discord => 2_000,
+            ChannelKind::Slack => 40_000,
+            ChannelKind::WhatsApp => 4_096,
+            ChannelKind::Telegram => 4_096,
+            ChannelKind::Ntfy => 4_096,
+            ChannelKind::Webhook => 100_000,
+            _ => 16_000,
         };
+        let send_text: String = text.chars().take(max_chars).collect();
+
+        // One outbound path for every kind: `send_to_channel` routes by where
+        // the instance is actually registered, not by a `ChannelKind` match.
+        // The old kind-dispatch called `deliver_to_channel`, which returns
+        // `Ok(())` when no adapter owns the instance — so a channel left
+        // `active: true` by a failed boot restore (e.g. an ntfy topic on
+        // `http://ntfy.local`, now rejected by the SSRF blocklist) reported
+        // "delivered" to the agent while nothing was ever sent.
+        let agent_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        };
+        // The delivery-stack adapters render "<subject>\n\n<body>"; the
+        // manager stack had no subject, so keep it empty there (`outbound_from`
+        // then emits the body alone) rather than restyling Discord/Slack.
+        let subject_line: String = match &target_kind {
+            ChannelKind::Telegram | ChannelKind::Ntfy | ChannelKind::Email => {
+                format!("[{agent_name}]").chars().take(80).collect()
+            }
+            _ => String::new(),
+        };
+        // Telegram renders the attachment natively (sendPhoto/sendDocument) and
+        // the manager-stack adapters either render the URL or auto-embed it.
+        // Ntfy/Email have no media handling at all, so fold the URL (and
+        // caption, and any album members) into the body rather than dropping it.
+        let (msg_body, msg_attachment) = match (&target_kind, &attachment) {
+            (ChannelKind::Ntfy | ChannelKind::Email, Some(att)) => {
+                let mut b = send_text.clone();
+                if let Some(cap) = att.caption.as_deref().filter(|c| !c.is_empty()) {
+                    if !b.is_empty() {
+                        b.push('\n');
+                    }
+                    b.push_str(cap);
+                }
+                if !b.is_empty() {
+                    b.push('\n');
+                }
+                b.push_str(&att.url);
+                for extra in &att.group_urls {
+                    b.push('\n');
+                    b.push_str(extra);
+                }
+                (b, None)
+            }
+            _ => (send_text.clone(), attachment.clone()),
+        };
+        let msg = UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Agent(task.agent_id),
+            task_id: Some(task.id),
+            trace_id,
+            kind: UserMessageKind::Notification,
+            priority: NotificationPriority::Info,
+            subject: subject_line,
+            body: msg_body,
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: thread_id.clone().or_else(|| Some(task.id.to_string())),
+            reply_to_external_id: thread_id.clone(),
+            attachment: msg_attachment,
+        };
+        let send_result = self
+            .notification_router
+            .send_to_channel(msg, &target_id.to_string())
+            .await;
 
         match send_result {
             Ok(()) => {
-                let preview: String = text.chars().take(120).collect();
+                let preview: String = send_text.chars().take(120).collect();
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: Utc::now(),
                     trace_id,
@@ -4306,6 +4714,13 @@ impl Kernel {
                         "thread_id": thread_id,
                         "text_preview": preview,
                         "text_len": text.chars().count(),
+                        "sent_text_len": send_text.chars().count(),
+                        "has_attachment": attachment.is_some(),
+                        "attachment_kind": attachment.as_ref().map(|a| match a.kind {
+                            agentos_types::AttachmentKind::Image => "image",
+                            agentos_types::AttachmentKind::Document => "document",
+                        }),
+                        "attachment_url": attachment.as_ref().map(|a| a.url.clone()),
                     }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
@@ -4330,5 +4745,207 @@ impl Kernel {
                 }),
             },
         }
+    }
+}
+
+/// Parameters for [`ask_user_blocking`].
+pub(crate) struct AskUserArgs {
+    pub question: String,
+    pub options: Option<Vec<String>>,
+    pub timeout_secs: u64,
+    pub priority: String,
+    pub auto_action: String,
+}
+
+/// Deliver a blocking `ask-user` question to the operator and wait for the
+/// answer (or the `auto_action` fallback on timeout / kernel shutdown).
+///
+/// Shared by the task/chat kernel-action path and the Claude MCP gateway, so a
+/// `claude-code` agent's question reaches the operator inbox exactly like any
+/// other agent's. Does not touch scheduler state — callers own that.
+///
+/// Returns `Err(result)` with a ready-to-return failure payload when the
+/// notification could not be delivered.
+pub(crate) async fn ask_user_blocking(
+    notification_router: &crate::notification_router::NotificationRouter,
+    agent_registry: &tokio::sync::RwLock<crate::agent_registry::AgentRegistry>,
+    cancellation_token: &tokio_util::sync::CancellationToken,
+    agent_id: AgentID,
+    task_id: TaskID,
+    trace_id: TraceID,
+    args: AskUserArgs,
+) -> Result<(NotificationID, UserResponse), KernelActionResult> {
+    let AskUserArgs {
+        question,
+        options,
+        timeout_secs,
+        priority,
+        auto_action,
+    } = args;
+    let priority_parsed = parse_priority(&priority);
+    // Clamp to the range declared in the TOML manifest (10 s – 24 h).
+    let timeout_secs = timeout_secs.clamp(10, 86_400);
+    let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
+
+    let agent_name = {
+        let reg = agent_registry.read().await;
+        reg.get_by_id(&agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| agent_id.to_string())
+    };
+    let subject_prefixed = format!("[{agent_name}] {}", question.as_str());
+    let subject_line: String = subject_prefixed.chars().take(80).collect();
+    let body_prefixed = format!("{agent_name} asks:\n\n{question}");
+
+    let msg = UserMessage {
+        id: NotificationID::new(),
+        from: NotificationSource::Agent(agent_id),
+        task_id: Some(task_id),
+        trace_id,
+        kind: UserMessageKind::Question {
+            question: question.clone(),
+            options,
+            free_text_allowed: true,
+        },
+        priority: priority_parsed,
+        subject: subject_line,
+        body: body_prefixed,
+        interaction: Some(InteractionRequest {
+            blocking: true,
+            timeout_secs,
+            auto_action: auto_action.clone(),
+            max_concurrent: 3,
+        }),
+        delivery_status: HashMap::new(),
+        response: None,
+        created_at: Utc::now(),
+        expires_at: Some(expires_at),
+        read: false,
+        thread_id: Some(task_id.to_string()),
+        reply_to_external_id: None,
+        attachment: None,
+    };
+
+    let notification_id = msg.id;
+
+    let rx = match notification_router.deliver(msg).await {
+        Ok(Some(rx)) => rx,
+        Ok(None) => {
+            tracing::error!(
+                task_id = %task_id,
+                "ask-user: blocking delivery returned no receiver"
+            );
+            return Err(KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": "Internal error: blocking notification returned no receiver"
+                }),
+            });
+        }
+        Err(e) => {
+            return Err(KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            });
+        }
+    };
+
+    tracing::info!(
+        task_id = %task_id,
+        notification_id = %notification_id,
+        timeout_secs,
+        "ask-user: awaiting user response"
+    );
+
+    let fallback = |text: &str| UserResponse {
+        text: text.to_string(),
+        responded_at: Utc::now(),
+        channel: DeliveryChannel::cli(),
+    };
+    // Safety margin over the router's own expiry sweep so a lost oneshot can
+    // never park the caller forever.
+    let safety_timeout = Duration::from_secs(timeout_secs.saturating_add(600));
+    let response = tokio::select! {
+        result = tokio::time::timeout(safety_timeout, rx) => {
+            match result {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(_recv_err)) => {
+                    notification_router.remove_waiting_task(&notification_id).await;
+                    fallback(&auto_action)
+                }
+                Err(_timeout) => {
+                    notification_router.remove_waiting_task(&notification_id).await;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        notification_id = %notification_id,
+                        "ask-user: safety timeout fired; returning auto_action"
+                    );
+                    fallback(&auto_action)
+                }
+            }
+        }
+        _ = cancellation_token.cancelled() => {
+            notification_router.remove_waiting_task(&notification_id).await;
+            tracing::info!(
+                task_id = %task_id,
+                "ask-user: kernel shutting down while waiting for user response"
+            );
+            fallback("kernel_shutdown")
+        }
+    };
+    Ok((notification_id, response))
+}
+
+#[cfg(test)]
+mod schedule_visibility_parse_tests {
+    use super::KernelAction;
+
+    #[test]
+    fn parses_list_my_schedules() {
+        let v = serde_json::json!({
+            "_kernel_action": "list_my_schedules",
+            "kinds": ["cron", "once"],
+            "include_inactive": true,
+        });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            }) => {
+                assert_eq!(kinds, vec!["cron".to_string(), "once".to_string()]);
+                assert!(include_inactive);
+            }
+            other => panic!("expected ListMySchedules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_my_schedules_defaults() {
+        let v = serde_json::json!({ "_kernel_action": "list_my_schedules" });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            }) => {
+                assert!(kinds.is_empty());
+                assert!(!include_inactive);
+            }
+            other => panic!("expected ListMySchedules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_get_task_logs() {
+        let v = serde_json::json!({ "_kernel_action": "get_task_logs", "run_id": "r-1" });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::GetTaskLogs { run_id }) => assert_eq!(run_id, "r-1"),
+            other => panic!("expected GetTaskLogs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_task_logs_requires_run_id() {
+        let v = serde_json::json!({ "_kernel_action": "get_task_logs" });
+        assert!(KernelAction::from_tool_result(&v).is_none());
     }
 }

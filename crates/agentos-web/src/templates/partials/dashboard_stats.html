@@ -1,38 +1,39 @@
 <div class="stat-grid">
-    <div class="stat-card">
+    <a href="/agents" class="stat-card stat-card-link" aria-label="View agents">
         <div class="stat-card-body">
             <div class="stat-value" data-animate>{{ agent_count }}</div>
             <div class="stat-label">Agents Online</div>
         </div>
-    </div>
-    <div class="stat-card">
+    </a>
+    <a href="/tasks?status=running" class="stat-card stat-card-link" aria-label="View running tasks">
         <div class="stat-card-body">
             <div class="stat-value" data-animate>{{ active_task_count }}</div>
             <div class="stat-label">Active Tasks</div>
         </div>
-    </div>
-    <div class="stat-card">
+    </a>
+    <a href="/tasks" class="stat-card stat-card-link" aria-label="View all tasks">
         <div class="stat-card-body">
             <div class="stat-value" data-animate>{{ total_task_count }}</div>
             <div class="stat-label">Total Tasks</div>
         </div>
-    </div>
-    <div class="stat-card">
+    </a>
+    <a href="/tools" class="stat-card stat-card-link" aria-label="View tools">
         <div class="stat-card-body">
             <div class="stat-value" data-animate>{{ tool_count }}</div>
             <div class="stat-label">Tools Installed</div>
         </div>
-    </div>
-    <div class="stat-card">
+    </a>
+    <a href="/escalations" class="stat-card stat-card-link {% if pending_escalations and pending_escalations > 0 %}stat-card-attention{% endif %}"
+       aria-label="View pending escalations">
         <div class="stat-card-body">
-            <div class="stat-value" data-animate>{{ bg_running }}</div>
-            <div class="stat-label">Background Jobs</div>
+            <div class="stat-value" data-animate>{{ pending_escalations or 0 }}</div>
+            <div class="stat-label">Pending Approvals</div>
         </div>
-    </div>
+    </a>
     <div class="stat-card">
         <div class="stat-card-body">
             <div class="stat-value">{{ uptime_display }}</div>
-            <div class="stat-label">Kernel Uptime</div>
+            <div class="stat-label">Kernel Uptime · {{ bg_running }} bg</div>
         </div>
     </div>
 </div>

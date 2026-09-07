@@ -23,10 +23,7 @@ const DEFAULT_BURST_COUNT: u64 = 3;
 const MAX_BURST_COUNT: u64 = 60;
 const DEFAULT_BURST_INTERVAL_MS: u64 = 200;
 const MAX_BURST_INTERVAL_MS: u64 = 10_000;
-const DEFAULT_CONSENT_TTL_SECONDS: u64 = 60;
-const MAX_CONSENT_TTL_SECONDS: u64 = 3_600;
 const WEBCAM_DEVICE_PREFIX: &str = "webcam:";
-const CONSENT_RESOURCE_PREFIX: &str = "hardware.webcam.capture:";
 
 pub struct WebcamDriver {
     consent_store: Arc<ConsentStore>,
@@ -40,9 +37,14 @@ impl Default for WebcamDriver {
 
 impl WebcamDriver {
     pub fn new() -> Self {
-        Self {
-            consent_store: Arc::new(ConsentStore::new()),
-        }
+        Self::with_consent_store(Arc::new(ConsentStore::new()))
+    }
+
+    /// Construct with a shared consent store. The kernel passes its own store
+    /// so that `agentos hal approve webcam:<node> <agent>` grants the capture
+    /// consent window the driver checks.
+    pub fn with_consent_store(consent_store: Arc<ConsentStore>) -> Self {
+        Self { consent_store }
     }
 
     fn action_from_params<'a>(&self, params: &'a Value) -> Result<&'a str, AgentOSError> {
@@ -52,14 +54,16 @@ impl WebcamDriver {
             .ok_or_else(|| AgentOSError::HalError("Missing 'action' param".into()))
     }
 
-    fn consent_session<'a>(&self, params: &'a Value) -> Result<&'a str, AgentOSError> {
+    /// The authenticated agent identity stamped into the payload by the tool
+    /// wrapper (`WebcamTool`). Agent-supplied `agent_id`/`session_id` claims
+    /// are never consulted — only the kernel-injected reserved key counts.
+    fn authenticated_agent(params: &Value) -> Result<&str, AgentOSError> {
         params
-            .get("agent_id")
-            .or_else(|| params.get("session_id"))
+            .get("__authenticated_agent_id")
             .and_then(Value::as_str)
             .ok_or_else(|| {
                 AgentOSError::HalError(
-                    "Missing 'agent_id' or 'session_id' for consent tracking".into(),
+                    "Capture consent requires an authenticated agent identity".into(),
                 )
             })
     }
@@ -191,21 +195,15 @@ impl WebcamDriver {
         Ok((count, interval_ms))
     }
 
-    fn parse_consent_ttl(&self, params: &Value) -> Result<Duration, AgentOSError> {
-        let ttl_seconds = params
-            .get("ttl_seconds")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_CONSENT_TTL_SECONDS);
-        if ttl_seconds == 0 || ttl_seconds > MAX_CONSENT_TTL_SECONDS {
-            return Err(AgentOSError::HalError(format!(
-                "'ttl_seconds' must be between 1 and {MAX_CONSENT_TTL_SECONDS}"
-            )));
-        }
-        Ok(Duration::from_secs(ttl_seconds))
-    }
-
+    /// Consent resource key for a capture device — identical to the registry
+    /// device key (`webcam:<node>`), so an operator `agentos hal approve` and
+    /// the consent check use the same identifier.
     fn consent_resource(device_path: &Path) -> String {
-        format!("{CONSENT_RESOURCE_PREFIX}{}", device_path.display())
+        let node = device_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| device_path.display().to_string());
+        format!("{WEBCAM_DEVICE_PREFIX}{node}")
     }
 
     fn frame_extension(format_tag: &str) -> &'static str {
@@ -278,33 +276,13 @@ impl WebcamDriver {
         }))
     }
 
-    async fn grant_capture_consent(&self, params: &Value) -> Result<Value, AgentOSError> {
-        let session = self.consent_session(params)?;
-        let device_path = self.parse_device_path(params)?;
-        let ttl = self.parse_consent_ttl(params)?;
-        let resource = Self::consent_resource(&device_path);
-
-        self.consent_store.grant(session, &resource, ttl);
-        Ok(json!({
-            "consent_granted": true,
-            "agent_id": session,
-            "device": device_path.display().to_string(),
-            "resource": resource,
-            "ttl_seconds": ttl.as_secs(),
-        }))
-    }
-
-    async fn revoke_capture_consent(&self, params: &Value) -> Result<Value, AgentOSError> {
-        let session = self.consent_session(params)?;
-        let device_path = self.parse_device_path(params)?;
-        let resource = Self::consent_resource(&device_path);
-        let revoked = self.consent_store.revoke(session, &resource);
-        Ok(json!({
-            "consent_revoked": revoked,
-            "agent_id": session,
-            "device": device_path.display().to_string(),
-            "resource": resource,
-        }))
+    /// Consent grants are operator-originated (`agentos hal approve`); an
+    /// agent must never be able to grant or revoke its own capture consent.
+    fn consent_is_operator_only() -> Result<Value, AgentOSError> {
+        Err(AgentOSError::PermissionDenied {
+            resource: "hardware.webcam.capture.consent".to_string(),
+            operation: "operator_approval_required".to_string(),
+        })
     }
 
     async fn list_capture_consents(&self) -> Result<Value, AgentOSError> {
@@ -312,7 +290,7 @@ impl WebcamDriver {
             .consent_store
             .list()
             .into_iter()
-            .filter(|(_, resource, _)| resource.starts_with(CONSENT_RESOURCE_PREFIX))
+            .filter(|(_, resource, _)| resource.starts_with(WEBCAM_DEVICE_PREFIX))
             .map(|(agent_id, resource, ttl_seconds)| {
                 json!({
                     "agent_id": agent_id,
@@ -330,9 +308,9 @@ impl WebcamDriver {
         params: &Value,
         device_path: &Path,
     ) -> Result<(), AgentOSError> {
-        let session = self.consent_session(params)?;
+        let agent_id = Self::authenticated_agent(params)?;
         let resource = Self::consent_resource(device_path);
-        if self.consent_store.check(session, &resource) {
+        if self.consent_store.check(agent_id, &resource) {
             return Ok(());
         }
 
@@ -394,6 +372,9 @@ impl WebcamDriver {
 
         Ok(json!({
             "captured": true,
+            // Surfaced so the kernel's ToolExecuted audit records that this
+            // capture passed an operator-granted consent check.
+            "consent_checked": true,
             "image_path": output_path.display().to_string(),
             "device": device_path.display().to_string(),
             "width": fmt.width,
@@ -506,6 +487,7 @@ impl WebcamDriver {
 
         Ok(json!({
             "captured": true,
+            "consent_checked": true,
             "burst": true,
             "count": frames.len(),
             "interval_ms": interval_ms,
@@ -564,8 +546,7 @@ impl HalDriver for WebcamDriver {
             "list" => self.list_devices().await,
             "capture" => self.capture_frame(&params).await,
             "burst" => self.capture_burst(&params).await,
-            "grant_capture_consent" => self.grant_capture_consent(&params).await,
-            "revoke_capture_consent" => self.revoke_capture_consent(&params).await,
+            "grant_capture_consent" | "revoke_capture_consent" => Self::consent_is_operator_only(),
             "list_capture_consents" => self.list_capture_consents().await,
             action => Err(AgentOSError::HalError(format!(
                 "Unknown webcam action: {action}"
@@ -597,18 +578,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_requires_agent_id() {
+    async fn capture_requires_authenticated_identity() {
         let driver = WebcamDriver::new();
-        let error = driver
-            .capture_frame(&json!({
+        // A payload-supplied agent_id/session_id is NOT an authenticated identity.
+        for spoof in [json!({"agent_id": "spoofed"}), json!({"session_id": "s1"})] {
+            let mut params = json!({
                 "action": "capture",
                 "device": "/dev/video0",
-            }))
-            .await
-            .expect_err("capture should require agent_id");
-
-        assert!(matches!(error, AgentOSError::HalError(..)));
-        assert!(error.to_string().contains("agent_id"));
+            });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(spoof.as_object().unwrap().clone());
+            let error = driver
+                .capture_frame(&params)
+                .await
+                .expect_err("capture should require authenticated identity");
+            assert!(matches!(error, AgentOSError::HalError(..)));
+            assert!(error.to_string().contains("authenticated agent identity"));
+        }
     }
 
     #[tokio::test]
@@ -618,7 +606,7 @@ mod tests {
             .capture_frame(&json!({
                 "action": "capture",
                 "device": "/dev/video0",
-                "agent_id": "test-agent",
+                "__authenticated_agent_id": "test-agent",
             }))
             .await
             .expect_err("capture should require consent");
@@ -627,34 +615,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grant_and_revoke_consent_round_trip() {
+    async fn agent_cannot_grant_or_revoke_consent() {
         let driver = WebcamDriver::new();
-        let grant = driver
-            .grant_capture_consent(&json!({
-                "action": "grant_capture_consent",
-                "agent_id": "test-agent",
-                "device": "/dev/video0",
-                "ttl_seconds": 60,
-            }))
-            .await
-            .expect("grant should succeed");
-        assert_eq!(grant["consent_granted"], true);
+        for action in ["grant_capture_consent", "revoke_capture_consent"] {
+            let error = driver
+                .query(json!({
+                    "action": action,
+                    "device": "/dev/video0",
+                    "__authenticated_agent_id": "test-agent",
+                }))
+                .await
+                .expect_err("agent-invoked consent grant/revoke must be rejected");
+            match error {
+                AgentOSError::PermissionDenied { operation, .. } => {
+                    assert_eq!(operation, "operator_approval_required");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn consent_is_scoped_to_the_granted_agent() {
+        let driver = WebcamDriver::new();
+        // Operator-originated grant for agent-a (resource = registry device key).
+        driver
+            .consent_store
+            .grant("agent-a", "webcam:video0", Duration::from_secs(60));
+
+        let device = Path::new("/dev/video0");
+        assert!(driver
+            .ensure_capture_consent(&json!({"__authenticated_agent_id": "agent-a"}), device)
+            .is_ok());
+        // agent-b does not inherit, and a spoofed claim of agent-a's id via
+        // the plain agent_id key is ignored.
+        let err = driver
+            .ensure_capture_consent(
+                &json!({"__authenticated_agent_id": "agent-b", "agent_id": "agent-a"}),
+                device,
+            )
+            .expect_err("another agent must not inherit consent");
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
 
         let list = driver
             .list_capture_consents()
             .await
             .expect("list should succeed");
-        assert_eq!(list["consents"].as_array().unwrap().len(), 1);
-
-        let revoke = driver
-            .revoke_capture_consent(&json!({
-                "action": "revoke_capture_consent",
-                "agent_id": "test-agent",
-                "device": "/dev/video0",
-            }))
-            .await
-            .expect("revoke should succeed");
-        assert_eq!(revoke["consent_revoked"], true);
+        let consents = list["consents"].as_array().unwrap();
+        assert_eq!(consents.len(), 1);
+        assert_eq!(consents[0]["agent_id"], "agent-a");
+        assert_eq!(consents[0]["resource"], "webcam:video0");
     }
 
     #[test]

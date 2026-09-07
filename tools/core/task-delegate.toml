@@ -1,11 +1,14 @@
-tags = ["meta", "exec"]
+tags = ["exec"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "task-delegate"
 version     = "1.0.0"
-description = "Delegate a sub-task to a named agent and return immediately (non-blocking). Use task-status to monitor completion."
+description = "Delegate a sub-task to a named agent and BLOCK until it finishes. Your task is paused and automatically resumed with the child's output in your context. Use spawn-async instead if you must keep working while the child runs."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
+search_hints = ["hand this task to another agent", "delegate a task"]
 
 [capabilities_required]
 permissions = ["agent.message:x"]
@@ -17,19 +20,19 @@ outputs = ["status"]
 input  = "TaskDelegateIntent"
 output = "DelegateResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["agent", "task"]
 
-[input_schema.properties.agent]
+[payload_schema.properties.agent]
 type = "string"
 description = "Target agent name"
 
-[input_schema.properties.task]
+[payload_schema.properties.task]
 type = "string"
 description = "Sub-task prompt for the target agent"
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type = "integer"
 default = 5
 minimum = 0

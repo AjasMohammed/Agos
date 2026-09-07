@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "memory-block-delete"
@@ -17,11 +18,11 @@ outputs = ["content.text"]
 input  = "MemoryBlockDeleteIntent"
 output = "MemoryBlockDeleteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["label"]
 
-[input_schema.properties.label]
+[payload_schema.properties.label]
 type = "string"
 description = "Memory block label"
 

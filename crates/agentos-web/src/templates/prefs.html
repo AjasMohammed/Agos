@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <header>
+    <h1>Preference Proposals</h1>
+    <p class="muted">Review pending user-adaptation proposals before they become durable memory.</p>
+  </header>
+
+  {% if stats %}
+  <article>
+    <p><strong>Pending:</strong> {{ stats.pending }} | <strong>Accepted:</strong> {{ stats.accepted }} | <strong>Rejected:</strong> {{ stats.rejected }} | <strong>Stale &gt;30d:</strong> {{ stats.stale_over_30d }}</p>
+  </article>
+  {% endif %}
+
+  {% if proposals|length == 0 %}
+  <article><p>No pending proposals.</p></article>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Proposal</th>
+        <th>Confidence</th>
+        <th>Evidence</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in proposals %}
+      <tr>
+        <td>
+          <div><code>{{ p.id }}</code></div>
+          <div>{{ p.content }}</div>
+          <small class="muted">{{ p.kind }} · agent {{ p.agent_id }} · task {{ p.task_id }}</small>
+        </td>
+        <td>{{ "%.2f"|format(p.confidence) }}</td>
+        <td>
+          {% if p.evidence|length > 0 %}
+            <ul>
+              {% for e in p.evidence %}<li>{{ e }}</li>{% endfor %}
+            </ul>
+          {% else %}
+            <span class="muted">none</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="/prefs/accept" style="display:inline-block; margin-right:0.5rem;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="proposal_id" value="{{ p.id }}">
+            <button type="submit">Accept</button>
+          </form>
+          <form method="post" action="/prefs/reject" style="display:inline-block;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="proposal_id" value="{{ p.id }}">
+            <button type="submit" class="secondary">Reject</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

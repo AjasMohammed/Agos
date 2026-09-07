@@ -1,5 +1,39 @@
 use regex::Regex;
+use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
+
+/// Tag names used to wrap untrusted content for the LLM: `<user_data>`
+/// (`taint_wrap`), `<reference_data>` (knowledge blocks), `<user_profile>`
+/// (personalization). Any of these appearing *inside* untrusted content — in
+/// open or close form — must be neutralized so a payload cannot terminate, or
+/// forge, a wrapper boundary and smuggle text out of the trust envelope.
+const GUARD_TAG_NAMES: &[&str] = &["user_data", "reference_data", "user_profile"];
+
+/// Escape guard-tag delimiters inside untrusted content so a payload cannot
+/// close (or spoof) the wrapper it is placed in. Only guard-tag-shaped tokens
+/// are touched — all other `<`/`>` are preserved so code and prose stay
+/// readable to the model.
+///
+/// This is the escape-on-ingest half of the trust boundary: every site that
+/// wraps untrusted text in a guard tag (`taint_wrap`, `<reference_data>`,
+/// `<user_profile>`, sub-agent results) must run its content through this
+/// first, or the wrapper is only advisory.
+pub fn neutralize_guard_tags(content: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // `<user_data ...>` / `</user_data>` etc., case-insensitive, tolerant of
+        // surrounding whitespace and attributes.
+        let alt = GUARD_TAG_NAMES.join("|");
+        Regex::new(&format!(r"(?i)<\s*/?\s*({alt})\b[^>]*>")).expect("guard-tag regex is valid")
+    });
+    if !content.contains('<') {
+        return content.to_string();
+    }
+    re.replace_all(content, |caps: &regex::Captures| {
+        caps[0].replace('<', "&lt;").replace('>', "&gt;")
+    })
+    .into_owned()
+}
 
 /// Severity of a detected injection pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,13 +406,18 @@ impl InjectionScanner {
     /// the taint severity seen by the LLM.
     ///
     /// The `source` attribute is HTML-escaped so that a tool name containing `"`
-    /// or `>` cannot inject additional XML attributes or close the tag.
+    /// or `>` cannot inject additional XML attributes or close the tag. The
+    /// `content` body is passed through [`neutralize_guard_tags`] so a payload
+    /// containing a literal `</user_data>` cannot close the wrapper early and
+    /// place instructions outside the taint boundary.
     pub fn taint_wrap(content: &str, source: &str, scan_result: &ScanResult) -> String {
         let escaped_source = source
             .replace('&', "&amp;")
             .replace('"', "&quot;")
             .replace('<', "&lt;")
             .replace('>', "&gt;");
+        let content = neutralize_guard_tags(content);
+        let content = content.as_str();
 
         if scan_result.is_suspicious {
             let threat = match scan_result.aggregate_threat {

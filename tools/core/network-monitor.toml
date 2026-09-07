@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "network-monitor"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Query network interface statistics (bytes sent/received, packet counts, errors) via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
 
 [capabilities_required]
 permissions = ["network.logs:r"]
@@ -17,7 +19,7 @@ outputs = ["network.stats"]
 input  = "NetworkMonitorQuery"
 output = "NetworkStats"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "No input required"
 

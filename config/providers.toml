@@ -170,8 +170,55 @@ display_name = "NVIDIA NIM"
 base_url = "https://integrate.api.nvidia.com/v1"
 api_key_env = "NVIDIA_API_KEY"
 compatible_with = "openai"
-default_model = "meta/llama-3.3-70b-instruct"
-models = ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.1-nemotron-70b-instruct"]
+default_model = "nvidia/nemotron-3-super-120b-a12b"
+# Tool-calling support on NIM is per-model, not universal — every model listed
+# here is one the hosted gateway serves with OpenAI-style `tools`.
+# `openai/gpt-oss-*` is deliberately absent: tool calling is broken on its
+# /chat/completions route pending a vLLM tool-parser fix.
+#
+# Ids verified against `GET https://integrate.api.nvidia.com/v1/models` on
+# 2026-08-31. A retired id is NOT a clean 404 — the gateway resolves a model to
+# a Cloud Function first, so a stale id comes back as
+# `Function '<uuid>': Not found for account '<key-id>'`, which reads like an
+# auth problem and is not. Re-check this list against /v1/models before adding.
+models = [
+  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-nano-3-30b-a3b",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+  "nvidia/llama-3.1-nemotron-70b-instruct",
+  "deepseek-ai/deepseek-v4-pro-0813",
+  "deepseek-ai/deepseek-v4-flash-0731",
+  "moonshotai/kimi-k3",
+  "moonshotai/kimi-k2.6",
+  "meta/llama-3.2-90b-vision-instruct",
+]
+vision_models = ["meta/llama-3.2-90b-vision-instruct", "meta/llama-3.2-11b-vision-instruct"]
+# Floor across the models above (several reach 262K–1M). Without this the
+# adapter assumes 32K and rejects long contexts before the request is sent.
+context_window = 128000
+# The hosted gateway caps output at 8192 for most models regardless of the
+# checkpoint's own limit, and defaults as low as 1024 when max_tokens is unset.
+max_output_tokens = 8192
+supports_tool_calling = true
+supports_native_tool_calling = true
+# Reasoning models (DeepSeek V4/R1, Nemotron 3) commonly run for minutes and
+# send nothing on the wire until they finish, so request_timeout_secs is the
+# real budget for non-streaming completions. read_timeout_secs only caps the
+# gap between SSE chunks on the streaming path.
+read_timeout_secs = 300
+request_timeout_secs = 600
+# NIM defers long generations: HTTP 202 + an `NVCF-REQID` header and no body,
+# with the result polled from NVIDIA Cloud Functions. The poll host is NOT
+# `integrate.api.nvidia.com` — its documented `/v1/status/{id}` route does not
+# exist (plain-text 404). This is the URL langchain-nvidia, garak and NVIDIA's
+# own SDKs use.
+status_url_template = "https://api.nvcf.nvidia.com/v2/nvcf/pexec/status/{id}"
+# Reasoning toggles are per-model on NIM, so there is no correct catalog-wide
+# default. Set explicitly for the model in use, e.g. to stop Qwen3 (thinking on
+# by default) from burning the output cap:
+#   extra_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+# DeepSeek V4 uses a top-level `reasoning_effort` (none|high|max) instead.
 
 [[provider]]
 name = "hyperbolic"

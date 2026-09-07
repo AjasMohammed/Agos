@@ -61,6 +61,25 @@ impl WebhookWakeUp {
         // Format the webhook payload as a prompt for the agent
         let prompt = format_webhook_context(&batch, self.max_context_bytes);
 
+        // Verify the endpoint still exists and is active. The batch was queued
+        // up to `debounce_seconds` ago; deleting or disabling the endpoint in
+        // that window must stop delivery, and nothing else re-checks it.
+        match self
+            .kernel
+            .webhook_registry
+            .get_endpoint(&endpoint_id)
+            .await
+        {
+            Some(meta) if meta.active => {}
+            _ => {
+                tracing::info!(
+                    endpoint_id = %endpoint_id,
+                    "Webhook endpoint removed or disabled before delivery — dropping batch ({event_count} events)",
+                );
+                return;
+            }
+        }
+
         // Verify the agent is still connected
         let registry = self.kernel.agent_registry.read().await;
         let agent = match registry.get_by_id(&agent_id) {
@@ -133,6 +152,9 @@ impl WebhookWakeUp {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
+            // External webhook wake-up — no parent task in the causal chain.
+            chain_depth: 0,
         };
 
         self.kernel.scheduler.enqueue(task).await;

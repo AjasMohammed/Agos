@@ -3,8 +3,8 @@ use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
     calculate_inference_cost, default_pricing_table, InferenceEvent, InferenceOptions,
-    InferenceResult, InferenceToolCall, ModelCapabilities, ModelPricing, StopReason, TokenUsage,
-    ToolChoice,
+    InferenceResult, InferenceToolCall, ModelCapabilities, ModelPricing, PromptCacheTtl,
+    StopReason, TokenUsage, ToolChoice,
 };
 use agentos_types::*;
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -29,9 +30,13 @@ pub struct AnthropicCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same `base_url`.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
+    /// Set once the API rejects `defer_loading`/`tool_reference` (400): this
+    /// adapter instance then sends every tool inline (no deferral).
+    deferral_rejected: AtomicBool,
 }
 
 impl AnthropicCore {
@@ -61,10 +66,14 @@ impl AnthropicCore {
                 input_per_1k: 0.0,
                 output_per_1k: 0.0,
             });
+        // Hoisted: `base_url` is moved into the struct literal below.
+        let concurrency = crate::retry::concurrency_limiter_for(&base_url);
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    crate::traits::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             api_key,
@@ -86,8 +95,9 @@ impl AnthropicCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            concurrency,
             image_resolver: Arc::new(NoopImageResolver),
+            deferral_rejected: AtomicBool::new(false),
         }
     }
 
@@ -114,7 +124,11 @@ impl AnthropicCore {
         self
     }
 
-    fn format_messages(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
+    /// `emit_refs`: render `tool_reference` blocks from `context.tool_references`.
+    /// Only valid when this request sends the full catalogue with
+    /// `defer_loading` (native deferral active, tools non-empty); otherwise a
+    /// reference names a tool absent from `tools` and the API returns 400.
+    fn format_messages(&self, context: &ContextWindow, emit_refs: bool) -> Vec<serde_json::Value> {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
 
@@ -129,10 +143,29 @@ impl AnthropicCore {
 
                     if let Some(use_id) = tool_use_id {
                         // Native Anthropic tool result content block.
+                        // Provider-native deferral: a discovery result carries
+                        // `tool_reference` blocks for the deferred tools it
+                        // surfaced; the API expands them after the cached prefix.
+                        let content =
+                            match context
+                                .tool_references
+                                .get(use_id)
+                                .filter(|names| emit_refs && !names.is_empty())
+                            {
+                                Some(names) => {
+                                    let mut blocks =
+                                        vec![json!({"type": "text", "text": entry.text()})];
+                                    blocks.extend(names.iter().map(
+                                        |n| json!({"type": "tool_reference", "tool_name": n}),
+                                    ));
+                                    Value::Array(blocks)
+                                }
+                                None => json!(entry.text()),
+                            };
                         pending_tool_results.push(json!({
                             "type": "tool_result",
                             "tool_use_id": use_id,
-                            "content": entry.text(),
+                            "content": content,
                         }));
                     } else {
                         // Legacy fallback: add as a text content block in the
@@ -236,30 +269,49 @@ impl AnthropicCore {
         messages
     }
 
-    fn build_anthropic_tools(tools: &[ToolManifest]) -> (Vec<Value>, HashMap<String, String>) {
+    /// `deferred_from`: tools at index ≥ n carry `defer_loading: true` (they stay
+    /// out of the cached prefix until Claude discovers them via a
+    /// `tool_reference`). `None` = every tool loaded.
+    fn build_anthropic_tools(
+        tools: &[ToolManifest],
+        deferred_from: Option<usize>,
+    ) -> (Vec<Value>, HashMap<String, String>, Vec<bool>) {
         let mut anthropic_tools = Vec::new();
         let mut intent_by_tool = HashMap::new();
         let mut seen_names = HashSet::new();
+        // Which input positions survived dedup: the kernel's prefix/deferral
+        // indices are input positions and must be mapped to output positions
+        // before placing the cache breakpoint (see `kept_index`).
+        let mut kept = vec![false; tools.len()];
 
-        for manifest in tools {
+        for (idx, manifest) in tools.iter().enumerate() {
             let tool_name = manifest.manifest.name.trim();
             if tool_name.is_empty() || !seen_names.insert(tool_name.to_string()) {
                 continue;
             }
+            kept[idx] = true;
 
             let intent_type = tool_helpers::infer_intent_type_from_permissions(
                 &manifest.capabilities_required.permissions,
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
-            anthropic_tools.push(json!({
+            let mut tool = json!({
                 "name": tool_name,
                 "description": manifest.manifest.description,
-                "input_schema": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
-            }));
+                // Anthropic Messages API requires `input_schema` (NOT `payload_schema`).
+                // Using the wrong key causes 400 errors or silent schemaless tool definitions.
+                // Examples embedded inside input_schema via JSON-Schema "examples" keyword
+                // — survives the Anthropic API unchanged (sibling keys would 400).
+                "input_schema": tool_helpers::normalize_tool_input_schema_with_examples(manifest.payload_schema.as_ref(), &manifest.examples),
+            });
+            if deferred_from.is_some_and(|n| idx >= n) {
+                tool["defer_loading"] = json!(true);
+            }
+            anthropic_tools.push(tool);
         }
 
-        (anthropic_tools, intent_by_tool)
+        (anthropic_tools, intent_by_tool, kept)
     }
 
     fn parse_anthropic_tool_calls(
@@ -317,11 +369,44 @@ impl AnthropicCore {
     }
 }
 
+/// Cache marker for the requested TTL. The 5m form omits `ttl` so request
+/// bodies stay byte-identical to the legacy behavior; 1h requires the
+/// `extended-cache-ttl-2025-04-11` beta header on the request.
+fn cache_control_value(ttl: PromptCacheTtl) -> Value {
+    match ttl {
+        PromptCacheTtl::FiveMinutes => json!({ "type": "ephemeral" }),
+        PromptCacheTtl::OneHour => json!({ "type": "ephemeral", "ttl": "1h" }),
+    }
+}
+
+/// Build a cost-weighted `TokenUsage` for pricing. Anthropic bills cache WRITES
+/// at 1.25x and cache READS at 0.1x the base input rate, and `input_tokens`
+/// excludes both. Folding the weighted cache tokens into `prompt_tokens` lets
+/// the flat-rate `calculate_inference_cost` produce the true billed amount
+/// without a schema change across every provider's `TokenUsage` literal (H2).
+/// This value is for COST ONLY — the literal `tokens_used` on the result keeps
+/// the real, unweighted counts.
+fn weighted_usage_for_cost(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    cache_read_tokens: u64,
+) -> TokenUsage {
+    let billable_input = input_tokens
+        + (cache_write_tokens as f64 * 1.25).round() as u64
+        + (cache_read_tokens as f64 * 0.10).round() as u64;
+    TokenUsage {
+        prompt_tokens: billable_input,
+        completion_tokens: output_tokens,
+        total_tokens: billable_input + output_tokens,
+    }
+}
+
 /// Attach `cache_control: {type: ephemeral}` to the *last* content block of a
 /// message envelope. Anthropic accepts string or array `content`. For string
 /// content the message is rewritten as a single-element text array so the
 /// cache marker can ride on it.
-fn attach_cache_control_to_last_block(message: &mut Value) {
+fn attach_cache_control_to_last_block(message: &mut Value, ttl: PromptCacheTtl) {
     let Some(obj) = message.as_object_mut() else {
         return;
     };
@@ -329,20 +414,18 @@ fn attach_cache_control_to_last_block(message: &mut Value) {
         Some(Value::Array(blocks)) => {
             if let Some(last) = blocks.last_mut() {
                 if let Some(block_obj) = last.as_object_mut() {
-                    block_obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+                    block_obj.insert("cache_control".into(), cache_control_value(ttl));
                 }
             }
         }
         Some(Value::String(s)) => {
             let text = std::mem::take(s);
-            obj.insert(
-                "content".into(),
-                json!([{
-                    "type": "text",
-                    "text": text,
-                    "cache_control": { "type": "ephemeral" },
-                }]),
-            );
+            let mut block = json!({
+                "type": "text",
+                "text": text,
+            });
+            block["cache_control"] = cache_control_value(ttl);
+            obj.insert("content".into(), json!([block]));
         }
         _ => {}
     }
@@ -350,6 +433,15 @@ fn attach_cache_control_to_last_block(message: &mut Value) {
 
 #[async_trait]
 impl LLMCore for AnthropicCore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        model_supports_deferred_tools(&self.model)
+            && !self.deferral_rejected.load(Ordering::Relaxed)
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -359,8 +451,19 @@ impl LLMCore for AnthropicCore {
         context: &ContextWindow,
         tools: &[ToolManifest],
     ) -> Result<InferenceResult, AgentOSError> {
-        self.infer_with_options(context, tools, &InferenceOptions::default())
-            .await
+        // Caching is always on for Anthropic — matches the streaming path and
+        // the kernel's task-path policy. `InferenceOptions::default()` has
+        // `enable_prompt_caching: false`, which silently disabled caching on
+        // every non-streaming chat turn.
+        self.infer_with_options(
+            context,
+            tools,
+            &InferenceOptions {
+                enable_prompt_caching: true,
+                ..InferenceOptions::default()
+            },
+        )
+        .await
     }
 
     async fn infer_with_options(
@@ -392,7 +495,21 @@ impl LLMCore for AnthropicCore {
         )
         .await;
         let context = &prepared;
-        let mut messages = self.format_messages(context);
+        // If options disable tools, exclude them from the request.
+        let effective_tools = if matches!(options.tool_choice, Some(ToolChoice::None)) {
+            &[][..]
+        } else {
+            tools
+        };
+        // Guard at the point of use: the kernel decides deferral per iteration,
+        // but the adapter may have flipped `deferral_rejected` (400) since.
+        // Then every tool goes inline (expensive, not fatal) and no
+        // `tool_reference` may be rendered: it would name a tool absent from
+        // `tools`.
+        let deferred_from = options
+            .deferred_tools_from
+            .filter(|_| self.supports_deferred_tools() && !effective_tools.is_empty());
+        let mut messages = self.format_messages(context, deferred_from.is_some());
         let active = context.active_entries();
         let image_count = active
             .iter()
@@ -417,13 +534,12 @@ impl LLMCore for AnthropicCore {
             }
         }
 
-        // If options disable tools, exclude them from the request.
-        let effective_tools = if matches!(options.tool_choice, Some(ToolChoice::None)) {
-            &[][..]
-        } else {
-            tools
-        };
-        let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(effective_tools);
+        let (anthropic_tools, intent_by_tool, kept) =
+            Self::build_anthropic_tools(effective_tools, deferred_from);
+        let cache_prefix = deferral_cache_prefix(
+            kept_index(&kept, options.tools_cache_prefix_len),
+            kept_index(&kept, deferred_from),
+        );
 
         // Prompt caching: represent the system prompt as multiple blocks and place
         // a cache breakpoint at the tools/manual block. This keeps the stable prefix
@@ -437,13 +553,13 @@ impl LLMCore for AnthropicCore {
                     "text": entry.text(),
                 });
                 if !breakpoint_set && entry.category == ContextCategory::Tools {
-                    block["cache_control"] = json!({ "type": "ephemeral" });
+                    block["cache_control"] = cache_control_value(options.cache_ttl);
                     breakpoint_set = true;
                 }
                 blocks.push(block);
             }
             if !breakpoint_set && !blocks.is_empty() {
-                blocks[0]["cache_control"] = json!({ "type": "ephemeral" });
+                blocks[0]["cache_control"] = cache_control_value(options.cache_ttl);
             }
             Value::Array(blocks)
         } else if !system_entries.is_empty() {
@@ -464,7 +580,7 @@ impl LLMCore for AnthropicCore {
         // to 4 breakpoints; we use #1 system, #2 tools (set below), #3 here.
         if options.enable_prompt_caching && messages.len() >= 2 {
             let idx = messages.len() - 2;
-            attach_cache_control_to_last_block(&mut messages[idx]);
+            attach_cache_control_to_last_block(&mut messages[idx], options.cache_ttl);
         }
 
         let mut body = json!({
@@ -491,8 +607,8 @@ impl LLMCore for AnthropicCore {
             // otherwise every multi-turn request reads tools from cache.
             let mut tools_array = anthropic_tools;
             if options.enable_prompt_caching {
-                if let Some(last) = tools_array.last_mut() {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                if let Some(t) = cache_breakpoint_tool(&mut tools_array, cache_prefix) {
+                    t["cache_control"] = cache_control_value(options.cache_ttl);
                 }
             }
             body["tools"] = Value::Array(tools_array);
@@ -530,7 +646,19 @@ impl LLMCore for AnthropicCore {
         );
 
         let thinking_enabled = options.thinking_budget_tokens.is_some();
-        let res = crate::retry::send_with_retry(
+        // Beta features ride a single comma-joined `anthropic-beta` header.
+        let mut beta_features: Vec<&str> = Vec::new();
+        if thinking_enabled {
+            // Extended thinking requires the interleaved-thinking beta header.
+            beta_features.push("interleaved-thinking-2025-05-14");
+        }
+        if options.enable_prompt_caching && options.cache_ttl == PromptCacheTtl::OneHour {
+            beta_features.push("extended-cache-ttl-2025-04-11");
+        }
+        let beta_header = (!beta_features.is_empty()).then(|| beta_features.join(","));
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (res, _permit) = crate::retry::send_with_retry(
             "anthropic",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -542,14 +670,14 @@ impl LLMCore for AnthropicCore {
                     .header("x-api-key", self.api_key.expose_secret())
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json");
-                // Extended thinking requires the interleaved-thinking beta header.
-                if thinking_enabled {
-                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                if let Some(ref beta) = beta_header {
+                    req = req.header("anthropic-beta", beta.as_str());
                 }
                 req.json(&body)
             },
         )
-        .await?;
+        .await
+        .inspect_err(|e| self.note_deferral_rejection(e, deferred_from.is_some()))?;
 
         let json_resp: serde_json::Value =
             res.json().await.map_err(|e| AgentOSError::LLMError {
@@ -575,13 +703,30 @@ impl LLMCore for AnthropicCore {
         let cached_tokens = json_resp["usage"]["cache_read_input_tokens"]
             .as_u64()
             .unwrap_or(0);
+        let cache_write_tokens = json_resp["usage"]["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(0);
 
         let tokens_used = TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
         };
-        let cost = calculate_inference_cost(&tokens_used, &self.pricing);
+        // Anthropic's `input_tokens` EXCLUDES cached tokens; cache writes are
+        // billed at 1.25x and cache reads at 0.1x the base input rate. Bill cost
+        // on a weighted input count so budget enforcement reflects true spend —
+        // otherwise a long cached task's tracked cost is a fraction of reality
+        // and the hard-limit suspend fires far too late (H2). `tokens_used`
+        // stays literal for accurate token reporting.
+        let cost = calculate_inference_cost(
+            &weighted_usage_for_cost(
+                prompt_tokens,
+                completion_tokens,
+                cache_write_tokens,
+                cached_tokens,
+            ),
+            &self.pricing,
+        );
 
         Ok(InferenceResult {
             text,
@@ -603,21 +748,17 @@ impl LLMCore for AnthropicCore {
     async fn health_check(&self) -> crate::types::HealthStatus {
         use crate::types::HealthStatus;
         let start = std::time::Instant::now();
-        let url = format!("{}/messages", self.base_url);
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 1,
-            "messages": [
-                {"role": "user", "content": "hello"}
-            ]
-        });
+        // Use the non-billable GET /models endpoint instead of POST /messages.
+        // A real inference (even max_tokens=1) is billed on every probe, and
+        // health checks run periodically — a recurring charge just for liveness.
+        // GET /models validates reachability + API key auth at zero token cost.
+        let url = format!("{}/models", self.base_url);
 
         match self
             .client
-            .post(&url)
+            .get(&url)
             .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
-            .json(&body)
             .send()
             .await
         {
@@ -677,38 +818,62 @@ impl LLMCore for AnthropicCore {
         )
         .await;
         let context = &prepared;
-        let mut messages = self.format_messages(context);
+        let mut messages = self.format_messages(context, false);
         let active = context.active_entries();
         let image_count = active
             .iter()
             .flat_map(|e| e.parts.iter())
             .filter(|p| matches!(p, ContentPart::Image { .. }))
             .count();
-        let system_prompt = active
+        // ALL system entries, in window order — not just the first. The chat
+        // path pushes the canonical prompt, then `<agent-context-memory>`, then
+        // (every Nth turn) the memory nudge; a `.find()` here silently dropped
+        // everything after the first, so context memory and the nudge never
+        // reached the model on streaming turns.
+        let system_entries: Vec<&ContextEntry> = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
-            .map(|e| e.text())
-            .unwrap_or_default();
+            .copied()
+            .filter(|e| e.role == ContextRole::System && !e.text().trim().is_empty())
+            .collect();
 
-        let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(tools);
+        let (anthropic_tools, intent_by_tool, _) = Self::build_anthropic_tools(tools, None); // ponytail: no options on the stream path → no deferral
 
         // Streaming path applies the same prompt-caching breakpoints used by
         // the non-streaming path: system block, last tool, and conversation
         // prefix (next-to-last message). The streaming trait method does not
         // receive `InferenceOptions`, so caching is always on for Anthropic
         // streams — matches the kernel's policy of always-on Anthropic caching.
-        let system_value = if !system_prompt.is_empty() {
-            json!([{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": { "type": "ephemeral" },
-            }])
+        //
+        // One block PER ENTRY, with the breakpoint on the stable prefix — never
+        // a single merged block. Merging would put the volatile entries
+        // (`<agent-context-memory>`, which changes on any memory write, and the
+        // every-Nth-turn nudge) *inside* the cached block, so the cached prefix
+        // text would differ between turns and every turn would miss the cache
+        // and pay a fresh write at 1.25x. Mirrors `infer_with_options`.
+        let system_value = if !system_entries.is_empty() {
+            let mut blocks: Vec<Value> = Vec::new();
+            let mut breakpoint_set = false;
+            for entry in &system_entries {
+                let mut block = json!({
+                    "type": "text",
+                    "text": entry.text(),
+                });
+                if !breakpoint_set && entry.category == ContextCategory::Tools {
+                    block["cache_control"] = json!({ "type": "ephemeral" });
+                    breakpoint_set = true;
+                }
+                blocks.push(block);
+            }
+            if !breakpoint_set {
+                blocks[0]["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            Value::Array(blocks)
         } else {
             Value::Null
         };
         if messages.len() >= 2 {
             let idx = messages.len() - 2;
-            attach_cache_control_to_last_block(&mut messages[idx]);
+            attach_cache_control_to_last_block(&mut messages[idx], PromptCacheTtl::FiveMinutes);
         }
 
         let mut body = json!({
@@ -735,30 +900,38 @@ impl LLMCore for AnthropicCore {
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
 
-        let res = self
-            .client
-            .post(&url)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Anthropic API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
+        let res = crate::retry::send_with_retry(
+            "anthropic",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", self.api_key.expose_secret())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let (res, _permit) = match res {
+            Ok(r) => r,
+            Err(e) => {
+                self.note_deferral_rejection(&e, false);
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // Streaming state.
         let mut full_text = String::new();
@@ -769,6 +942,7 @@ impl LLMCore for AnthropicCore {
             total_tokens: 0,
         };
         let mut cached_tokens: u64 = 0;
+        let mut cache_write_tokens: u64 = 0;
         let mut stop_reason = StopReason::EndTurn;
 
         // Content block tracking.
@@ -832,6 +1006,10 @@ impl LLMCore for AnthropicCore {
                                 u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
                             cached_tokens = u
                                 .get("cache_read_input_tokens")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            cache_write_tokens = u
+                                .get("cache_creation_input_tokens")
                                 .and_then(Value::as_u64)
                                 .unwrap_or(0);
                         }
@@ -944,7 +1122,17 @@ impl LLMCore for AnthropicCore {
         }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
-        let cost = calculate_inference_cost(&usage, &self.pricing);
+        // Weight cache-write/read tokens into the cost basis (see non-streaming
+        // path) so streamed inferences bill true spend for budget enforcement (H2).
+        let cost = calculate_inference_cost(
+            &weighted_usage_for_cost(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                cache_write_tokens,
+                cached_tokens,
+            ),
+            &self.pricing,
+        );
 
         let result = InferenceResult {
             text: full_text,
@@ -999,7 +1187,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
 
         // System prompt is separated in Anthropic
         assert_eq!(messages.len(), 1);
@@ -1040,7 +1228,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
         let content = messages[0]["content"].as_array().expect("array");
         assert!(content.iter().any(|b| b["type"] == "image"));
         let img = content.iter().find(|b| b["type"] == "image").unwrap();
@@ -1114,6 +1302,8 @@ mod tests {
         };
         let manifest = ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: "file-reader".to_string(),
                 version: "1.0.0".to_string(),
                 description: "Read a file".to_string(),
@@ -1134,9 +1324,10 @@ mod tests {
                 input: "Input".to_string(),
                 output: "Output".to_string(),
             },
-            input_schema: Some(
+            payload_schema: Some(
                 json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -1153,11 +1344,35 @@ mod tests {
             tags: vec![],
         };
 
-        let (tools, intent_map) =
-            AnthropicCore::build_anthropic_tools(&[manifest.clone(), manifest]);
+        let (tools, intent_map, _) =
+            AnthropicCore::build_anthropic_tools(&[manifest.clone(), manifest.clone()], None);
+        {
+            // Provider-native deferral: only the tail at index ≥ n is flagged.
+            let mut other = manifest.clone();
+            other.manifest.name = "shell-exec".to_string();
+            let (deferred, _, _) =
+                AnthropicCore::build_anthropic_tools(&[manifest, other], Some(1));
+            assert!(deferred[0].get("defer_loading").is_none());
+            assert_eq!(deferred[1]["defer_loading"], true);
+        }
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "file-reader");
         assert_eq!(intent_map.get("file-reader"), Some(&"read".to_string()));
+
+        // Golden-body assertion: Anthropic Messages API requires `input_schema`
+        // (NOT `payload_schema`). Using the wrong key silently produces schemaless
+        // tools or 400 errors. This is the regression test for that bug.
+        assert!(
+            tools[0].get("input_schema").is_some(),
+            "Anthropic tool def must use `input_schema` key; got: {}",
+            tools[0]
+        );
+        assert!(
+            tools[0].get("payload_schema").is_none(),
+            "Anthropic tool def must NOT carry `payload_schema` — that's the AgentOS-internal field name"
+        );
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
+        assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
 
     #[test]
@@ -1200,7 +1415,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
 
         assert_eq!(messages.len(), 2);
         // First message is the user message
@@ -1215,6 +1430,80 @@ mod tests {
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "toolu_abc123");
         assert_eq!(content[0]["content"], "file contents here");
+    }
+
+    #[test]
+    fn test_format_messages_renders_tool_references_for_deferred_tools() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            parts: vec![ContentPart::Text {
+                text: "{\"matches\":[{\"name\":\"web-fetch\"}]}".to_string(),
+            }],
+            metadata: Some(ContextMetadata {
+                tool_name: Some("search-tools".to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: Some("toolu_search".to_string()),
+                assistant_tool_calls: None,
+            }),
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        ctx.tool_references
+            .insert("toolu_search".to_string(), vec!["web-fetch".to_string()]);
+
+        let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
+        let messages = adapter.format_messages(&ctx, true);
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "tool_result");
+        let inner = content[0]["content"]
+            .as_array()
+            .expect("text + tool_reference blocks");
+        assert_eq!(inner[0]["type"], "text");
+        assert_eq!(inner[1]["type"], "tool_reference");
+        assert_eq!(inner[1]["tool_name"], "web-fetch");
+    }
+
+    #[test]
+    fn test_format_messages_omits_tool_references_when_deferral_inactive() {
+        // Same context as above, but the request is not sending the full
+        // catalogue (400 fallback / final synthesis / stream path): the
+        // reference would name a tool absent from `tools` → must be plain text.
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            parts: vec![ContentPart::Text {
+                text: "{\"matches\":[{\"name\":\"web-fetch\"}]}".to_string(),
+            }],
+            metadata: Some(ContextMetadata {
+                tool_name: Some("search-tools".to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: Some("toolu_search".to_string()),
+                assistant_tool_calls: None,
+            }),
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        ctx.tool_references
+            .insert("toolu_search".to_string(), vec!["web-fetch".to_string()]);
+        let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
+        let messages = adapter.format_messages(&ctx, false);
+        let content = messages[0]["content"].as_array().unwrap();
+        assert!(content[0]["content"].is_string(), "{:?}", content[0]);
     }
 
     #[test]
@@ -1236,7 +1525,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
 
         // Legacy results are now emitted as text content blocks in a user message
         assert_eq!(messages.len(), 1);
@@ -1295,7 +1584,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
 
         // Both tool results should be in a single user message
         assert_eq!(messages.len(), 1);
@@ -1348,7 +1637,7 @@ mod tests {
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
-        let messages = adapter.format_messages(&ctx);
+        let messages = adapter.format_messages(&ctx, true);
 
         // Both should be in a single user message (no consecutive user messages)
         assert_eq!(messages.len(), 1);
@@ -1369,7 +1658,7 @@ mod tests {
                 { "type": "text", "text": "world" }
             ]
         });
-        attach_cache_control_to_last_block(&mut msg);
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::FiveMinutes);
         let blocks = msg["content"].as_array().unwrap();
         assert!(blocks[0].get("cache_control").is_none());
         assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
@@ -1381,12 +1670,34 @@ mod tests {
             "role": "user",
             "content": "hello"
         });
-        attach_cache_control_to_last_block(&mut msg);
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::FiveMinutes);
         let blocks = msg["content"].as_array().expect("rewritten to array");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "hello");
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_cache_control_value_emits_ttl_only_for_one_hour() {
+        // 5m must stay byte-identical to the legacy marker — no `ttl` key.
+        assert_eq!(
+            cache_control_value(PromptCacheTtl::FiveMinutes),
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            cache_control_value(PromptCacheTtl::OneHour),
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
+    #[test]
+    fn test_attach_cache_control_one_hour_carries_ttl() {
+        let mut msg = json!({ "role": "user", "content": "hello" });
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::OneHour);
+        let blocks = msg["content"].as_array().expect("rewritten to array");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[0]["cache_control"]["ttl"], "1h");
     }
 
     /// Test the stop reason mapping used in infer_with_tools.
@@ -1409,5 +1720,171 @@ mod tests {
             };
             assert_eq!(result, expected, "Failed for input: {input}");
         }
+    }
+}
+
+/// The tool definition that carries cache breakpoint #2: the last tool of the
+/// stable prefix (`prefix_len`), or the last tool when no prefix is declared
+/// or it is out of range. Tools appended after the prefix (armed on demand)
+/// then leave the cached block untouched.
+fn cache_breakpoint_tool(
+    tools: &mut [serde_json::Value],
+    prefix_len: Option<usize>,
+) -> Option<&mut serde_json::Value> {
+    let idx = match prefix_len {
+        Some(n) if n > 0 && n <= tools.len() => n - 1,
+        _ => tools.len().checked_sub(1)?,
+    };
+    tools.get_mut(idx)
+}
+
+/// Models that accept `defer_loading` / `tool_reference` (Anthropic tool
+/// search): Sonnet/Haiku/Opus 4.5 and later, Opus/Sonnet 4.6–5, Fable/Mythos 5.
+/// Opus 4.1 and earlier reject the field with a 400.
+fn model_supports_deferred_tools(model: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ];
+    let m = model.trim().to_ascii_lowercase();
+    PREFIXES.iter().any(|p| m.starts_with(p))
+}
+
+/// Map an input-position boundary (`n` = "first `n` input tools") to the
+/// output position after `build_anthropic_tools` dropped blank/duplicate
+/// names, so the breakpoint never slides into the deferred tail.
+fn kept_index(kept: &[bool], n: Option<usize>) -> Option<usize> {
+    n.map(|n| kept[..n.min(kept.len())].iter().filter(|k| **k).count())
+}
+
+/// Where the tools cache breakpoint goes: the end of the stable prefix, which
+/// can never be inside the deferred tail (`defer_loading` + `cache_control` on
+/// one tool is a 400).
+fn deferral_cache_prefix(prefix_len: Option<usize>, deferred_from: Option<usize>) -> Option<usize> {
+    match (prefix_len, deferred_from) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+impl AnthropicCore {
+    /// A 400 mentioning `defer_loading`/`tool_reference` means this endpoint
+    /// (proxy, older model) does not support tool search: flip to kernel
+    /// emulation for this adapter instance rather than failing every turn.
+    ///
+    /// `requested`: this request carried `defer_loading`. Any 400 then counts:
+    /// a proxy that does not understand the field may answer with a generic
+    /// message, and repeating the request every iteration helps nobody.
+    fn note_deferral_rejection(&self, e: &AgentOSError, requested: bool) {
+        let msg = e.to_string();
+        if msg.contains("API error 400")
+            && (requested || msg.contains("defer_loading") || msg.contains("tool_reference"))
+            && !self.deferral_rejected.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                model = %self.model,
+                "Anthropic rejected deferred tool loading — sending every tool inline for this adapter instance"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod deferral_tests {
+    use super::*;
+
+    #[test]
+    fn model_gate_matches_tool_search_capable_models_only() {
+        for m in [
+            "claude-opus-5",
+            "claude-fable-5-1",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+        ] {
+            assert!(model_supports_deferred_tools(m), "{m}");
+        }
+        for m in [
+            "claude-opus-4-1",
+            "claude-3-5-sonnet-20241022",
+            "claude-sonnet-4-20250514",
+            "",
+        ] {
+            assert!(!model_supports_deferred_tools(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn cache_prefix_never_reaches_into_deferred_tail() {
+        assert_eq!(deferral_cache_prefix(None, None), None);
+        assert_eq!(deferral_cache_prefix(Some(7), None), Some(7));
+        assert_eq!(deferral_cache_prefix(Some(7), Some(5)), Some(5));
+        assert_eq!(deferral_cache_prefix(None, Some(5)), Some(5));
+    }
+}
+
+#[cfg(test)]
+mod cache_breakpoint_tests {
+    use super::cache_breakpoint_tool;
+    use serde_json::json;
+
+    #[test]
+    fn prefix_len_pins_breakpoint_so_appended_tools_do_not_move_it() {
+        let mut tools = vec![
+            json!({"name":"a"}),
+            json!({"name":"b"}),
+            json!({"name":"c"}),
+        ];
+        let bp = cache_breakpoint_tool(&mut tools, Some(2)).unwrap();
+        assert_eq!(bp["name"], "b");
+        // Arm one more tool after the prefix — breakpoint still on "b".
+        tools.push(json!({"name":"d"}));
+        assert_eq!(
+            cache_breakpoint_tool(&mut tools, Some(2)).unwrap()["name"],
+            "b"
+        );
+        // Legacy / out-of-range → last tool.
+        assert_eq!(
+            cache_breakpoint_tool(&mut tools, None).unwrap()["name"],
+            "d"
+        );
+        assert_eq!(
+            cache_breakpoint_tool(&mut tools, Some(9)).unwrap()["name"],
+            "d"
+        );
+        assert_eq!(
+            cache_breakpoint_tool(&mut tools, Some(0)).unwrap()["name"],
+            "d"
+        );
+        assert!(cache_breakpoint_tool(&mut [], Some(1)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod kept_index_tests {
+    use super::{deferral_cache_prefix, kept_index};
+
+    #[test]
+    fn kept_index_maps_input_boundary_past_dropped_entries() {
+        // input: [a, "", b, a(dup), c] → kept [t, f, t, f, t] → output [a, b, c]
+        let kept = [true, false, true, false, true];
+        assert_eq!(kept_index(&kept, Some(3)), Some(2));
+        assert_eq!(kept_index(&kept, Some(4)), Some(2));
+        assert_eq!(kept_index(&kept, Some(5)), Some(3));
+        assert_eq!(kept_index(&kept, Some(99)), Some(3));
+        assert_eq!(kept_index(&kept, None), None);
+        assert_eq!(
+            deferral_cache_prefix(kept_index(&kept, Some(3)), kept_index(&kept, Some(3))),
+            Some(2)
+        );
     }
 }

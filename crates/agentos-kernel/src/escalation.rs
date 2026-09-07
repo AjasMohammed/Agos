@@ -1,5 +1,6 @@
 use crate::kernel_action::EscalationReason;
 use crate::state_store::KernelStateStore;
+use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,31 @@ use tokio::sync::{oneshot, RwLock};
 pub enum ResolutionOutcome {
     Approved,
     Denied,
+    /// Nobody answered before `expires_at`; the executor reports this as an
+    /// expiry rather than an operator denial.
+    Expired,
+}
+
+/// Normalize an operator-supplied escalation decision string into approve/deny.
+///
+/// Different surfaces produce different literals for the same intent — the CLI
+/// `escalation resolve` and the interactive TTY prompt send `"approve"`, the
+/// channel `/approve` path sends `"approved"`, and the REST API forwards
+/// whatever the operator passed. Treat the common approval synonyms (any case)
+/// as approval; everything else denies (fail-closed).
+pub(crate) fn resolution_is_approval(resolution: &str) -> bool {
+    // Leading word only: the REST path folds an operator note into the
+    // string as `"approve (looks fine)"`, which must still count as approval
+    // (previously it silently DENIED and failed the task).
+    let head = resolution
+        .trim()
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()
+        .unwrap_or("");
+    matches!(
+        head.to_ascii_lowercase().as_str(),
+        "approve" | "approved" | "allow" | "allowed"
+    )
 }
 
 /// What should happen automatically when an escalation expires without human resolution.
@@ -25,7 +51,7 @@ pub enum AutoAction {
 }
 
 /// Default escalation timeout in seconds (5 minutes per Spec §12).
-const DEFAULT_ESCALATION_TIMEOUT_SECS: i64 = 300;
+pub(crate) const DEFAULT_ESCALATION_TIMEOUT_SECS: i64 = 300;
 
 /// Maximum number of escalations a single task may create.
 /// Looping agents can otherwise flood the escalation log with identical entries.
@@ -77,6 +103,16 @@ fn default_metadata() -> serde_json::Value {
 pub trait BroadcastSink: Send + Sync {
     async fn broadcast(&self, escalation: &PendingEscalation);
     fn name(&self) -> &'static str;
+
+    /// Late-bind the `NotificationRouter` so a sink can reach *both* outbound
+    /// channel stacks (see `NotificationRouter::send_to_channel`). Sinks are
+    /// constructed at kernel boot before every collaborator exists; this is
+    /// called on the first channel connect/restore. Default: ignore.
+    fn attach_notification_router(
+        &self,
+        _router: &Arc<crate::notification_router::NotificationRouter>,
+    ) {
+    }
 }
 
 /// Manages escalation requests from agents to human operators.
@@ -107,6 +143,8 @@ pub struct EscalationManager {
     /// Cleared on resolve / sweeper-expiry, so the map is bounded by
     /// the in-flight escalation count.
     pending_resolution_tx: RwLock<HashMap<u64, oneshot::Sender<ResolutionOutcome>>>,
+    /// Audit sink for create/resolve events (set at kernel boot; None in unit tests).
+    audit: RwLock<Option<Arc<AuditLog>>>,
     /// Receivers waiting for pickup by `task_executor`. Stored here so
     /// the receiver lifetime is decoupled from the hook fire path —
     /// hooks are sync-and-fire-and-forget; the awaiting happens later.
@@ -114,6 +152,38 @@ pub struct EscalationManager {
 }
 
 impl EscalationManager {
+    /// Attach the audit log so approval decisions leave a durable trail.
+    pub async fn set_audit_log(&self, audit: Arc<AuditLog>) {
+        *self.audit.write().await = Some(audit);
+    }
+
+    async fn audit(&self, entry: AuditEntry) {
+        if let Some(audit) = self.audit.read().await.as_ref() {
+            if let Err(e) = audit.append(entry) {
+                tracing::error!(error = %e, "Failed to write escalation audit entry");
+            }
+        }
+    }
+
+    fn audit_entry(
+        event_type: AuditEventType,
+        esc: &PendingEscalation,
+        details: serde_json::Value,
+    ) -> AuditEntry {
+        AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: esc.trace_id,
+            event_type,
+            agent_id: Some(esc.agent_id),
+            task_id: Some(esc.task_id),
+            tool_id: None,
+            details,
+            severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
+        }
+    }
+
     pub fn new() -> Self {
         Self::with_state_store(None)
     }
@@ -127,6 +197,7 @@ impl EscalationManager {
             state_store,
             broadcast_sinks: RwLock::new(Vec::new()),
             pending_resolution_tx: RwLock::new(HashMap::new()),
+            audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
         }
     }
@@ -169,6 +240,17 @@ impl EscalationManager {
     /// to be the order of execution. Safe to call after kernel boot.
     pub async fn add_sink(&self, sink: Arc<dyn BroadcastSink>) {
         self.broadcast_sinks.write().await.push(sink);
+    }
+
+    /// Hand the `NotificationRouter` to every registered sink that wants one.
+    /// Idempotent — called on each channel connect/restore.
+    pub async fn attach_notification_router(
+        &self,
+        router: Arc<crate::notification_router::NotificationRouter>,
+    ) {
+        for sink in self.broadcast_sinks.read().await.iter() {
+            sink.attach_notification_router(&router);
+        }
     }
 
     async fn persist_escalation(&self, escalation: PendingEscalation) {
@@ -230,6 +312,41 @@ impl EscalationManager {
         trace_id: TraceID,
         auto_action: Option<AutoAction>,
     ) -> u64 {
+        self.create_escalation_with_metadata(
+            task_id,
+            agent_id,
+            reason,
+            context_summary,
+            decision_point,
+            options,
+            urgency,
+            blocking,
+            trace_id,
+            auto_action,
+            default_metadata(),
+        )
+        .await
+    }
+
+    /// [`Self::create_escalation`] with structured `metadata`. The approval
+    /// hook uses this to record `{"kind":"tool_approval","tool_name",…}` so
+    /// an "approve & remember" resolution can mint a standing grant without
+    /// parsing the human-readable `decision_point` string.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_escalation_with_metadata(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        reason: EscalationReason,
+        context_summary: String,
+        decision_point: String,
+        options: Vec<String>,
+        urgency: String,
+        blocking: bool,
+        trace_id: TraceID,
+        auto_action: Option<AutoAction>,
+        metadata: serde_json::Value,
+    ) -> u64 {
         let (id, _rx) = self
             .create_escalation_internal(
                 task_id,
@@ -243,6 +360,7 @@ impl EscalationManager {
                 trace_id,
                 auto_action,
                 false,
+                metadata,
             )
             .await;
         id
@@ -283,6 +401,7 @@ impl EscalationManager {
             trace_id,
             auto_action,
             true,
+            default_metadata(),
         )
         .await
     }
@@ -301,6 +420,7 @@ impl EscalationManager {
         trace_id: TraceID,
         auto_action: Option<AutoAction>,
         install_resolution: bool,
+        metadata: serde_json::Value,
     ) -> (u64, Option<oneshot::Receiver<ResolutionOutcome>>) {
         // Acquire the write lock once so the cap check and push are atomic,
         // preventing a TOCTOU race where two concurrent callers both pass the check.
@@ -342,7 +462,7 @@ impl EscalationManager {
             created_at: now,
             expires_at,
             auto_action: auto_action.unwrap_or(AutoAction::Deny),
-            metadata: default_metadata(),
+            metadata,
             resolved: false,
             resolution: None,
             resolved_at: None,
@@ -350,7 +470,6 @@ impl EscalationManager {
 
         escalations.push(escalation.clone());
         drop(escalations);
-
         // Install the resolution channel BEFORE dispatching sinks/webhooks
         // so a fast user resolve cannot land before the sender exists.
         let receiver = if install_resolution {
@@ -360,6 +479,23 @@ impl EscalationManager {
         } else {
             None
         };
+
+        // Audited only AFTER the resolution channel exists: `audit` is a
+        // blocking SQLite write, and a resolve landing in that window would
+        // find no sender and park the waiter until its own timeout.
+        self.audit(Self::audit_entry(
+            AuditEventType::EscalationCreated,
+            &escalation,
+            serde_json::json!({
+                "escalation_id": id,
+                "reason": format!("{:?}", escalation.reason),
+                "urgency": escalation.urgency,
+                "blocking": blocking,
+                "decision_point": escalation.decision_point,
+                "expires_at": expires_at.to_rfc3339(),
+            }),
+        ))
+        .await;
 
         self.persist_escalation(escalation.clone()).await;
         tracing::info!(
@@ -468,6 +604,11 @@ impl EscalationManager {
 
     /// Resolve an escalation with a human decision.
     /// Returns the task_id, agent_id, and whether it was blocking.
+    ///
+    /// `resolution` is the operator-supplied decision string. It is normalized
+    /// via [`resolution_is_approval`] so that CLI/API decisions like `"approve"`
+    /// and channel decisions like `"approved"` (and `allow`/`allowed`, any case)
+    /// all map to [`ResolutionOutcome::Approved`]. Anything else denies.
     pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, AgentID, bool)> {
         let mut to_persist = None;
         let mut escalations = self.escalations.write().await;
@@ -491,6 +632,17 @@ impl EscalationManager {
         drop(escalations);
 
         if let Some(escalation) = to_persist {
+            self.audit(Self::audit_entry(
+                AuditEventType::EscalationResolved,
+                &escalation,
+                serde_json::json!({
+                    "escalation_id": id,
+                    "resolution": resolution,
+                    "approved": resolution_is_approval(&resolution),
+                    "decision_point": escalation.decision_point,
+                }),
+            ))
+            .await;
             self.persist_escalation(escalation).await;
         }
 
@@ -501,7 +653,7 @@ impl EscalationManager {
         // from a non-blocking source like CLI `agentos escalation
         // create`).
         if result.is_some() {
-            let outcome = if resolution == "approved" {
+            let outcome = if resolution_is_approval(&resolution) {
                 ResolutionOutcome::Approved
             } else {
                 ResolutionOutcome::Denied
@@ -623,6 +775,17 @@ impl EscalationManager {
         drop(escalations);
 
         for escalation in to_persist {
+            self.audit(Self::audit_entry(
+                AuditEventType::EscalationExpired,
+                &escalation,
+                serde_json::json!({
+                    "escalation_id": escalation.id,
+                    "auto_action": format!("{:?}", escalation.auto_action).to_lowercase(),
+                    "resolution": escalation.resolution,
+                    "decision_point": escalation.decision_point,
+                }),
+            ))
+            .await;
             self.persist_escalation(escalation).await;
         }
 
@@ -636,7 +799,7 @@ impl EscalationManager {
             for (id, _, _, _, auto_action) in &expired {
                 let outcome = match auto_action {
                     AutoAction::Approve => ResolutionOutcome::Approved,
-                    AutoAction::Deny => ResolutionOutcome::Denied,
+                    AutoAction::Deny => ResolutionOutcome::Expired,
                 };
                 if let Some(tx) = tx_map.remove(id) {
                     let _ = tx.send(outcome);
@@ -646,6 +809,42 @@ impl EscalationManager {
         }
 
         expired
+    }
+
+    /// Prune resolved escalations older than `max_age` from the in-memory list,
+    /// and drop any orphaned resolution channels. Without this, a long-running
+    /// kernel accumulates every resolved escalation in the in-memory `Vec` and
+    /// leaks `pending_resolution_{tx,rx}` map entries forever. Full history is
+    /// still retained in SQLite via `persist_escalation`, so dropping the
+    /// in-memory copy of old resolved entries is safe. Returns the count pruned.
+    pub async fn prune_resolved(&self, max_age: chrono::Duration) -> usize {
+        let now = chrono::Utc::now();
+        let mut escalations = self.escalations.write().await;
+        let before = escalations.len();
+        escalations.retain(|e| {
+            if !e.resolved {
+                return true;
+            }
+            match e.resolved_at {
+                Some(at) => now - at < max_age,
+                None => true, // resolved but untimestamped: keep (defensive)
+            }
+        });
+        let pruned = before - escalations.len();
+        // Any resolution channel whose escalation is no longer tracked is
+        // orphaned — drop it so the maps don't grow unbounded.
+        let live_ids: std::collections::HashSet<u64> = escalations.iter().map(|e| e.id).collect();
+        drop(escalations);
+        {
+            let mut tx_map = self.pending_resolution_tx.write().await;
+            tx_map.retain(|id, _| live_ids.contains(id));
+            let mut rx_map = self.pending_resolution_rx.write().await;
+            rx_map.retain(|id, _| live_ids.contains(id));
+        }
+        if pruned > 0 {
+            tracing::debug!(pruned, "Pruned resolved escalations from in-memory list");
+        }
+        pruned
     }
 
     /// Create a soft-approval escalation with a 30-second auto-approve window.
@@ -1033,6 +1232,7 @@ mod tests {
             state_store: None,
             broadcast_sinks: RwLock::new(Vec::new()),
             pending_resolution_tx: RwLock::new(HashMap::new()),
+            audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
         };
         let id = manager
@@ -1054,7 +1254,7 @@ mod tests {
         let expired = manager.sweep_expired().await;
         assert_eq!(expired.len(), 1);
         let outcome = rx.await.unwrap();
-        assert!(matches!(outcome, ResolutionOutcome::Denied));
+        assert!(matches!(outcome, ResolutionOutcome::Expired));
     }
 
     #[tokio::test]
@@ -1283,6 +1483,7 @@ mod tests {
             state_store: None,
             broadcast_sinks: RwLock::new(Vec::new()),
             pending_resolution_tx: RwLock::new(HashMap::new()),
+            audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
         };
 
@@ -1329,6 +1530,7 @@ mod tests {
             state_store: None,
             broadcast_sinks: RwLock::new(Vec::new()),
             pending_resolution_tx: RwLock::new(HashMap::new()),
+            audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
         };
 

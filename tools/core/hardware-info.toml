@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "hardware-info"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Return hardware capabilities: CPU, memory, GPU, and disk capacity via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
+search_hints = ["what hardware is this", "cpu and memory specs", "system info"]
 
 [capabilities_required]
 permissions = ["hardware.system:r"]
@@ -17,7 +20,7 @@ outputs = ["content.structured"]
 input  = "HardwareInfoQuery"
 output = "HardwareInfoResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "No input required"
 

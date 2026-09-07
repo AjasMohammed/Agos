@@ -1,4 +1,5 @@
 tags = ["meta", "read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "list-tools"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "List available tools with pagination. Filter by category or tag."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+search_hints = ["browse available tools", "what tools are in a category", "page through the catalogue"]
 tags        = ["meta", "read"]
 
 [capabilities_required]
@@ -19,23 +20,23 @@ outputs = ["content.structured"]
 input  = "ToolListQuery"
 output = "ToolListPage"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.category]
+[payload_schema.properties.category]
 type = "string"
 description = "Optional category filter such as filesystem, memory, network, or coordination"
 
-[input_schema.properties.tag]
+[payload_schema.properties.tag]
 type = "string"
 description = "Optional tag filter: read, write, exec, network, fs, or meta"
 
-[input_schema.properties.page]
+[payload_schema.properties.page]
 type = "integer"
 minimum = 0
 default = 0
 
-[input_schema.properties.page_size]
+[payload_schema.properties.page_size]
 type = "integer"
 minimum = 1
 maximum = 50

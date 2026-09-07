@@ -14,10 +14,10 @@ pub struct CatalogEntry {
     pub api_key_env: String,
     pub compatible_with: String,
     pub default_model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
     /// Model IDs that accept OpenAI-style `image_url` parts (CustomCore / openai-compat).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vision_models: Vec<String>,
 
     // ---- Capability overrides (apply to all models for this provider) ----
@@ -29,6 +29,11 @@ pub struct CatalogEntry {
     pub supports_images: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tool_calling: Option<bool>,
+    /// Whether this provider should use native tool-calling prompt mode
+    /// (`tool_calls` protocol) instead of JSON-in-markdown fallback guidance.
+    /// Defaults to `None` (treated as false/safe fallback by `CustomCore`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_tool_calling: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_streaming: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,6 +63,35 @@ pub struct CatalogEntry {
     /// Static extra headers attached to every request (e.g. tenancy IDs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_headers: Option<HashMap<String, String>>,
+
+    /// JSON object merged into every chat-completions request body. Escape
+    /// hatch for provider-specific knobs that are not part of the OpenAI
+    /// schema — e.g. NVIDIA NIM's per-model reasoning toggles
+    /// (`{"chat_template_kwargs":{"enable_thinking":false}}`) or `nvext`.
+    /// Kept as a raw JSON string so arbitrary nesting round-trips through the
+    /// hand-rolled TOML writer. Adapter-set keys always win over these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body_json: Option<String>,
+
+    /// Absolute URL polled when the provider answers with `202 Accepted` and a
+    /// request id instead of a result, with `{id}` substituted. NVIDIA's NIM
+    /// gateway does this for long generations. Unset (the default) means a 202
+    /// is treated as an ordinary response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_url_template: Option<String>,
+
+    // ---- Timeout overrides (seconds) ----
+    /// Idle timeout for *streaming* (SSE) requests — max silence between chunks
+    /// before the request fails. Default 60s. Does not apply to non-streaming
+    /// completions, which are silent until generation finishes; there
+    /// `request_timeout_secs` is the only bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_timeout_secs: Option<u64>,
+    /// Total per-request timeout, and the only hard deadline on a non-streaming
+    /// completion. Default `DEFAULT_INFERENCE_TIMEOUT_SECS`. Also bounds NVCF
+    /// 202 polling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 
     /// Permit a private/loopback/link-local `base_url`. Required for legitimate
     /// local providers (lmstudio, ollama, vllm). Catalog validation rejects
@@ -125,6 +159,13 @@ impl ProviderCatalog {
             )
         })?;
         Self::parse(&content).map_err(|e| format!("Failed to parse provider catalog: {}", e))
+    }
+
+    /// Parse a catalog from a TOML string. Used for the built-in catalog that
+    /// ships embedded in the binary as a fallback when no `providers.toml` is
+    /// colocated with the config file.
+    pub fn from_toml_str(content: &str) -> Result<Self, String> {
+        Self::parse(content).map_err(|e| format!("Failed to parse provider catalog: {}", e))
     }
 
     /// Create an empty catalog with no providers.
@@ -215,91 +256,26 @@ impl ProviderCatalog {
     }
 
     /// Serialize the catalog back to TOML and write it to `path`.
+    ///
+    /// Uses the derived `Serialize` impl rather than hand-built lines: TOML
+    /// basic-string escaping is not Rust's `{:?}` escaping (Rust emits
+    /// `\u{7}` where TOML demands `\u0007`, and `\0` which TOML rejects
+    /// outright), so any entry holding a control character, a combining mark
+    /// or a zero-width character used to round-trip into a file the kernel
+    /// could no longer parse — at which point it silently falls back to the
+    /// embedded catalog and every user-added provider disappears.
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
-        let mut lines = String::new();
-        // Sort entries for stable output
+        #[derive(Serialize)]
+        struct CatalogFileOut<'a> {
+            provider: Vec<&'a CatalogEntry>,
+        }
+
+        // Sort entries for stable output.
         let mut entries: Vec<&CatalogEntry> = self.providers.values().collect();
         entries.sort_by_key(|e| &e.name);
-        for entry in entries {
-            lines.push_str("[[provider]]\n");
-            lines.push_str(&format!("name = {:?}\n", entry.name));
-            lines.push_str(&format!("display_name = {:?}\n", entry.display_name));
-            lines.push_str(&format!("base_url = {:?}\n", entry.base_url));
-            lines.push_str(&format!("api_key_env = {:?}\n", entry.api_key_env));
-            lines.push_str(&format!("compatible_with = {:?}\n", entry.compatible_with));
-            lines.push_str(&format!("default_model = {:?}\n", entry.default_model));
-            if !entry.models.is_empty() {
-                let models_str = entry
-                    .models
-                    .iter()
-                    .map(|m| format!("{:?}", m))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push_str(&format!("models = [{}]\n", models_str));
-            }
-            if !entry.vision_models.is_empty() {
-                let vm_str = entry
-                    .vision_models
-                    .iter()
-                    .map(|m| format!("{:?}", m))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push_str(&format!("vision_models = [{}]\n", vm_str));
-            }
-            // Optional capability + auth + path overrides.
-            if let Some(v) = entry.context_window {
-                lines.push_str(&format!("context_window = {}\n", v));
-            }
-            if let Some(v) = entry.max_output_tokens {
-                lines.push_str(&format!("max_output_tokens = {}\n", v));
-            }
-            if let Some(v) = entry.supports_images {
-                lines.push_str(&format!("supports_images = {}\n", v));
-            }
-            if let Some(v) = entry.supports_tool_calling {
-                lines.push_str(&format!("supports_tool_calling = {}\n", v));
-            }
-            if let Some(v) = entry.supports_streaming {
-                lines.push_str(&format!("supports_streaming = {}\n", v));
-            }
-            if let Some(v) = entry.supports_prompt_caching {
-                lines.push_str(&format!("supports_prompt_caching = {}\n", v));
-            }
-            if let Some(v) = entry.supports_json_mode {
-                lines.push_str(&format!("supports_json_mode = {}\n", v));
-            }
-            if let Some(v) = entry.supports_thinking {
-                lines.push_str(&format!("supports_thinking = {}\n", v));
-            }
-            if let Some(v) = &entry.auth_header {
-                lines.push_str(&format!("auth_header = {:?}\n", v));
-            }
-            if let Some(v) = &entry.auth_prefix {
-                lines.push_str(&format!("auth_prefix = {:?}\n", v));
-            }
-            if let Some(v) = &entry.chat_path {
-                lines.push_str(&format!("chat_path = {:?}\n", v));
-            }
-            if let Some(v) = &entry.models_path {
-                lines.push_str(&format!("models_path = {:?}\n", v));
-            }
-            if let Some(map) = &entry.extra_headers {
-                if !map.is_empty() {
-                    let mut keys: Vec<&String> = map.keys().collect();
-                    keys.sort();
-                    let body = keys
-                        .iter()
-                        .map(|k| format!("{:?} = {:?}", k, map[*k]))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    lines.push_str(&format!("extra_headers = {{ {} }}\n", body));
-                }
-            }
-            if let Some(v) = entry.allow_private_hosts {
-                lines.push_str(&format!("allow_private_hosts = {}\n", v));
-            }
-            lines.push('\n');
-        }
+        let lines = toml::to_string(&CatalogFileOut { provider: entries })
+            .map_err(|e| format!("Failed to serialize provider catalog: {e}"))?;
+
         // Atomic write: stage to a sibling `.tmp` file then rename. A crash
         // mid-write leaves the original `providers.toml` intact rather than
         // truncated.
@@ -543,5 +519,62 @@ default_model = "deepseek-chat"
                 .map(String::as_str),
             Some("abc")
         );
+    }
+
+    #[test]
+    fn test_save_round_trip_with_body_and_timeout_overrides() {
+        const BODY: &str = r#"{"chat_template_kwargs":{"enable_thinking":false}}"#;
+        let mut catalog = ProviderCatalog::empty();
+        catalog.upsert(CatalogEntry {
+            name: "nim".into(),
+            display_name: "NIM".into(),
+            base_url: "https://x".into(),
+            api_key_env: "K".into(),
+            compatible_with: "openai".into(),
+            default_model: "m".into(),
+            extra_body_json: Some(BODY.into()),
+            read_timeout_secs: Some(300),
+            request_timeout_secs: Some(600),
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        catalog.save_to_file(&path).unwrap();
+        let e = ProviderCatalog::from_file(&path)
+            .unwrap()
+            .lookup("nim")
+            .cloned()
+            .unwrap();
+        assert_eq!(e.extra_body_json.as_deref(), Some(BODY));
+        assert_eq!(e.read_timeout_secs, Some(300));
+        assert_eq!(e.request_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn test_save_round_trip_escapes_control_and_combining_chars() {
+        // Rust's `{:?}` renders these as `\u{7}` / `\0` / `\u{301}`, none of
+        // which TOML accepts — the old hand-rolled writer produced a file the
+        // kernel then refused to parse, silently reverting to the embedded
+        // catalog and dropping every user-added provider.
+        let nasty = "bell:\u{7} nul:\u{0} combining:e\u{301} zwsp:\u{200b} quote:\" back:\\";
+        let body = format!("{{\"stop\":\"{nasty}\"}}");
+        let mut catalog = ProviderCatalog::empty();
+        catalog.upsert(CatalogEntry {
+            name: "weird".into(),
+            display_name: nasty.into(),
+            base_url: "https://x".into(),
+            api_key_env: "K".into(),
+            compatible_with: "openai".into(),
+            default_model: "m".into(),
+            extra_body_json: Some(body.clone()),
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        catalog.save_to_file(&path).unwrap();
+        let loaded = ProviderCatalog::from_file(&path).expect("saved catalog must re-parse");
+        let e = loaded.lookup("weird").unwrap();
+        assert_eq!(e.display_name, nasty);
+        assert_eq!(e.extra_body_json.as_deref(), Some(body.as_str()));
     }
 }

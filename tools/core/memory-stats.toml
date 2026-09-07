@@ -1,4 +1,5 @@
-tags = ["read", "meta"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "memory-stats"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Report entry counts across all memory tiers for the current agent"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["how much do I remember", "memory usage counts"]
 
 [capabilities_required]
 permissions = []
@@ -17,7 +19,7 @@ outputs = ["content.text"]
 input  = "MemoryStatsIntent"
 output = "MemoryStatsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "No input required"
 

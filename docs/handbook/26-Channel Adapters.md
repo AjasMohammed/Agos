@@ -20,6 +20,8 @@ priority: high
 
 ## Overview
 
+The crate ships **10 platform adapters**: Discord, Telegram, Slack, WhatsApp, Webhook, Email, Matrix, Mattermost, Teams, and Line.
+
 Channel adapters connect AgentOS to external messaging platforms. Each adapter handles:
 
 - **Inbound** — receiving messages from users on the platform and routing them to agents
@@ -54,6 +56,10 @@ Discord/Telegram/Slack/WhatsApp
 | **WhatsApp** | Webhook (inbound via REST API) | Cloud API v18 | 4,096 chars | ✗ | Stable |
 | **Webhook** | Webhook (inbound via REST API) | HTTP POST | 100,000 chars | ✗ | Stable |
 | **Email** | Stub (IMAP planned) | SMTP via `lettre` | Unlimited | ✓ | Partial |
+| **Matrix** | HTTP long-poll `/sync` (30s) | PUT `/send` | — | ✓ | Stable |
+| **Mattermost** | WebSocket | REST API | — | ✓ | Stable |
+| **Teams** | Via agentos-web webhook | Incoming Webhook | — | ✗ | Stable |
+| **Line** | Webhook (inbound via REST API) | Reply API | — | ✗ | Stable |
 
 ---
 
@@ -381,6 +387,75 @@ channel_manager.register("email-ops", Arc::new(adapter)).await?;
 - Messages are sent as plain text (`text/plain`)
 - The SMTP connection is established per-send (no persistent connection pool)
 - STARTTLS is used when the port supports it (typically port 587)
+
+---
+
+## Matrix
+
+Matrix uses the Client-Server API. Inbound messages arrive via **HTTP long-polling** of the `/sync` endpoint (30-second timeout); outbound messages are sent via **PUT `/send`**.
+
+### What you need
+
+- A Matrix homeserver URL (e.g. `https://matrix.org`)
+- An **access token** for the bot account
+- The **room ID** to bridge
+
+### Behaviour
+
+- The adapter long-polls `/sync` with a 30-second timeout, advancing the `since` pagination token after each batch so events are not re-delivered
+- Outbound messages use `PUT /send` to post into the configured room
+- The access token is held as `Zeroizing<String>` and zeroed from the heap on drop
+
+---
+
+## Mattermost
+
+Mattermost uses the **REST API** for outbound messages and a **WebSocket** for inbound events.
+
+### What you need
+
+- A Mattermost server URL
+- A **bot/personal access token**
+- The **channel ID** to bridge
+
+### Behaviour
+
+- On connect, the adapter performs an `auth_challenge` over the WebSocket to authenticate the session
+- Inbound events stream over the WebSocket; outbound messages are posted via the REST API
+- The access token is held as `Zeroizing<String>` and zeroed from the heap on drop
+
+---
+
+## Teams
+
+Microsoft Teams is **outbound-only** via an **Incoming Webhook**. Inbound messages are handled through the agentos-web webhook layer.
+
+### What you need
+
+- An **Incoming Webhook URL** configured for the target Teams channel
+
+### Behaviour
+
+- Outbound messages POST to the configured Incoming Webhook URL
+- Inbound messages are not received by this adapter directly — they arrive via the agentos-web webhook endpoint
+- The webhook URL/credentials are held as `Zeroizing<String>` and zeroed from the heap on drop
+
+---
+
+## Line
+
+Line uses the **Reply API** for outbound messages and a webhook for inbound events, with **HMAC-SHA256** verification of inbound webhook signatures.
+
+### What you need
+
+- A **channel access token** (Messaging API)
+- A **channel secret** for inbound signature verification
+
+### Behaviour
+
+- Outbound messages use the Line Reply API
+- Inbound webhooks are verified with HMAC-SHA256 (using the channel secret) before being forwarded to the `ChannelManager`
+- Tokens are held as `Zeroizing<String>` and zeroed from the heap on drop
 
 ---
 

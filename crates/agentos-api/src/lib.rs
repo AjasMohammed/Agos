@@ -3,6 +3,8 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod kernel_impl;
+pub mod openapi;
+pub mod response;
 pub mod router;
 pub mod server;
 pub mod service;

@@ -26,7 +26,8 @@ pub struct GeminiCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same upstream endpoint.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
@@ -52,7 +53,9 @@ impl GeminiCore {
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    crate::traits::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             api_key,
@@ -72,7 +75,11 @@ impl GeminiCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            // Gemini has no configurable base URL — every instance talks to
+            // the one Google endpoint, so they all share one limiter.
+            concurrency: crate::retry::concurrency_limiter_for(
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -90,8 +97,25 @@ impl GeminiCore {
 
     fn format_contents(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
         let mut contents = Vec::new();
+        // Gemini's contract: one user turn whose parts mirror the preceding model
+        // turn's functionCall parts in execution order. Emitting each functionResponse
+        // as its own user turn breaks correlation when the model calls the same tool
+        // twice in one turn (same-name responses become indistinguishable). Accumulate
+        // consecutive ToolResult entries here and flush as a single user turn when the
+        // next non-tool-result entry arrives (or at end of loop).
+        let mut pending_tool_response_parts: Vec<Value> = Vec::new();
 
         for entry in context.active_entries() {
+            // Flush pending native tool responses on any non-tool-result, non-system entry.
+            if !matches!(entry.role, ContextRole::ToolResult | ContextRole::System)
+                && !pending_tool_response_parts.is_empty()
+            {
+                contents.push(json!({
+                    "role": "user",
+                    "parts": std::mem::take(&mut pending_tool_response_parts),
+                }));
+            }
+
             match entry.role {
                 ContextRole::System => continue, // System instructions are passed separately
                 ContextRole::ToolResult => {
@@ -102,17 +126,20 @@ impl GeminiCore {
                         // Parse content as JSON for structured response, fallback to wrapper.
                         let response_val = serde_json::from_str::<Value>(&entry.text())
                             .unwrap_or_else(|_| json!({"result": entry.text()}));
-                        contents.push(json!({
-                            "role": "user",
-                            "parts": [{
-                                "functionResponse": {
-                                    "name": name,
-                                    "response": response_val,
-                                }
-                            }]
+                        pending_tool_response_parts.push(json!({
+                            "functionResponse": {
+                                "name": name,
+                                "response": response_val,
+                            }
                         }));
                     } else {
-                        // Legacy fallback.
+                        // Legacy fallback — flush any pending native first, then emit text.
+                        if !pending_tool_response_parts.is_empty() {
+                            contents.push(json!({
+                                "role": "user",
+                                "parts": std::mem::take(&mut pending_tool_response_parts),
+                            }));
+                        }
                         contents.push(json!({
                             "role": "user",
                             "parts": [{"text": format!("Tool Result:\n{}", entry.text())}]
@@ -165,6 +192,16 @@ impl GeminiCore {
             }
         }
 
+        // Final flush — handles the common case where the last entries are tool results
+        // (e.g. the kernel just dispatched a tool call and is about to ask Gemini for
+        // the next inference).
+        if !pending_tool_response_parts.is_empty() {
+            contents.push(json!({
+                "role": "user",
+                "parts": pending_tool_response_parts,
+            }));
+        }
+
         contents
     }
 
@@ -187,7 +224,7 @@ impl GeminiCore {
             function_declarations.push(json!({
                 "name": tool_name,
                 "description": manifest.manifest.description,
-                "parameters": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                "parameters": tool_helpers::normalize_tool_input_schema_with_examples(manifest.payload_schema.as_ref(), &manifest.examples),
             }));
         }
 
@@ -256,6 +293,10 @@ impl GeminiCore {
 
 #[async_trait]
 impl LLMCore for GeminiCore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -316,11 +357,19 @@ impl LLMCore for GeminiCore {
         });
 
         let active = context.active_entries();
-        if let Some(sys) = active
+        // ALL system entries joined — a `.find()` here dropped the
+        // `<agent-context-memory>` block and the memory nudge on every turn.
+        let sys = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
+            .filter(|e| e.role == ContextRole::System)
             .map(|e| e.text())
-        {
+            // Drop blank entries so N empty System entries can't join into
+            // "\n\n", which is not `is_empty()` and would emit a whitespace
+            // `systemInstruction` where `.find()` previously omitted the key.
+            .filter(|t| !t.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !sys.is_empty() {
             body["systemInstruction"] = json!({"parts": [{"text": sys}]});
         }
 
@@ -360,7 +409,9 @@ impl LLMCore for GeminiCore {
             body["generationConfig"] = Value::Object(gen_config);
         }
 
-        let res = crate::retry::send_with_retry(
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (res, _permit) = crate::retry::send_with_retry(
             "gemini",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -519,40 +570,53 @@ impl LLMCore for GeminiCore {
         let mut body = json!({ "contents": contents });
 
         let active = context.active_entries();
-        if let Some(sys) = active
+        let sys = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
+            .filter(|e| e.role == ContextRole::System)
             .map(|e| e.text())
-        {
+            // Drop blank entries so N empty System entries can't join into
+            // "\n\n", which is not `is_empty()` and would emit a whitespace
+            // `systemInstruction` where `.find()` previously omitted the key.
+            .filter(|t| !t.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !sys.is_empty() {
             body["systemInstruction"] = json!({ "parts": [{"text": sys}] });
         }
         if !function_declarations.is_empty() {
             body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", self.api_key.expose_secret())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "gemini".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Gemini API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "gemini".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
+        let res = crate::retry::send_with_retry(
+            "gemini",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", self.api_key.expose_secret())
+                    .json(&body)
+            },
+        )
+        .await;
+        let (res, _permit) = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         let mut full_text = String::new();
         let mut tool_calls: Vec<InferenceToolCall> = Vec::new();
@@ -942,5 +1006,178 @@ mod tests {
         let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &HashMap::new());
         assert!(text.is_empty());
         assert!(tool_calls.is_empty());
+    }
+
+    /// Golden-body assertion: Gemini's generateContent API requires
+    /// `tools[0].functionDeclarations[]` where each entry is
+    /// `{name, description, parameters}` — same JSON Schema role as
+    /// OpenAI's `parameters` / Anthropic's `input_schema`.
+    #[test]
+    fn test_build_gemini_tools_uses_parameters_key() {
+        use agentos_types::tool::{
+            ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSchema,
+        };
+        let manifest = ToolManifest {
+            manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
+                name: "file-reader".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Read a file".to_string(),
+                author: "core".to_string(),
+                checksum: None,
+                author_pubkey: None,
+                signature: None,
+                trust_tier: TrustTier::Core,
+                tags: None,
+                capability_tags: vec![],
+                group: String::new(),
+            },
+            capabilities_required: ToolCapabilities {
+                permissions: vec!["fs.user_data:r".to_string()],
+            },
+            capabilities_provided: ToolOutputs { outputs: vec![] },
+            intent_schema: ToolSchema {
+                input: "Input".to_string(),
+                output: "Output".to_string(),
+            },
+            payload_schema: Some(
+                json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+            examples: vec![],
+            sandbox: ToolSandbox {
+                network: false,
+                fs_write: false,
+                gpu: false,
+                max_memory_mb: 64,
+                max_cpu_ms: 1000,
+                syscalls: vec![],
+                weight: None,
+            },
+            executor: ToolExecutor::default(),
+            fallbacks: vec![],
+            risk_class: Default::default(),
+            usage_hints: None,
+            tags: vec![],
+        };
+
+        let (decls, _) = GeminiCore::build_gemini_tools(&[manifest]);
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0]["name"], "file-reader");
+        assert!(
+            decls[0].get("parameters").is_some(),
+            "Gemini functionDeclaration must use `parameters` key; got: {}",
+            decls[0]
+        );
+        assert_eq!(decls[0]["parameters"]["type"], "object");
+    }
+
+    /// Regression test for the same-name parallel `functionCall` correlation
+    /// bug: when the model emits two ToolResults consecutively (matching a
+    /// preceding assistant turn that called the same tool twice), they MUST
+    /// be coalesced into a single user turn carrying two `functionResponse`
+    /// parts in execution order. Splitting them into separate user turns
+    /// breaks Gemini's positional correlation when the tool name is the same
+    /// (and is non-canonical even when names differ).
+    #[test]
+    fn test_format_contents_coalesces_consecutive_tool_results() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![ContentPart::Text {
+                text: "Run both reads".to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        // Assistant turn invokes file-reader twice.
+        ctx.push(ContextEntry {
+            role: ContextRole::Assistant,
+            parts: vec![ContentPart::Text {
+                text: String::new(),
+            }],
+            metadata: Some(ContextMetadata {
+                tool_name: None,
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: None,
+                assistant_tool_calls: Some(serde_json::json!([
+                    {"tool_name": "file-reader", "payload": {"path": "/a"}},
+                    {"tool_name": "file-reader", "payload": {"path": "/b"}},
+                ])),
+            }),
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        // Two consecutive ToolResults — must coalesce into ONE user turn.
+        for (i, body) in [r#"{"contents": "A"}"#, r#"{"contents": "B"}"#]
+            .iter()
+            .enumerate()
+        {
+            ctx.push(ContextEntry {
+                role: ContextRole::ToolResult,
+                parts: vec![ContentPart::Text {
+                    text: body.to_string(),
+                }],
+                metadata: Some(ContextMetadata {
+                    tool_name: Some("file-reader".to_string()),
+                    tool_id: None,
+                    intent_id: None,
+                    tokens_estimated: None,
+                    tool_call_id: Some(format!("call_{i}")),
+                    assistant_tool_calls: None,
+                }),
+                timestamp: chrono::Utc::now(),
+                importance: 0.5,
+                pinned: false,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::History,
+                is_summary: false,
+            });
+        }
+
+        let adapter = GeminiCore::new(SecretString::new("fake".into()), "gemini".into());
+        let contents = adapter.format_contents(&ctx);
+
+        // Expected shape: user (prompt) → model (two functionCalls) → user (two functionResponses)
+        assert_eq!(
+            contents.len(),
+            3,
+            "Two ToolResults must collapse to ONE user turn; got {} entries",
+            contents.len()
+        );
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[2]["role"], "user");
+
+        let response_parts = contents[2]["parts"].as_array().expect("parts is array");
+        assert_eq!(
+            response_parts.len(),
+            2,
+            "Coalesced user turn must carry two functionResponse parts in execution order"
+        );
+        assert_eq!(response_parts[0]["functionResponse"]["name"], "file-reader");
+        assert_eq!(
+            response_parts[0]["functionResponse"]["response"]["contents"],
+            "A"
+        );
+        assert_eq!(response_parts[1]["functionResponse"]["name"], "file-reader");
+        assert_eq!(
+            response_parts[1]["functionResponse"]["response"]["contents"],
+            "B"
+        );
     }
 }

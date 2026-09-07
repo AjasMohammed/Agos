@@ -24,7 +24,7 @@ When given an automation task:
 5. **Verification**: Take a final screenshot and describe what was accomplished.
 
 ## Tools Available
-- `shell-exec`: Execute Playwright/Puppeteer scripts and CLI tools
+- `shell-exec`: Execute Playwright/Puppeteer scripts and CLI tools. The sandbox has **no network by default** — pass `allow_network: true` in the payload or every navigation fails with a DNS/connection error.
 - `file-writer`: Write extracted data and screenshots to disk
 - `data-parser`: Parse HTML, JSON, and other formats from extracted content
 - `memory-write`: Store automation results for future reference

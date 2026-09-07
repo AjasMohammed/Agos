@@ -51,6 +51,11 @@ pub struct AgentTask {
     /// Set by `--no-checkpoint` CLI flag for ephemeral one-shot tasks.
     #[serde(default)]
     pub skip_checkpoint: bool,
+    /// When true, the native tool array is NOT category-scoped for this task —
+    /// every tool's schema is sent. For autonomous/orchestrator tasks that
+    /// genuinely need the full toolset. See tool-discovery-architecture Phase 3.
+    #[serde(default)]
+    pub disable_tool_scoping: bool,
     /// Requested extended-thinking level for this task.
     /// Translates to `InferenceOptions::thinking_budget_tokens` at execution time.
     #[serde(default)]
@@ -68,6 +73,33 @@ pub struct AgentTask {
     /// escalation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_categories: Option<Vec<String>>,
+    /// Causal depth inherited from a parent task, so a delegated or spawned
+    /// child keeps the event-trigger chain depth its parent had. Without this
+    /// a child restarts at 0 and `max_chain_depth` can never terminate a
+    /// trigger -> task -> delegate -> event -> trigger cascade.
+    #[serde(default)]
+    pub chain_depth: u32,
+}
+
+impl AgentTask {
+    /// Chain depth for events emitted on behalf of this task.
+    ///
+    /// Events caused by an event-triggered task must carry `trigger_depth + 1`
+    /// so the dispatcher's `max_chain_depth` loop guard can terminate
+    /// trigger→task→event→trigger cascades. Hardcoding 0 at emit sites resets
+    /// the counter and disables loop detection entirely.
+    ///
+    /// Takes the max of the event trigger's own depth and the depth inherited
+    /// from a parent task, so a child spawned by a triggered task (which has no
+    /// `trigger_source` of its own) still emits at the parent's depth.
+    pub fn event_chain_depth(&self) -> u32 {
+        let from_trigger = self
+            .trigger_source
+            .as_ref()
+            .map(|ts| ts.chain_depth.saturating_add(1))
+            .unwrap_or(0);
+        from_trigger.max(self.chain_depth)
+    }
 }
 
 /// Controls how much extended thinking budget the LLM is given for a task.
@@ -142,6 +174,57 @@ mod tests {
     }
 
     #[test]
+    fn test_event_chain_depth() {
+        let mut task = AgentTask::default();
+        assert_eq!(task.event_chain_depth(), 0, "untriggered task emits at 0");
+        task.trigger_source = Some(TriggerSource {
+            event_id: crate::ids::EventID::new(),
+            event_type: crate::event::EventType::TaskFailed,
+            subscription_id: crate::ids::SubscriptionID::new(),
+            chain_depth: 3,
+        });
+        assert_eq!(
+            task.event_chain_depth(),
+            4,
+            "triggered task must emit one deeper than its trigger"
+        );
+    }
+
+    #[test]
+    fn test_event_chain_depth_inherited_by_spawned_child() {
+        // A child spawned by a triggered task has no `trigger_source` of its
+        // own; without the inherited counter the chain restarts at 0 and the
+        // dispatcher's `max_chain_depth` guard can never terminate a cascade.
+        let parent = AgentTask {
+            trigger_source: Some(TriggerSource {
+                event_id: crate::ids::EventID::new(),
+                event_type: crate::event::EventType::TaskCompleted,
+                subscription_id: crate::ids::SubscriptionID::new(),
+                chain_depth: 3,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(parent.event_chain_depth(), 4);
+
+        let child = AgentTask {
+            chain_depth: parent.event_chain_depth(),
+            ..Default::default()
+        };
+        assert!(child.trigger_source.is_none());
+        assert_eq!(
+            child.event_chain_depth(),
+            4,
+            "spawned child must keep its parent's chain depth"
+        );
+
+        assert_eq!(
+            AgentTask::default().event_chain_depth(),
+            0,
+            "a task with no trigger and no parent still emits at 0"
+        );
+    }
+
+    #[test]
     fn test_thinking_level_defaults_when_missing_from_json() {
         // Simulate a checkpoint serialized before thinking_level was added.
         // The field should default to Off without a parse error.
@@ -186,9 +269,11 @@ impl Default for AgentTask {
             spawn_depth: 0,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            chain_depth: 0,
         }
     }
 }
@@ -278,6 +363,10 @@ pub struct TaskSummary {
     /// Spawn depth (0 = root, 1 = child, 2 = grandchild, …).
     #[serde(default)]
     pub spawn_depth: u8,
+    /// Failure reason for tasks in the `Failed` state (first line of the
+    /// error chain). `None` for non-failed tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Hints for the scheduler and executor about how to handle task reasoning.

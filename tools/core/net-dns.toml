@@ -1,4 +1,5 @@
 tags = ["read", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name = "net-dns"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Resolve DNS hostnames with rebinding defense"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "readonly_external"
+category    = "web"
 
 [capabilities_required]
 permissions = ["net.dns:r"]
@@ -18,11 +19,11 @@ outputs = ["content.json"]
 input = "NetDnsIntent"
 output = "NetDnsResult"
 
-[input_schema]
+[payload_schema]
 required = ["hostname"]
 type = "object"
 
-[input_schema.properties.hostname]
+[payload_schema.properties.hostname]
 description = "Hostname to resolve"
 type = "string"
 

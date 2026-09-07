@@ -99,6 +99,37 @@ impl PipelineStore {
         Ok(())
     }
 
+    /// Install a pipeline that must not already exist.
+    ///
+    /// `install_pipeline` is `INSERT OR REPLACE`, which is right for an explicit
+    /// update but silently destroys a production definition when a *create* path
+    /// reuses a name. This leans on the `name` primary key instead of a
+    /// read-then-write probe, so there is no window between the check and the
+    /// insert. `Ok(false)` means the name is taken; the caller decides the status.
+    pub fn create_pipeline(
+        &self,
+        name: &str,
+        version: &str,
+        yaml: &str,
+    ) -> Result<bool, AgentOSError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = chrono::Utc::now().to_rfc3339();
+        match conn.execute(
+            "INSERT INTO pipelines (name, version, definition, installed_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![name, version, yaml, now],
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(AgentOSError::StorageError(format!(
+                "Failed to install pipeline: {e}"
+            ))),
+        }
+    }
+
     pub fn get_pipeline_yaml(&self, name: &str) -> Result<String, AgentOSError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(

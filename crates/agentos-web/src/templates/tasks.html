@@ -1,11 +1,43 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header">
-    <h1>Task Inspector</h1>
+    <div>
+        <h1>Task Inspector</h1>
+        {% if task_counts %}
+        <p class="page-meta">{{ task_counts.total }} total · showing {{ tasks|length }}{% if active_status %} (filtered by <code>{{ active_status }}</code>){% endif %}</p>
+        {% endif %}
+    </div>
 </div>
 
+{% if task_counts %}
+<div class="status-chips" role="tablist" aria-label="Filter tasks by status">
+    <a href="/tasks" role="tab" class="status-chip {% if not active_status %}status-chip-active{% endif %}">
+        All <span class="status-chip-count">{{ task_counts.total }}</span>
+    </a>
+    <a href="/tasks?status=queued" role="tab" class="status-chip status-chip-queued {% if active_status == 'queued' %}status-chip-active{% endif %}">
+        Queued <span class="status-chip-count">{{ task_counts.queued }}</span>
+    </a>
+    <a href="/tasks?status=running" role="tab" class="status-chip status-chip-running {% if active_status == 'running' %}status-chip-active{% endif %}">
+        Running <span class="status-chip-count">{{ task_counts.running }}</span>
+    </a>
+    <a href="/tasks?status=waiting" role="tab" class="status-chip status-chip-waiting {% if active_status == 'waiting' %}status-chip-active{% endif %}">
+        Waiting <span class="status-chip-count">{{ task_counts.waiting }}</span>
+    </a>
+    <a href="/tasks?status=complete" role="tab" class="status-chip status-chip-complete {% if active_status == 'complete' %}status-chip-active{% endif %}">
+        Complete <span class="status-chip-count">{{ task_counts.complete }}</span>
+    </a>
+    <a href="/tasks?status=failed" role="tab" class="status-chip status-chip-failed {% if active_status == 'failed' %}status-chip-active{% endif %}">
+        Failed <span class="status-chip-count">{{ task_counts.failed }}</span>
+    </a>
+    <a href="/tasks?status=cancelled" role="tab" class="status-chip status-chip-cancelled {% if active_status == 'cancelled' %}status-chip-active{% endif %}">
+        Cancelled <span class="status-chip-count">{{ task_counts.cancelled }}</span>
+    </a>
+</div>
+{% endif %}
+
 <div class="filter-bar">
-    <input type="text" name="search" placeholder="Search by prompt..."
+    <input type="search" name="search" placeholder="Search by prompt..."
+           value="{{ active_search }}"
            hx-get="/tasks" hx-target="#task-list" hx-swap="innerHTML"
            hx-trigger="keyup changed delay:300ms"
            hx-include="[name='search'],[name='status']"
@@ -15,18 +47,19 @@
             hx-trigger="change"
             hx-include="[name='search'],[name='status']"
             hx-vals='{"partial": "list"}'>
-        <option value="">All Statuses</option>
-        <option value="queued">Queued</option>
-        <option value="running">Running</option>
-        <option value="waiting">Waiting</option>
-        <option value="complete">Complete</option>
-        <option value="failed">Failed</option>
-        <option value="cancelled">Cancelled</option>
+        <option value="" {% if not active_status %}selected{% endif %}>All Statuses</option>
+        <option value="queued" {% if active_status == 'queued' %}selected{% endif %}>Queued</option>
+        <option value="running" {% if active_status == 'running' %}selected{% endif %}>Running</option>
+        <option value="waiting" {% if active_status == 'waiting' %}selected{% endif %}>Waiting</option>
+        <option value="complete" {% if active_status == 'complete' %}selected{% endif %}>Complete</option>
+        <option value="failed" {% if active_status == 'failed' %}selected{% endif %}>Failed</option>
+        <option value="cancelled" {% if active_status == 'cancelled' %}selected{% endif %}>Cancelled</option>
     </select>
     <button class="outline secondary btn-sm"
             hx-get="/tasks?partial=list"
             hx-target="#task-list"
-            hx-swap="innerHTML">Refresh</button>
+            hx-swap="innerHTML"
+            hx-include="[name='search'],[name='status']">Refresh</button>
 </div>
 
 <figure>

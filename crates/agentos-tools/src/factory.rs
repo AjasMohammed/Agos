@@ -14,6 +14,7 @@ pub enum ToolCategory {
 }
 
 const STATELESS_TOOL_NAMES: &[&str] = &[
+    "chat-search",
     "context-memory-read",
     "context-memory-update",
     "datetime",
@@ -28,6 +29,9 @@ const STATELESS_TOOL_NAMES: &[&str] = &[
     "file-move",
     "file-diff",
     "data-parser",
+    // Writes an artifact blob + a FileStore row under data_dir. Same class as
+    // file-writer: plain fs + sqlite, no kernel context injection.
+    "artifact-write",
     "memory-block-write",
     "memory-block-read",
     "memory-block-list",
@@ -71,6 +75,11 @@ const HAL_TOOL_NAMES: &[&str] = &[
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
+    // IoT twin tools need the kernel's shared TwinRegistry/SafetyEngine Arcs
+    // (attached to the in-process HAL at boot) — a sandbox child rebuilds the
+    // HAL without them, so these must never be sandbox-dispatched.
+    "hardware-get-twin",
+    "hardware-set-desired",
     "agent-message",
     "task-delegate",
     "task-spawn-async",
@@ -120,6 +129,11 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "schedule-control",
     "cancel-once-job",
     "list-once-jobs",
+    // Schedule self-inspection — emit _kernel_action, dispatched by the kernel
+    // against its schedule store; never sandboxed.
+    "list-my-schedules",
+    "get-schedule-runs",
+    "get-task-logs",
     // Agent inbox + agent-to-agent message inboxes — kernel-context, mutate
     // SQLite state owned by the kernel; never sandboxed.
     "agent-inbox-list",
@@ -130,7 +144,8 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "agent-messages-dismiss",
 ];
 
-const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
+const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] =
+    &["agent-manual", "agent-self", "skill-prompt", "skill-create"];
 
 /// Discovery / introspection tools whose calls should NOT be replayed into the
 /// LLM history on subsequent chat turns. They are scaffolding the model uses
@@ -148,7 +163,6 @@ pub const META_TOOL_NAMES: &[&str] = &[
     "describe-tool",
     "list-tools",
     "tool-detail",
-    "tool-info",
 ];
 
 /// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
@@ -165,8 +179,11 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "list-tools",
     "search-tools",
     "describe-tool",
+    "skill-prompt",
+    "skill-create",
     // Filesystem
     "file-reader",
+    "user-file-reader",
     "file-writer",
     "file-editor",
     "file-glob",
@@ -182,6 +199,7 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "archival-search",
     "episodic-list",
     "procedure-search",
+    "chat-search",
     "context-memory-read",
     "context-memory-update",
     // Network — basic web access so chat agents can fetch live info.
@@ -195,10 +213,36 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "notify-user",
     "ask-user",
     "agent-message",
+    "schedule-once",
     "schedule-recurring",
     "schedule-control",
     "list-my-schedules",
     "get-schedule-runs",
+    "get-task-logs",
+    // Read-only control-plane visibility — "what are my tasks", "why did that
+    // fail", "what is waiting on me". All ReadonlyScoped, so they auto-approve;
+    // `set-timer` is WriteScoped and still prompts.
+    "task-list",
+    "task-status",
+    "escalation-status",
+    "list-timers",
+    "set-timer",
+    "log-reader",
+    "sys-monitor",
+    // Presentation — anything the user is meant to LOOK AT rather than
+    // read inline. Must be in the default list: the whole point is that
+    // the agent reaches for it without being told the tool exists.
+    "artifact-write",
+    // Scratchpad — agent working memory. Required for any recipe that
+    // needs dedup state across recurring schedule fires (see alert-builder).
+    "scratch-read",
+    "scratch-write",
+    // Kernel event subscriptions — required for "notify me when X" flows
+    // that prefer event-driven over polling. Mirrors what alert-builder needs.
+    "event-list-available",
+    "event-subscribe",
+    "event-list-subscriptions",
+    "event-unsubscribe",
     // Agent inbox — async callbacks (scheduled tasks, sub-agents, events)
     "agent-inbox-list",
     "agent-inbox-read",
@@ -321,6 +365,7 @@ pub fn build_single_tool_with_model_cache_and_weight(
 
 fn build_stateless_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError> {
     let tool: Box<dyn AgentTool> = match name {
+        "chat-search" => Box::new(crate::chat_search::ChatSearchTool::new()),
         "context-memory-read" => Box::new(crate::context_memory_read::ContextMemoryReadTool::new()),
         "context-memory-update" => {
             Box::new(crate::context_memory_update::ContextMemoryUpdateTool::new())
@@ -336,6 +381,7 @@ fn build_stateless_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentO
         "file-move" => Box::new(crate::file_move::FileMove::new()),
         "file-diff" => Box::new(crate::file_diff::FileDiff::new()),
         "data-parser" => Box::new(crate::data_parser::DataParser::new()),
+        "artifact-write" => Box::new(crate::artifact_write::ArtifactWriteTool::new()),
         "memory-block-write" => Box::new(crate::memory_block_write::MemoryBlockWriteTool::new()),
         "memory-block-read" => Box::new(crate::memory_block_read::MemoryBlockReadTool::new()),
         "memory-block-list" => Box::new(crate::memory_block_list::MemoryBlockListTool::new()),
@@ -629,6 +675,48 @@ mod tests {
                 is_chat_default_tool(name),
                 "host introspection tool '{}' must be in CHAT_DEFAULT_TOOL_NAMES",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_write_is_chat_default() {
+        // The "## Presenting Results" system-prompt block tells the LLM to
+        // reach for `artifact-write` unprompted whenever the user will look
+        // at the output. If a future allowlist trim silently drops it, the
+        // model can only reach the tool via `search-tools`, which it has no
+        // reason to run — this guard makes that drop a build failure.
+        assert!(
+            is_chat_default_tool("artifact-write"),
+            "'artifact-write' must be in CHAT_DEFAULT_TOOL_NAMES"
+        );
+    }
+
+    /// Chat agents need to answer "what are my tasks / what is waiting on me"
+    /// without the operator UI. Every name here must also resolve to a real
+    /// manifest, or the chat agent gets a tool it can never call.
+    #[test]
+    fn chat_defaults_include_readonly_control_plane_visibility() {
+        for name in [
+            "task-list",
+            "task-status",
+            "escalation-status",
+            "list-timers",
+            "set-timer",
+            "log-reader",
+            "sys-monitor",
+        ] {
+            assert!(
+                CHAT_DEFAULT_TOOL_NAMES.contains(&name),
+                "'{name}' must be in CHAT_DEFAULT_TOOL_NAMES"
+            );
+            // `tool_category` covers the sandboxable categories (stateless,
+            // memory, network, HAL); the rest must run in kernel context.
+            assert!(
+                tool_category(name).is_some()
+                    || KERNEL_CONTEXT_TOOL_NAMES.contains(&name)
+                    || SPECIAL_CONTEXT_TOOL_NAMES.contains(&name),
+                "'{name}' is in the chat allowlist but nothing can construct it"
             );
         }
     }
