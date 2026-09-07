@@ -14,6 +14,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use zeroize::Zeroizing;
 
+/// Update types this adapter actually handles, URL-encoded for `getUpdates`.
+/// Mirrors the `allowed_updates` list sent by `register_webhook`.
+const TELEGRAM_ALLOWED_UPDATES: &str = "%5B%22message%22%2C%22callback_query%22%5D";
+
 /// Telegram documents a 4096-character cap on `sendMessage` text (stricter when using entities).
 const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
 const TELEGRAM_POST_MAX_ATTEMPTS: u32 = 5;
@@ -555,6 +559,16 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
     }
 }
 
+/// Build the `getUpdates` long-poll URL. Split out from the loop purely so the
+/// query string is testable — the token must never reach a log line, so this is
+/// the only place the assembled URL can be inspected.
+fn get_updates_url(token: &str, offset: i64) -> String {
+    format!(
+        "https://api.telegram.org/bot{token}/getUpdates\
+         ?offset={offset}&timeout=30&allowed_updates={TELEGRAM_ALLOWED_UPDATES}"
+    )
+}
+
 /// Long-poll loop: calls `getUpdates` with a 30-second timeout repeatedly.
 /// Uses exponential backoff (5s → 300s) on transient failures.
 ///
@@ -575,8 +589,15 @@ async fn telegram_poll_loop(
 
     loop {
         // Build URL without logging it — the token must not appear in log output.
-        let url =
-            format!("https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30");
+        //
+        // `allowed_updates` is passed explicitly on every call, and must stay in
+        // sync with `register_webhook`. Telegram's documented default is not
+        // "everything the bot cares about" but *"if not specified, the previous
+        // setting will be used"* — server-side state left behind by a prior
+        // `setWebhook`/`getUpdates` call. Being explicit also keeps the update
+        // types added in Bot API 9.x/10.x (business messages, communities,
+        // reactions, managed bots, …) from being polled only to be discarded.
+        let url = get_updates_url(&token, offset);
         match client.get(&url).send().await {
             Ok(resp) => {
                 if resp.status() == StatusCode::TOO_MANY_REQUESTS {
@@ -1208,6 +1229,22 @@ pub struct TelegramCallbackQuery {
 
 #[cfg(test)]
 mod tests {
+    /// The URL is assembled with a `\`-continuation, which silently swallows the
+    /// following whitespace — get it wrong and the bot polls a 404 forever.
+    #[test]
+    fn get_updates_url_carries_offset_and_allowed_updates() {
+        let url = super::get_updates_url("TOKEN", 42);
+        assert_eq!(
+            url,
+            "https://api.telegram.org/botTOKEN/getUpdates\
+             ?offset=42&timeout=30&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D"
+        );
+        assert!(
+            !url.contains(' '),
+            "URL must not contain raw whitespace: {url}"
+        );
+    }
+
     use super::*;
 
     #[test]

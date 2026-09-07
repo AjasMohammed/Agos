@@ -1,4 +1,5 @@
 tags = ["read", "fs"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "log-reader"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Read application or system log entries via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
 
 [capabilities_required]
 permissions = ["fs.app_logs:r", "fs.system_logs:r"]

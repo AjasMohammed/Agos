@@ -430,6 +430,47 @@ impl ApiKeyStore {
         revoked
     }
 
+    /// Hard-delete keys of one name that are revoked or past `expires_at`.
+    /// Login mints a fresh `operator-login` key every time; without this the
+    /// table (and the Keys page) grows by one dead row per sign-in. Live keys
+    /// (unrevoked and unexpired, or with no expiry at all) are never matched.
+    /// The DB predicate is the source of truth: revoked rows from a previous
+    /// process are not loaded into memory, so an id list from memory would miss them.
+    pub async fn purge_dead_keys(&self, name: &str) -> usize {
+        let now = Utc::now();
+        let in_memory = {
+            let mut inner = self.inner.write().await;
+            let before = inner.keys.len();
+            inner.keys.retain(|_, r| {
+                !(r.name == name && (r.revoked || r.expires_at.is_some_and(|t| t <= now)))
+            });
+            before - inner.keys.len()
+        };
+        let Some(ref db_arc) = self.db else {
+            return in_memory;
+        };
+        let db = Arc::clone(db_arc);
+        let name = name.to_string();
+        let now_str = now.to_rfc3339();
+        tokio::task::spawn_blocking(move || {
+            let Ok(conn) = db.lock() else { return 0 };
+            match conn.execute(
+                "DELETE FROM api_keys WHERE name = ?1 \
+                 AND (revoked = 1 OR (expires_at IS NOT NULL AND expires_at <= ?2))",
+                params![name, now_str],
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("api_key purge DB delete: {e}");
+                    0
+                }
+            }
+        })
+        .await
+        .unwrap_or(0)
+        .max(in_memory)
+    }
+
     /// Look up a single key's metadata by its public id (key material excluded).
     /// Returns revoked keys too, so callers can report status.
     pub async fn get_by_id(&self, key_id: &str) -> Option<crate::types::ApiKeyMeta> {

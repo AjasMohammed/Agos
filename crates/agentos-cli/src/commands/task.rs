@@ -574,6 +574,7 @@ async fn handle_interactive_approval(
         .send_command(KernelCommand::ResolveEscalation {
             id: escalation_id,
             decision: decision.to_string(),
+            remember: false,
         })
         .await?;
     match resp {

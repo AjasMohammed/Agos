@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "exec_capable"
 
 [manifest]
 name = "container-destroy"
@@ -6,7 +7,6 @@ version = "1.0.0"
 description = "Destroy a container, stopping it if running and removing all resources."
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "exec_capable"
 tags = ["compute", "container"]
 
 [capabilities_required]

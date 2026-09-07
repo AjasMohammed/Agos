@@ -24,6 +24,12 @@ pub enum EscalationCommands {
         /// Decision string (e.g. "Approved", "Denied", "Acknowledged")
         #[arg(long, short)]
         decision: String,
+
+        /// On approve, also mint a 7-day standing grant for the escalated
+        /// tool (agent-scoped; parent-directory glob when the call had a
+        /// `path`) so it stops re-prompting. See `agentos approval list`.
+        #[arg(long)]
+        remember: bool,
     },
 }
 
@@ -180,11 +186,16 @@ pub async fn handle(client: &mut BusClient, command: EscalationCommands) -> anyh
             }
         }
 
-        EscalationCommands::Resolve { id, decision } => {
+        EscalationCommands::Resolve {
+            id,
+            decision,
+            remember,
+        } => {
             let resp = client
                 .send_command(KernelCommand::ResolveEscalation {
                     id,
                     decision: decision.clone(),
+                    remember,
                 })
                 .await?;
 
@@ -192,6 +203,17 @@ pub async fn handle(client: &mut BusClient, command: EscalationCommands) -> anyh
                 KernelResponse::Success { data } => {
                     println!("Escalation #{} resolved: {}", id, decision);
                     if let Some(data) = data {
+                        let note = data
+                            .get("remember_note")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some(pid) = data.get("policy_id").and_then(|v| v.as_i64()) {
+                            println!(
+                                "Standing grant #{pid}: {note}, 7 days (revoke: agentos approval revoke {pid})"
+                            );
+                        } else if remember {
+                            println!("Not remembered: {note}.");
+                        }
                         if let Some(true) = data.get("task_resumed").and_then(|v| v.as_bool()) {
                             let task_id = data
                                 .get("task_id")

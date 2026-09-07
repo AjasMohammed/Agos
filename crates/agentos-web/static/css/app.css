@@ -4953,3 +4953,29 @@ body.sidebar-collapsed .sidebar-nav a::before {
     font-weight: 600 !important;
 }
 body.sidebar-collapsed .sidebar-nav a.nav-active::before { color: #fff !important; }
+
+/* ── Artifact card: agent-generated artifact links promoted in chat ── */
+.artifact-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    max-width: 100%;
+    margin: 0.35rem 0;
+    padding: 0.55rem 0.85rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-card-background-color);
+    text-decoration: none;
+    line-height: 1.3;
+}
+.artifact-card:hover {
+    border-color: var(--pico-primary);
+    text-decoration: none;
+}
+.artifact-card-icon { opacity: 0.7; flex: none; }
+.artifact-card-label {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

@@ -17,6 +17,9 @@ use tokio::sync::mpsc;
 
 pub struct OllamaCore {
     client: Client,
+    /// Total per-request timeout the `client` was built with, mirrored so the
+    /// kernel can re-assert it as a hard ceiling.
+    request_timeout_secs: u64,
     host: String,
     model: String,
     /// Context window size sent to Ollama as `num_ctx`. Configurable via `llm.ollama_context_window`.
@@ -25,7 +28,8 @@ pub struct OllamaCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same `host`.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
     /// Model IDs that accept `images: [...]` on user messages (e.g. `llava`). Empty → no vision.
@@ -65,6 +69,7 @@ impl OllamaCore {
                 ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
+            request_timeout_secs: Self::DEFAULT_REQUEST_TIMEOUT_SECS,
             host: host.to_string(),
             model: model.to_string(),
             context_window: Self::DEFAULT_CONTEXT_WINDOW,
@@ -83,7 +88,7 @@ impl OllamaCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            concurrency: crate::retry::concurrency_limiter_for(host),
             image_resolver: Arc::new(NoopImageResolver),
             vision_models: Vec::new(),
         }
@@ -173,6 +178,7 @@ impl OllamaCore {
             .timeout(std::time::Duration::from_secs(secs))
             .build()
             .expect("HTTP client TLS initialization failed");
+        self.request_timeout_secs = secs;
         self
     }
 
@@ -277,7 +283,9 @@ impl OllamaCore {
         request: OllamaChatRequest,
     ) -> Result<OllamaChatResponse, AgentOSError> {
         let url = format!("{}/api/chat", self.host);
-        let response = crate::retry::send_with_retry(
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (response, _permit) = crate::retry::send_with_retry(
             "ollama",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -314,10 +322,21 @@ impl OllamaCore {
                 if !tool_helpers::check_payload_size(&tc.function.name, &payload) {
                     return None;
                 }
+                // Derive the intent from the tool's declared permissions, the
+                // same way every other native adapter does. Hardcoding
+                // "execute" here is not cosmetic: `intent_type` drives the
+                // legacy RiskClassifier (Execute + a forbidden/high-risk
+                // resource => Forbidden / HardApproval), the loop-repeat
+                // validator, and chat capability-token scoping. A hardcoded
+                // "execute" turns autonomous reads into approval-gated calls.
+                let intent_type = intent_by_tool
+                    .get(&tc.function.name)
+                    .cloned()
+                    .unwrap_or_else(|| "query".to_string());
                 Some(InferenceToolCall {
                     id: None,
                     tool_name: tc.function.name,
-                    intent_type: "execute".to_string(),
+                    intent_type,
                     payload,
                 })
             })
@@ -666,6 +685,18 @@ struct OllamaChatResponse {
 
 #[async_trait]
 impl LLMCore for OllamaCore {
+    /// Ollama's `/api/chat` takes a `tools` array and returns native
+    /// `message.tool_calls`, which `response_to_inference_result` already
+    /// parses. Without this override the adapter inherited the trait default
+    /// (`false`) and the kernel paid twice: the JSON-in-markdown envelope
+    /// instructions in the system prompt *and* the native tool array on the
+    /// wire. Small models that emit fenced JSON anyway are still recovered:
+    /// `parse_tool_calls_from_text` on the non-streaming path, and
+    /// `Kernel::sanitize_chat_inference_result` for streaming chat.
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     fn supports_images(&self) -> bool {
         self.model_has_vision()
     }
@@ -778,6 +809,10 @@ impl LLMCore for OllamaCore {
         Ok(self.response_to_inference_result(ollama_response, duration_ms, &intent_by_tool))
     }
 
+    fn inference_hard_timeout_secs(&self) -> u64 {
+        self.request_timeout_secs
+    }
+
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
@@ -844,7 +879,11 @@ impl LLMCore for OllamaCore {
         // forwarded) so a transient upstream 5xx / network blip doesn't fail
         // the whole chat turn — matching the resilience of the non-streaming
         // path. `send_with_retry` returns the live `Response` with its body
-        // stream intact on 2xx.
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
         let response = crate::retry::send_with_retry(
             "ollama",
             &self.retry_policy,
@@ -853,7 +892,7 @@ impl LLMCore for OllamaCore {
             || self.client.post(&url).json(&request),
         )
         .await;
-        let response = match response {
+        let (response, _permit) = match response {
             Ok(r) => r,
             Err(e) => {
                 let reason = e.to_string();
@@ -943,10 +982,14 @@ impl LLMCore for OllamaCore {
                                 if !tool_helpers::check_payload_size(&tc.function.name, &payload) {
                                     continue;
                                 }
+                                // `infer_stream` receives no tool manifests, so no
+                                // permission-derived intent is available. Default to the
+                                // least-privilege read intent rather than "execute" —
+                                // see `response_to_inference_result`.
                                 let itc = InferenceToolCall {
                                     id: None,
                                     tool_name: tc.function.name.clone(),
-                                    intent_type: "execute".to_string(),
+                                    intent_type: "query".to_string(),
                                     payload,
                                 };
                                 let _ =
@@ -1024,6 +1067,18 @@ impl LLMCore for OllamaCore {
         .await;
         let context = &prepared;
         let messages = self.context_to_messages(context);
+        // Same permission-derived intent map the non-streaming path builds —
+        // see `response_to_inference_result` for why a hardcoded intent is
+        // an authorization bug, not a cosmetic one.
+        let intent_by_tool: HashMap<String, String> = tools
+            .iter()
+            .map(|t| {
+                let intent = tool_helpers::infer_intent_type_from_permissions(
+                    &t.capabilities_required.permissions,
+                );
+                (t.manifest.name.clone(), intent)
+            })
+            .collect();
         let ollama_tools: Vec<OllamaRequestTool> = tools
             .iter()
             .map(|t| OllamaRequestTool {
@@ -1055,7 +1110,11 @@ impl LLMCore for OllamaCore {
         // forwarded) so a transient upstream 5xx / network blip doesn't fail
         // the whole chat turn — matching the resilience of the non-streaming
         // path. `send_with_retry` returns the live `Response` with its body
-        // stream intact on 2xx.
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
         let response = crate::retry::send_with_retry(
             "ollama",
             &self.retry_policy,
@@ -1064,7 +1123,7 @@ impl LLMCore for OllamaCore {
             || self.client.post(&url).json(&request),
         )
         .await;
-        let response = match response {
+        let (response, _permit) = match response {
             Ok(r) => r,
             Err(e) => {
                 let reason = e.to_string();
@@ -1157,7 +1216,10 @@ impl LLMCore for OllamaCore {
                                 let itc = InferenceToolCall {
                                     id: None,
                                     tool_name: tc.function.name.clone(),
-                                    intent_type: "execute".to_string(),
+                                    intent_type: intent_by_tool
+                                        .get(&tc.function.name)
+                                        .cloned()
+                                        .unwrap_or_else(|| "query".to_string()),
                                     payload,
                                 };
                                 let _ =

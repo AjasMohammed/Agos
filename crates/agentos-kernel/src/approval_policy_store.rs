@@ -288,6 +288,145 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalPolicyEntry
 /// is `Prompt`: if any active entry matches the call, the prompt is lifted
 /// to `Allow`. Matching is fail-safe — on cache poison or matcher error the
 /// caller proceeds to the normal escalation path (no silent auto-approve).
+/// `metadata.kind` stamped by `ApprovalHook` on tool-approval escalations.
+pub const TOOL_APPROVAL_KIND: &str = "tool_approval";
+
+/// Lifetime of a grant minted by "approve & remember". Bounded on purpose:
+/// a one-click grant from a prompt should not outlive the task it was made
+/// for by more than a work week; `agentos approval allow` is the permanent
+/// form.
+pub const REMEMBER_GRANT_DAYS: i64 = 7;
+
+/// Result of an "approve & remember" attempt. Callers render the message;
+/// none of these variants fail the approval that already went through.
+#[derive(Debug)]
+pub enum RememberOutcome {
+    /// A new standing grant was minted and audited.
+    Granted(ApprovalPolicyEntry),
+    /// An identical `(tool, glob, agent)` grant already exists — the earlier
+    /// click is still in force. Expiry is NOT extended.
+    AlreadyRemembered,
+    /// Nothing safe to remember; the tool re-prompts next time.
+    NotApplicable(&'static str),
+}
+
+/// Mint a standing grant from a resolved tool-approval escalation.
+///
+/// Scope: the escalating agent only; when the payload had a `path`, the
+/// grant covers that path's parent directory (`<dir>/**`).
+///
+/// Refuses (→ `NotApplicable`) rather than widening when:
+/// - the escalation carries no `tool_approval` metadata (HAL/device rows,
+///   legacy rows);
+/// - the class is `ControlPlane` (the hook never consults the matcher for
+///   it, so the row would be dead weight);
+/// - the payload HAD a `path` but no usable parent directory could be
+///   derived (`"notes.txt"`, `"/"`, non-string, `..` traversal) — a
+///   `path_glob` of `None` means "matches ANY path" in [`ApprovalPolicyMatcher::allows`],
+///   so "couldn't derive a directory" must never collapse into "tool-wide";
+/// - the class is `ExecCapable`/`Interactive` and there is no path to scope
+///   by (e.g. `shell-exec`) — one click must not buy 7 days of unprompted
+///   arbitrary shell.
+///
+/// ponytail: parent-dir glob is the one-click heuristic. A long task writes
+/// many files in one tree; exact-path grants would re-prompt on every file.
+pub fn grant_from_escalation(
+    matcher: &ApprovalPolicyMatcher,
+    esc: &crate::escalation::PendingEscalation,
+    granted_by: &str,
+    audit: &agentos_audit::AuditLog,
+) -> Result<RememberOutcome, AgentOSError> {
+    use RememberOutcome::*;
+    let meta = &esc.metadata;
+    if meta.get("kind").and_then(|k| k.as_str()) != Some(TOOL_APPROVAL_KIND) {
+        return Ok(NotApplicable("this escalation carries no tool metadata"));
+    }
+    let Some(tool_name) = meta.get("tool_name").and_then(|t| t.as_str()) else {
+        return Ok(NotApplicable("this escalation carries no tool metadata"));
+    };
+    // Debug rendering of `RiskClass`, as stamped by `ApprovalHook`.
+    let risk = meta
+        .get("risk_class")
+        .and_then(|r| r.as_str())
+        .unwrap_or("");
+    if risk == "ControlPlane" {
+        return Ok(NotApplicable("control-plane tools always prompt"));
+    }
+
+    let path_glob = match meta.get("path") {
+        // The tool has no path concept (or the hook found none).
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let Some(p) = v.as_str() else {
+                return Ok(NotApplicable("payload path is not a string"));
+            };
+            if p.contains("..") {
+                return Ok(NotApplicable("payload path contains `..`"));
+            }
+            let Some(dir) = std::path::Path::new(p)
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+            else {
+                return Ok(NotApplicable(
+                    "payload path has no parent directory to scope the grant to",
+                ));
+            };
+            Some(format!("{}/**", dir.display()))
+        }
+    };
+    if path_glob.is_none() && matches!(risk, "ExecCapable" | "Interactive") {
+        return Ok(NotApplicable(
+            "an exec-capable tool with no path cannot be remembered unscoped",
+        ));
+    }
+
+    let expires_at = Some(Utc::now() + chrono::Duration::days(REMEMBER_GRANT_DAYS));
+    let entry = match matcher.add(
+        tool_name,
+        path_glob.as_deref(),
+        Some(esc.agent_id),
+        granted_by,
+        "approve_remember",
+        expires_at,
+    ) {
+        Ok(e) => e,
+        Err(AgentOSError::PermissionDenied { ref resource, .. })
+            if resource == POLICY_DUPLICATE_RESOURCE =>
+        {
+            return Ok(AlreadyRemembered);
+        }
+        Err(e) => return Err(e),
+    };
+
+    // A persistent authorization change — same record `agentos approval
+    // allow` writes, so `approval list` history and the audit log agree.
+    if let Err(e) = audit.append(agentos_audit::AuditEntry {
+        timestamp: Utc::now(),
+        trace_id: esc.trace_id,
+        event_type: agentos_audit::AuditEventType::KernelConfigChanged,
+        agent_id: Some(esc.agent_id),
+        task_id: Some(esc.task_id),
+        tool_id: None,
+        details: serde_json::json!({
+            "setting": "approval.policy.added",
+            "id": entry.id,
+            "tool_name": entry.tool_name,
+            "path_glob": entry.path_glob,
+            "agent_id": entry.agent_id.map(|a| a.to_string()),
+            "source": entry.source,
+            "granted_by": entry.granted_by,
+            "expires_at": entry.expires_at,
+            "escalation_id": esc.id,
+        }),
+        severity: agentos_audit::AuditSeverity::Info,
+        reversible: true,
+        rollback_ref: None,
+    }) {
+        tracing::error!(error = %e, policy_id = entry.id, "Failed to audit approve&remember grant");
+    }
+    Ok(Granted(entry))
+}
+
 pub struct ApprovalPolicyMatcher {
     store: Arc<ApprovalPolicyStore>,
     cache: RwLock<Vec<ApprovalPolicyEntry>>,
@@ -373,13 +512,16 @@ impl ApprovalPolicyMatcher {
         source: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<ApprovalPolicyEntry, AgentOSError> {
+        // Insert first, lock second: the SQLite write (+ WAL fsync) must not
+        // run under the cache write guard that every `allows()` call on the
+        // ToolPre hot path needs.
+        let entry = self.store.add(
+            tool_name, path_glob, agent_id, granted_by, source, expires_at,
+        )?;
         let mut cache = self
             .cache
             .write()
             .map_err(|_| AgentOSError::StorageError("approval policy matcher poisoned".into()))?;
-        let entry = self.store.add(
-            tool_name, path_glob, agent_id, granted_by, source, expires_at,
-        )?;
         cache.push(entry.clone());
         Ok(entry)
     }
@@ -485,6 +627,140 @@ mod tests {
             .await
             .unwrap();
         (d, Arc::new(s))
+    }
+
+    fn escalation_with(metadata: serde_json::Value) -> crate::escalation::PendingEscalation {
+        use agentos_types::*;
+        crate::escalation::PendingEscalation {
+            id: 7,
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            reason: crate::kernel_action::EscalationReason::AuthorizationRequired,
+            context_summary: String::new(),
+            decision_point: String::new(),
+            options: vec![],
+            urgency: "high".into(),
+            blocking: true,
+            trace_id: TraceID::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            auto_action: crate::escalation::AutoAction::Deny,
+            metadata,
+            resolved: false,
+            resolution: None,
+            resolved_at: None,
+        }
+    }
+
+    fn test_audit() -> agentos_audit::AuditLog {
+        let d = TempDir::new().unwrap();
+        let a = agentos_audit::AuditLog::open(&d.path().join("audit.db")).unwrap();
+        Box::leak(Box::new(d));
+        a
+    }
+
+    fn tool_esc(
+        tool: &str,
+        risk: &str,
+        path: serde_json::Value,
+    ) -> crate::escalation::PendingEscalation {
+        escalation_with(serde_json::json!({
+            "kind": TOOL_APPROVAL_KIND, "tool_name": tool, "risk_class": risk, "path": path
+        }))
+    }
+
+    #[tokio::test]
+    async fn grant_from_escalation_scopes_to_agent_and_parent_dir() {
+        let (_t, store) = fresh().await;
+        let matcher = ApprovalPolicyMatcher::load(store).unwrap();
+        let audit = test_audit();
+        let esc = tool_esc(
+            "file-writer",
+            "WriteScoped",
+            "/home/alice/proj/src/main.rs".into(),
+        );
+        let RememberOutcome::Granted(entry) =
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap()
+        else {
+            panic!("tool_approval metadata with a path must mint a grant");
+        };
+        assert_eq!(entry.tool_name, "file-writer");
+        assert_eq!(entry.path_glob.as_deref(), Some("/home/alice/proj/src/**"));
+        assert_eq!(entry.agent_id, Some(esc.agent_id));
+        assert!(entry.expires_at.is_some(), "one-click grants must expire");
+        // The grant lifts a matching call — and only for that agent, that tree.
+        assert!(matcher.allows(
+            "file-writer",
+            &esc.agent_id,
+            Some("/home/alice/proj/src/lib.rs")
+        ));
+        assert!(!matcher.allows("file-writer", &esc.agent_id, Some("/home/alice/other/x.rs")));
+        assert!(!matcher.allows(
+            "file-writer",
+            &agentos_types::AgentID::new(),
+            Some("/home/alice/proj/src/lib.rs")
+        ));
+        // Second click on the same shape: already in force, not an error.
+        assert!(matches!(
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
+            RememberOutcome::AlreadyRemembered
+        ));
+    }
+
+    #[tokio::test]
+    async fn grant_from_escalation_never_widens_to_tool_wide() {
+        let (_t, store) = fresh().await;
+        let matcher = ApprovalPolicyMatcher::load(Arc::clone(&store)).unwrap();
+        let audit = test_audit();
+        let refused = |esc: &crate::escalation::PendingEscalation| {
+            matches!(
+                grant_from_escalation(&matcher, esc, "t", &audit).unwrap(),
+                RememberOutcome::NotApplicable(_)
+            )
+        };
+        // A path with no usable parent must NOT become `path_glob = None`
+        // (which `allows()` treats as "any path").
+        assert!(refused(&tool_esc(
+            "file-writer",
+            "WriteScoped",
+            "notes.txt".into()
+        )));
+        assert!(refused(&tool_esc("file-writer", "WriteScoped", "/".into())));
+        assert!(refused(&tool_esc("file-writer", "WriteScoped", 42.into())));
+        assert!(refused(&tool_esc(
+            "file-writer",
+            "WriteScoped",
+            "/data/../etc/passwd".into()
+        )));
+        // Exec-capable with no path at all: unbounded shell — never from one click.
+        assert!(refused(&tool_esc(
+            "shell-exec",
+            "ExecCapable",
+            serde_json::Value::Null
+        )));
+        // Control-plane: hook never consults the matcher; don't persist dead rows.
+        assert!(refused(&tool_esc(
+            "spawn-agent",
+            "ControlPlane",
+            serde_json::Value::Null
+        )));
+        // Non-tool escalations and legacy rows.
+        let hal =
+            escalation_with(serde_json::json!({"kind": "device_access", "device_id": "usb0"}));
+        assert!(refused(&hal));
+        assert!(refused(&escalation_with(serde_json::Value::Null)));
+        assert!(
+            store.list_active().unwrap().is_empty(),
+            "nothing may have been persisted"
+        );
+        // Write-scoped with no path concept IS allowed tool-wide for the agent.
+        let esc = tool_esc("memory-write", "WriteScoped", serde_json::Value::Null);
+        let RememberOutcome::Granted(e) =
+            grant_from_escalation(&matcher, &esc, "t", &audit).unwrap()
+        else {
+            panic!("write-scoped no-path tool should be remembered agent-wide");
+        };
+        assert_eq!(e.path_glob, None);
     }
 
     #[tokio::test]

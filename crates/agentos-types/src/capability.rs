@@ -514,6 +514,14 @@ impl PermissionSet {
                 PermissionOp::Observe => entry.observe = false,
             }
         }
+        self.drop_empty_entries();
+    }
+
+    /// An entry with every bit cleared grants nothing; keeping it around only
+    /// produces `resource [---]` ghosts in `perm show` / the panel.
+    fn drop_empty_entries(&mut self) {
+        self.entries
+            .retain(|e| e.read || e.write || e.execute || e.query || e.observe);
     }
 
     /// Revoke read, write, and/or execute bits for a resource.
@@ -532,6 +540,7 @@ impl PermissionSet {
                 entry.execute = false;
             }
         }
+        self.drop_empty_entries();
     }
 
     /// Return true if this set has no grant entries (deny entries are ignored).

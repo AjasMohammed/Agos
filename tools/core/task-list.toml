@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "task-list"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "List tasks for the calling agent (filter=mine, default) or all active tasks system-wide (filter=active). Newest first, configurable limit (max 100)."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "task"
+search_hints = ["what tasks are running", "list tasks", "queue status"]
 
 [capabilities_required]
 permissions = ["task.query:r"]

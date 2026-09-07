@@ -3,6 +3,51 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// The wire vocabulary for a schedule's state (same rationale as
+/// [`crate::types::ApiTaskStatus`] — a closed set the panel can be typed against).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiScheduleState {
+    /// Cron schedules.
+    Active,
+    Paused,
+    Disabled,
+    /// One-shot jobs and timers.
+    Pending,
+    Fired,
+    Cancelled,
+}
+
+impl ApiScheduleState {
+    /// The wire spelling (matches the serde representation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Disabled => "disabled",
+            Self::Pending => "pending",
+            Self::Fired => "fired",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for ApiScheduleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&agentos_types::ScheduleState> for ApiScheduleState {
+    fn from(s: &agentos_types::ScheduleState) -> Self {
+        match s {
+            agentos_types::ScheduleState::Active => Self::Active,
+            agentos_types::ScheduleState::Paused => Self::Paused,
+            agentos_types::ScheduleState::Disabled => Self::Disabled,
+        }
+    }
+}
+
 /// A single scheduled entry as returned by `GET /api/v1/schedules` — a
 /// recurring cron job, a one-shot once-job, or an in-memory timer.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -16,7 +61,7 @@ pub struct ApiScheduleSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     /// `active` | `paused` | `disabled` for cron; `pending` for once/timer.
-    pub state: String,
+    pub state: ApiScheduleState,
     pub prompt: String,
     pub run_count: u64,
     pub last_run_at: Option<DateTime<Utc>>,

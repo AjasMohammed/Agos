@@ -353,6 +353,10 @@ pub enum KernelCommand {
     ResolveEscalation {
         id: u64,
         decision: String,
+        /// On approve: also mint a standing grant for the escalated tool
+        /// (agent-scoped, 7 days) so the same tool stops re-prompting.
+        #[serde(default)]
+        remember: bool,
     },
 
     // Cost management
@@ -570,6 +574,14 @@ pub enum KernelCommand {
     /// Approve a pending pairing code, allowlisting the sender that requested it.
     ApprovePairing {
         code: String,
+    },
+    /// Approve a pending pairing request by the `(channel, sender)` pair that
+    /// `ListPairings` already exposes, without the secret code. For operator
+    /// surfaces only (this bus, and REST with `channels:w`) — the code stays
+    /// the only door on the inbound `/pair` path.
+    ApprovePendingPairing {
+        channel_id: String,
+        sender_id: String,
     },
     /// Revoke an approved sender from a channel's DM allowlist.
     RevokePairing {
@@ -1032,7 +1044,6 @@ pub enum KernelResponse {
     TimerId(agentos_types::ScheduleID),
     OnceJobList(Vec<agentos_types::schedule::OnceJob>),
     BackgroundPoolList(Vec<agentos_types::schedule::BackgroundTask>),
-    BackgroundLogs(Vec<String>),
 
     // Escalation
     EscalationList(Vec<serde_json::Value>),

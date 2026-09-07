@@ -55,181 +55,13 @@ fn load_gold() -> Vec<GoldRow> {
 // ── Minimal ToolSummary set covering the gold tools ──────────────────────────
 
 fn gold_summaries() -> Vec<ToolSummary> {
-    let entries: &[(&str, &str, &str, &[&str])] = &[
-        (
-            "web-fetch",
-            "Retrieve URL contents. Fetch a web page or HTTP resource.",
-            "core",
-            &["read", "network"],
-        ),
-        (
-            "web-search",
-            "Search the web for current information.",
-            "core",
-            &["read", "network"],
-        ),
-        (
-            "memory-write",
-            "Persist a fact or user preference into semantic memory.",
-            "memory",
-            &["write"],
-        ),
-        (
-            "memory-search",
-            "Search semantic memory for prior facts and patterns.",
-            "memory",
-            &["read"],
-        ),
-        (
-            "context-memory-read",
-            "Read the context memory store for this agent.",
-            "core",
-            &["read"],
-        ),
-        (
-            "context-memory-update",
-            "Update a stable user preference in context memory.",
-            "core",
-            &["write"],
-        ),
-        (
-            "file-reader",
-            "Read files from the data directory with pagination.",
-            "core",
-            &["read", "fs"],
-        ),
-        (
-            "file-writer",
-            "Write content to a file in the data directory.",
-            "core",
-            &["write", "fs"],
-        ),
-        (
-            "shell-exec",
-            "Execute a shell command in a sandboxed environment.",
-            "core",
-            &["exec"],
-        ),
-        (
-            "spawn-agent",
-            "Spawn a sub-agent to handle a specific delegated task.",
-            "core",
-            &["exec", "meta"],
-        ),
-        (
-            "await-agents",
-            "Wait for and collect results from spawned child agents.",
-            "core",
-            &["read", "meta"],
-        ),
-        (
-            "describe-tool",
-            "Get the full schema and examples for a specific tool by name.",
-            "core",
-            &["read", "meta"],
-        ),
-        (
-            "search-tools",
-            "Search all registered tools by keyword or intent query.",
-            "core",
-            &["read", "meta"],
-        ),
-        (
-            "list-tools",
-            "List tools filtered by category, tag, or paginated.",
-            "core",
-            &["read", "meta"],
-        ),
-        (
-            "channel-send",
-            "Send a message to a connected messaging channel.",
-            "channel",
-            &["write", "network"],
-        ),
-        (
-            "schedule-once",
-            "Schedule a task or notification to run once at a future time.",
-            "scheduling",
-            &["write"],
-        ),
-        (
-            "schedule-recurring",
-            "Schedule a task to run on a repeating cron schedule.",
-            "scheduling",
-            &["write"],
-        ),
-        (
-            "scratchpad-write",
-            "Write a note or wiki page to the agent scratchpad.",
-            "scratchpad",
-            &["write"],
-        ),
-        (
-            "system-mounts",
-            "List filesystem mounts and disk usage on the host.",
-            "core",
-            &["read"],
-        ),
-        (
-            "system-services",
-            "Inspect systemd services running on the host.",
-            "core",
-            &["read"],
-        ),
-        (
-            "network-sockets",
-            "List active network sockets and listening ports.",
-            "core",
-            &["read", "network"],
-        ),
-        (
-            "ask-user",
-            "Prompt the human operator for input or approval.",
-            "notifications",
-            &["read", "meta"],
-        ),
-        (
-            "notify-user",
-            "Send a notification or message to the user.",
-            "notifications",
-            &["write", "meta"],
-        ),
-        (
-            "kmc-env-create",
-            "Create a managed environment for Python, Node, or Rust.",
-            "capabilities",
-            &["exec"],
-        ),
-        (
-            "kmc-proc-spawn",
-            "Spawn a managed process inside a capability environment.",
-            "capabilities",
-            &["exec"],
-        ),
-        (
-            "kmc-net-check",
-            "Check network connectivity from a capability environment.",
-            "capabilities",
-            &["read", "network"],
-        ),
-    ];
-    entries
-        .iter()
-        .map(|(name, desc, cat, tags)| ToolSummary {
-            name: name.to_string(),
-            description: desc.to_string(),
-            version: "1.0.0".into(),
-            permissions: vec![],
-            payload_schema: None,
-            examples: vec![],
-            trust_tier: "core".into(),
-            capability_tags: vec![],
-            category: cat.to_string(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
-            risk_class: "readonly_scoped".into(),
-            usage_hints: None,
-        })
-        .collect()
+    // The real catalogue: same manifests, same `summaries_from_manifests`, same
+    // `search_hints`/`payload_schema` evidence the kernel ranks over.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+    let loaded =
+        agentos_tools::loader::load_all_manifests(&dir).expect("tools/core manifests load");
+    let refs: Vec<&agentos_types::ToolManifest> = loaded.iter().map(|l| &l.manifest).collect();
+    agentos_tools::agent_manual::AgentManualTool::summaries_from_manifests(&refs)
 }
 
 fn make_shared(summaries: Vec<ToolSummary>) -> SharedToolSummaries {
@@ -237,12 +69,18 @@ fn make_shared(summaries: Vec<ToolSummary>) -> SharedToolSummaries {
 }
 
 fn noop_ctx() -> ToolExecutionContext {
+    // `search-tools` hides tools the caller holds no permission for. This suite
+    // measures retrieval quality over the whole catalogue, so grant everything.
+    let mut permissions = PermissionSet::new();
+    permissions.grant("*".to_string(), true, true, true, None);
+    permissions.grant_op("*".to_string(), agentos_types::PermissionOp::Query, None);
+    permissions.grant_op("*".to_string(), agentos_types::PermissionOp::Observe, None);
     ToolExecutionContext {
         data_dir: std::path::PathBuf::from("/tmp"),
         task_id: TaskID::new(),
         agent_id: AgentID::new(),
         trace_id: TraceID::new(),
-        permissions: PermissionSet::new(),
+        permissions,
         vault: None,
         hal: None,
         file_lock_registry: None,
@@ -301,8 +139,8 @@ async fn structural_gold_dataset_validity_guards() {
 
 #[tokio::test]
 async fn structural_gold_category_validity() {
-    // Every gold row's `category` must equal `infer_tool_category(...)` for at
-    // least one of its expected tools — prevents phantom categories like "network".
+    // Every gold row's `category` must equal the catalogue category of at least
+    // one of its expected tools — prevents phantom categories like "network".
     let summaries = gold_summaries();
     let cat_by_name: HashMap<&str, &str> = summaries
         .iter()
@@ -534,9 +372,50 @@ async fn semantic_recall_beats_lexical_baseline_on_synonym_rows() {
 //    - "type": "synonym" if the query has no lexical overlap with the tool name/desc
 //    - "type": "lexical" if the query contains words from the tool name/description
 //    - "category": must match AgentManualTool::infer_tool_category(name, ...) output
-//      (categories: memory/mcp/scratchpad/channel/events/skills/plugins/containers/
-//       webhooks/capabilities/hal/scheduling/notifications — else "core")
+//      (explicit `[manifest].category` wins; vocabulary: fs/shell/web/process/system/agent/task/
+//       artifact/hal/memory/mcp/scratchpad/channel/events/skills/plugins/containers/
+//       webhooks/capabilities/scheduling/notifications — else "core")
 // 2. Add a matching ToolSummary to gold_summaries() in this file so it has
 //    realistic name, description, category, and tags.
 // 3. Run Tier-1 to confirm the row passes validity guards:
 //    cargo test -p agentos-tools --test tool_discovery_eval structural
+
+#[tokio::test]
+#[ignore = "requires real MiniLM embedder; asserts the Phase-6 targets Recall@5 ≥ 0.85, MRR ≥ 0.70"]
+async fn semantic_recall_at_5_meets_targets() {
+    let model_cache = std::env::var("FASTEMBED_CACHE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("fastembed"));
+    let embedder = Arc::new(
+        Embedder::with_cache_dir(&model_cache)
+            .or_else(|_| Embedder::new())
+            .expect("real embedder required"),
+    );
+    let tool = SearchToolsTool::new(make_shared(gold_summaries()), embedder);
+    let gold = load_gold();
+    let mut hits5 = 0usize;
+    let mut mrr = 0.0f64;
+    let mut misses: Vec<String> = Vec::new();
+    for row in &gold {
+        let hits = run_search(&tool, &row.query).await;
+        if recall_at_k(&hits, &row.expect_tools, 5) {
+            hits5 += 1;
+        } else {
+            misses.push(format!("{:?} → {:?}", row.query, hits));
+        }
+        mrr += reciprocal_rank(&hits, &row.expect_tools);
+    }
+    let n = gold.len() as f64;
+    let recall5 = hits5 as f64 / n;
+    let mrr = mrr / n;
+    println!(
+        "Recall@5={recall5:.3} MRR={mrr:.3} n={n}\nmisses:\n{}",
+        misses.join("\n")
+    );
+    assert!(
+        recall5 >= 0.85,
+        "Recall@5 {recall5:.3} < 0.85; misses:\n{}",
+        misses.join("\n")
+    );
+    assert!(mrr >= 0.70, "MRR {mrr:.3} < 0.70");
+}

@@ -737,6 +737,42 @@ impl ContextManager {
         self.tasks.write().await.remove(task_id);
     }
 
+    /// Snapshot of the task's `tool_references` for the per-iteration compiled
+    /// context (the compiler builds a fresh `ContextWindow`, so this must be
+    /// copied across or the adapter never sees them).
+    pub async fn tool_references(
+        &self,
+        task_id: &TaskID,
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .get(task_id)
+            .map(|tc| tc.window.tool_references.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record which deferred tools a discovery result surfaced so the adapter
+    /// can emit `tool_reference` blocks for that `tool_call_id` (provider-native
+    /// deferral). No-op for an unknown task.
+    pub async fn add_tool_references(
+        &self,
+        task_id: &TaskID,
+        tool_call_id: &str,
+        names: Vec<String>,
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        let mut tasks = self.tasks.write().await;
+        if let Some(tc) = tasks.get_mut(task_id) {
+            tc.window
+                .tool_references
+                .entry(tool_call_id.to_string())
+                .or_default()
+                .extend(names);
+        }
+    }
+
     /// Increment reference counts for entries whose `tool_call_id` matches any
     /// of the provided IDs. This marks those entries as actively referenced so
     /// they are preserved longer during eviction.

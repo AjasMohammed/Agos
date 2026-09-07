@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "list-timers"
@@ -7,7 +8,6 @@ description = "List all pending one-shot timers and their fire times"
 author      = "agentos-core"
 trust_tier  = "core"
 group       = "events"
-risk_class  = "readonly_scoped"
 
 [capabilities_required]
 permissions = ["schedule.timer:r"]

@@ -1,12 +1,14 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "exec_capable"
 
 [manifest]
 name        = "process-manager"
 version     = "1.0.0"
-risk_class  = "exec_capable"
 description = "List running processes or terminate a process by PID via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "process"
+search_hints = ["start or stop a background process", "manage a long running command", "kill a process"]
 
 [manifest.usage_hints]
 use_for = ["Listing top memory hogs", "Checking if a specific process is running", "Killing a stuck process by PID"]

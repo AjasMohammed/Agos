@@ -41,6 +41,10 @@ pub enum EventCategory {
     AgentCommunication,
     ScheduleEvents,
     ExternalEvents,
+    /// Operator chat traffic. Deliberately its own category: a subscription to
+    /// `AgentCommunication` must not be woken by every chat turn — the woken
+    /// agent's own reply is another chat turn, which is an unbounded loop.
+    ChatEvents,
 }
 
 // ── Event Types ───────────────────────────────────────────────────
@@ -140,6 +144,10 @@ pub enum EventType {
 
     // ── AgentCommunication (Phase 4) ──
     DirectMessageReceived,
+    /// A message was appended to an operator chat session. Lets a second panel
+    /// tab (or a channel bridge writing into the same session) refresh without
+    /// a reload — the streaming client already sees its own turn.
+    ChatMessageAdded,
     BroadcastReceived,
     DelegationReceived,
     DelegationResponseReceived,
@@ -266,6 +274,8 @@ impl EventType {
             | Self::SubAgentProgress
             | Self::SubAgentCompleted
             | Self::SubAgentFailed => EventCategory::AgentCommunication,
+
+            Self::ChatMessageAdded => EventCategory::ChatEvents,
 
             Self::CronJobFired
             | Self::ScheduledTaskMissed

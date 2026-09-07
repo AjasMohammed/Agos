@@ -39,6 +39,14 @@ pub struct ResolveEscalationRequest {
     pub decision: String,
     /// Optional free-form note recorded alongside the decision.
     pub note: Option<String>,
+    /// On approve, also mint a standing grant for the escalated tool
+    /// (agent-scoped, 7 days; parent-directory glob when the call had a
+    /// `path`) so it stops re-prompting. Ignored on deny. Requires the
+    /// `approvals:w` scope in addition to `escalations:w`. Refused for
+    /// exec-capable tools with no path to scope by. Revocable via
+    /// `DELETE /api/v1/approval-policies/{id}`.
+    #[serde(default)]
+    pub remember: bool,
 }
 
 /// Response for `POST /api/v1/escalations/{id}/resolve`.
@@ -48,4 +56,11 @@ pub struct ResolveEscalationResponse {
     pub escalation_id: u64,
     pub task_id: String,
     pub task_resumed: bool,
+    /// Id of the standing grant minted by `remember: true`, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<i64>,
+    /// Human-readable outcome of `remember: true` — what was remembered, or
+    /// why nothing was (already remembered, exec tool with no path, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remember_note: Option<String>,
 }

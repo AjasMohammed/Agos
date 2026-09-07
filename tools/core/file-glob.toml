@@ -1,4 +1,5 @@
 tags = ["read", "fs"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "file-glob"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Recursively discovers files matching a glob pattern (e.g. **/*.rs) within data_dir. Patterns containing '..' or absolute paths are rejected. Returns paths with size and modification time, sorted by mtime descending."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "fs"
+search_hints = ["find files matching a pattern", "list files in a folder", "ls"]
 
 [capabilities_required]
 permissions = ["fs.user_data:r"]

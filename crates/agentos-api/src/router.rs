@@ -12,7 +12,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, Request};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Router};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,9 +26,9 @@ use crate::api_key::ApiKeyStore;
 use crate::handlers::{
     agent_chats, agents, approval_policies, audit, auth, channels, chat, chat_sessions, config,
     connectors, costs, dashboard, doctor, escalations, events, files, identity, inbox, keys, logs,
-    marketplace, mcp, memory, notifications, pipelines, plugins, prefs, roles, schedules,
-    scratchpad, secrets, skills, sse, system, system_info, tasks, tools, webhooks, webhooks_admin,
-    workflows,
+    marketplace, mcp, memory, notifications, pipelines, plugins, prefs, providers, roles,
+    schedules, scratchpad, secrets, skills, sse, system, system_info, tasks, tools, webhooks,
+    webhooks_admin, workflows, workspace_grants,
 };
 use crate::service::KernelService;
 use crate::ws;
@@ -82,16 +82,35 @@ pub fn build_router(
         // OpenAPI contract. Public so the frontend can fetch the contract; the schema
         // exposes only the API shape, no secrets.
         .route("/api/v1/openapi.json", get(openapi_json))
-        // Telegram webhook — public, authenticated via secret_token header.
+        // OAuth provider callback — public; the browser arrives here from the
+        // provider with no bearer, and the vault-validated `state` is the auth.
+        .route(
+            "/api/v1/connectors/{id}/oauth/callback",
+            get(connectors::oauth_callback),
+        );
+
+    // Inbound webhooks: public, each authenticated by its own secret/signature.
+    // Kept off the per-IP governor below — a provider bursting events from one
+    // source IP must not be answered with 429s; the per-endpoint
+    // `webhook_throttle` is the limiter that applies here.
+    let webhook_routes = Router::new()
+        // Telegram webhook — authenticated via secret_token header.
         .route(
             "/api/v1/webhooks/telegram/{channel_id}",
             post(webhooks::telegram_webhook),
         )
-        // WhatsApp webhook — public; GET verify handshake + POST HMAC-verified.
+        // WhatsApp webhook — GET verify handshake + POST HMAC-verified.
         .route(
             "/api/v1/webhooks/whatsapp/{channel_id}",
             get(webhooks::whatsapp_webhook_verify).post(webhooks::whatsapp_webhook),
-        );
+        )
+        // Provider webhooks (GitHub/Stripe/Slack/PagerDuty/generic) —
+        // per-endpoint secret + provider signature.
+        .route(
+            "/api/v1/webhooks/incoming/{endpoint_id}",
+            post(webhooks::incoming_webhook),
+        )
+        .with_state(service.clone());
 
     // Interactive Scalar docs UI. Gated by the `docs_enabled` arg (`[api] docs_enabled`)
     // so it can be turned off on internet-exposed deployments.
@@ -231,10 +250,17 @@ pub fn build_router(
         .route("/api/v1/costs/summary", get(costs::summary))
         .route("/api/v1/costs/agents/{name}", get(costs::agent_costs))
         // Notifications
-        .route("/api/v1/notifications", get(notifications::list))
+        .route(
+            "/api/v1/notifications",
+            get(notifications::list).delete(notifications::clear_all),
+        )
         .route(
             "/api/v1/notifications/unread",
             get(notifications::unread_count),
+        )
+        .route(
+            "/api/v1/notifications/read-all",
+            post(notifications::mark_all_read),
         )
         .route(
             "/api/v1/notifications/read",
@@ -247,6 +273,10 @@ pub fn build_router(
         .route(
             "/api/v1/notifications/{id}/respond",
             post(notifications::respond),
+        )
+        .route(
+            "/api/v1/notifications/{id}/read",
+            post(notifications::mark_read),
         )
         // Escalations (HITL)
         .route("/api/v1/escalations", get(escalations::list))
@@ -264,7 +294,15 @@ pub fn build_router(
             "/api/v1/approval-policies/{id}",
             axum::routing::delete(approval_policies::revoke),
         )
+        // Workspace grants (host folder access, same store as `agentos workspace`)
+        .route(
+            "/api/v1/workspace-grants",
+            get(workspace_grants::list)
+                .post(workspace_grants::add)
+                .delete(workspace_grants::revoke),
+        )
         .route("/api/v1/agents/{id}/memory/{tier}", get(memory::browse))
+        .route("/api/v1/providers", get(providers::list))
         .route("/api/v1/skills", get(skills::list))
         .route("/api/v1/skills/{name}", get(skills::get))
         .route("/api/v1/agents/{id}/inbox", get(inbox::get))
@@ -301,27 +339,77 @@ pub fn build_router(
                 .delete(workflows::delete),
         )
         // Plugins
-        .route("/api/v1/plugins", get(plugins::list))
+        .route("/api/v1/plugins", get(plugins::list).post(plugins::install))
         .route("/api/v1/plugins/discover", post(plugins::discover))
-        .route("/api/v1/plugins/{id}", get(plugins::detail))
+        .route(
+            "/api/v1/plugins/{id}",
+            get(plugins::detail)
+                .put(plugins::update)
+                .delete(plugins::remove),
+        )
         .route("/api/v1/plugins/{id}/enable", post(plugins::enable))
         .route("/api/v1/plugins/{id}/disable", post(plugins::disable))
-        // Channels
-        .route("/api/v1/channels", get(channels::list))
-        .route("/api/v1/channels/{id}", get(channels::detail))
+        // Channels. `pairings` is declared before `{id}` for readability only —
+        // matchit prefers static segments over params regardless of order.
+        .route(
+            "/api/v1/channels",
+            get(channels::list).post(channels::connect),
+        )
+        .route("/api/v1/channels/pairings", get(channels::pairings))
+        .route(
+            "/api/v1/channels/pairings/{code}/approve",
+            post(channels::approve_pairing),
+        )
+        .route(
+            "/api/v1/channels/{id}",
+            get(channels::detail).put(channels::update),
+        )
         .route(
             "/api/v1/channels/{id}/disconnect",
             post(channels::disconnect),
         )
+        .route("/api/v1/channels/{id}/test", post(channels::test))
+        .route("/api/v1/channels/{id}/agent", put(channels::set_agent))
+        .route(
+            "/api/v1/channels/{id}/pairings/{sender_id}",
+            delete(channels::revoke_pairing),
+        )
+        .route(
+            "/api/v1/channels/{id}/pairings/{sender_id}/approve",
+            post(channels::approve_pending_pairing),
+        )
         // MCP
-        .route("/api/v1/mcp", get(mcp::list))
+        .route("/api/v1/mcp", get(mcp::list).post(mcp::attach))
+        .route("/api/v1/mcp/catalog", get(mcp::catalog_list))
+        .route("/api/v1/mcp/catalog/{id}", get(mcp::catalog_detail))
+        .route(
+            "/api/v1/mcp/catalog/{id}/install",
+            post(mcp::catalog_install),
+        )
+        .route("/api/v1/mcp/{name}", put(mcp::update))
         .route("/api/v1/mcp/{name}/detach", post(mcp::detach))
         // Connectors
-        .route("/api/v1/connectors", get(connectors::list))
-        .route("/api/v1/connectors/{id}", get(connectors::detail))
+        .route(
+            "/api/v1/connectors",
+            get(connectors::list).post(connectors::add),
+        )
+        .route(
+            "/api/v1/connectors/{id}",
+            get(connectors::detail)
+                .put(connectors::update)
+                .delete(connectors::remove),
+        )
         .route(
             "/api/v1/connectors/{id}/disconnect",
             post(connectors::disconnect),
+        )
+        .route(
+            "/api/v1/connectors/{id}/oauth/start",
+            post(connectors::oauth_start),
+        )
+        .route(
+            "/api/v1/connectors/{id}/credential",
+            post(connectors::store_credential),
         )
         // Events
         .route(
@@ -406,9 +494,29 @@ pub fn build_router(
     // Extensions available to all routes (including WS upgrade and login).
     // The ticket store is shared between the mint handler (protected) and the
     // WS upgrade (public), so it lives at this level.
+    // OAuth redirect targets: this API's public base (used to build the
+    // provider `redirect_uri`) and the panel origin the callback bounces the
+    // browser back to. The panel target comes from config, never from the
+    // request — a caller-supplied return URL would be an open redirect.
+    let api_base = std::env::var("AGENTOS_BASE_URL").ok().unwrap_or_else(|| {
+        let host = if bind_addr.ip().is_unspecified() {
+            "localhost".to_string()
+        } else {
+            bind_addr.ip().to_string()
+        };
+        format!("http://{host}:{}", bind_addr.port())
+    });
+    let oauth_redirects = Arc::new(connectors::OAuthRedirects {
+        api_base: api_base.trim_end_matches('/').to_string(),
+        panel_origin: cors_allowed_origins
+            .first()
+            .map(|o| o.trim_end_matches('/').to_string()),
+    });
+
     let app = public_routes
         .merge(login_routes)
         .merge(protected_routes)
+        .layer(Extension(oauth_redirects))
         .layer(Extension(key_store))
         .layer(Extension(broadcaster))
         .layer(Extension(ws::ticket::WsTicketStore::new()))
@@ -455,21 +563,33 @@ pub fn build_router(
         cors.allow_origin(origins)
     };
 
-    // Rate limiting: 120 req/min burst, 2 req/s steady replenishment.
+    // Rate limiting: 120-request burst, one cell replenished every 50ms (20 req/s
+    // sustained).
+    //
+    // `per_second(n)` is a *period*, not a rate — the old `per_second(2)` meant
+    // one request every two seconds once the burst was spent, which the control
+    // panel exhausts just by being used: every route mounts several queries plus
+    // the shell's background ones, so walking a handful of tabs drained the
+    // bucket and the UI then received a 429 for nearly everything. 20/s sustained
+    // still bounds abuse on a control-plane API while matching interactive use.
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(2)
+            .per_millisecond(50)
             .burst_size(120)
             .finish()
             .ok_or_else(|| "invalid governor rate-limit config".to_string())?,
     );
 
+    // CORS sits outside the governor: preflights are answered before they can
+    // spend quota, and a 429 still carries CORS headers (otherwise the browser
+    // reports it as a CORS failure and the panel cannot tell it was throttled).
     Ok(app
+        .layer(GovernorLayer::new(governor_conf))
+        .merge(webhook_routes)
         .layer(axum::middleware::from_fn(add_security_headers))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .layer(GovernorLayer::new(governor_conf)))
+        .layer(cors))
 }
 
 /// Serve the generated OpenAPI 3.1 document as JSON (the React panel's contract).

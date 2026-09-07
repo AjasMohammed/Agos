@@ -475,6 +475,8 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/agent_convo.html"),
     )?;
     env.add_template("files.html", include_str!("templates/files.html"))?;
+    env.add_template("artifacts.html", include_str!("templates/artifacts.html"))?;
+    env.add_template("artifact.html", include_str!("templates/artifact.html"))?;
     env.add_template("chat.html", include_str!("templates/chat.html"))?;
     env.add_template(
         "chat_conversation.html",

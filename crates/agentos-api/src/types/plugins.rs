@@ -25,6 +25,8 @@ pub struct ApiPluginSummary {
     pub channels: Vec<String>,
     /// Tool manifest paths declared by this plugin.
     pub tools: Vec<String>,
+    /// Manifest lives under `plugins/user/` (installed by an operator; removable).
+    pub user_installed: bool,
 }
 
 /// Full plugin detail.
@@ -44,6 +46,10 @@ pub struct ApiPluginDetail {
     pub tools: Vec<String>,
     pub permissions: Vec<String>,
     pub memory_backend: bool,
+    pub user_installed: bool,
+    /// Raw `plugin.toml`, for prefilling an edit form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_toml: Option<String>,
 }
 
 /// Acknowledgement returned by `POST /plugins/discover`.
@@ -53,4 +59,10 @@ pub struct DiscoverPluginsResponse {
     pub discovered: u64,
     /// Full plugin inventory after discovery.
     pub plugins: Vec<ApiPluginSummary>,
+}
+
+/// Install a plugin from a pasted `plugin.toml`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct InstallPluginRequest {
+    pub manifest_toml: String,
 }

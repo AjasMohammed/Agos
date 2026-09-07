@@ -1,12 +1,13 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "network-sockets"
 version     = "1.0.0"
-risk_class  = "readonly_external"
 description = "List host network sockets (TCP/UDP), listening ports, and established connections via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
 
 [manifest.usage_hints]
 use_for = ["Finding which process is using a port", "Listing all listening services", "Checking established network connections"]

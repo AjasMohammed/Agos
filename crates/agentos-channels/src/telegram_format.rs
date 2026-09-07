@@ -216,6 +216,40 @@ fn extract_inline_code(input: &str, placeholders: &mut Vec<String>) -> String {
     out
 }
 
+/// True when every HTML tag in `s` opens and closes inside `s`, properly nested.
+///
+/// The inline passes run over text that already carries emitted tags (an ATX
+/// header became `<b>`, a blockquote `<blockquote>`, an earlier pass' `<b>`/`<s>`),
+/// so a marker pair spanning a tag boundary would emit overlapping tags —
+/// Telegram rejects those with "Unmatched end tag ... expected </i>, found </b>".
+/// Bare `<`/`>` cannot reach here: `escape_html` ran first and code spans are
+/// held in placeholders, so every `<` starts a tag we emitted ourselves.
+fn tags_balanced(s: &str) -> bool {
+    let mut stack: Vec<&str> = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let Some(rel) = s[i..].find('>') else {
+                return false;
+            };
+            let tag = &s[i + 1..i + rel];
+            match tag.strip_prefix('/') {
+                Some(name) => {
+                    if stack.pop() != Some(name) {
+                        return false;
+                    }
+                }
+                None => stack.push(tag),
+            }
+            i += rel + 1;
+            continue;
+        }
+        i += 1;
+    }
+    stack.is_empty()
+}
+
 /// Replace `<delim>text<delim>` pairs with `<open>text<close>`.
 fn replace_paired(input: &str, delim: &str, open: &str, close: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -225,7 +259,7 @@ fn replace_paired(input: &str, delim: &str, open: &str, close: &str) -> String {
         if let Some(rel_end) = rest[after..].find(delim) {
             // Disallow empty pair and unbroken whitespace-only pair.
             let inner = &rest[after..after + rel_end];
-            if inner.is_empty() || inner.starts_with(char::is_whitespace) {
+            if inner.is_empty() || inner.starts_with(char::is_whitespace) || !tags_balanced(inner) {
                 out.push_str(&rest[..after]);
                 rest = &rest[after..];
                 continue;
@@ -264,7 +298,10 @@ fn replace_italic(input: &str) -> String {
             }
             if let Some(end) = close {
                 let inner: String = chars[i + 1..end].iter().collect();
-                if !inner.is_empty() && !inner.starts_with(char::is_whitespace) {
+                if !inner.is_empty()
+                    && !inner.starts_with(char::is_whitespace)
+                    && tags_balanced(&inner)
+                {
                     out.push_str("<i>");
                     out.push_str(&inner);
                     out.push_str("</i>");
@@ -500,5 +537,38 @@ mod tests {
     fn ampersand_in_url_escaped_in_attr() {
         let html = markdown_to_telegram_html("[s](https://x.com/?a=1&b=2)");
         assert!(html.contains("href=\"https://x.com/?a=1&amp;b=2\""));
+    }
+    /// Regression: a `_` inside an ATX header (already `<b>…</b>`) used to pair
+    /// with the next `_` in the body, emitting `<b>a<i>b</b>c</i>` — Telegram
+    /// answers "Unmatched end tag ... expected </i>, found </b>" and the kernel
+    /// falls back to a second plain-text send of every message.
+    #[test]
+    fn marker_does_not_pair_across_a_tag_boundary() {
+        let out = markdown_to_telegram_html("## Title_A\nsome _text_ here");
+        assert_eq!(out, "<b>Title_A</b>\nsome <i>text</i> here");
+        assert!(tags_balanced(&out), "output must be well-formed: {out}");
+    }
+
+    #[test]
+    fn bold_marker_does_not_pair_across_a_tag_boundary() {
+        let out = markdown_to_telegram_html("## a**b\nc **bold** d");
+        assert!(tags_balanced(&out), "output must be well-formed: {out}");
+    }
+
+    #[test]
+    fn nested_bold_inside_italic_still_renders() {
+        assert_eq!(
+            markdown_to_telegram_html("*see **this** now*"),
+            "<i>see <b>this</b> now</i>"
+        );
+    }
+
+    #[test]
+    fn tags_balanced_rejects_overlap() {
+        assert!(tags_balanced("<b>x</b>"));
+        assert!(tags_balanced("plain"));
+        assert!(!tags_balanced("x</b>"));
+        assert!(!tags_balanced("<b>x"));
+        assert!(!tags_balanced("<b>x</i>"));
     }
 }

@@ -1,0 +1,54 @@
+tags = ["write"]
+risk_class = "write_agent_state"
+
+[manifest]
+name        = "artifact-write"
+version     = "1.0.0"
+description = """
+Publish a document for the user to LOOK AT — report, comparison, dashboard, \
+slide deck, styled summary. Returns a URL to share in your reply. Use this \
+instead of pasting long structured output into chat. Pass an existing \
+artifact_id to revise an artifact you already created."""
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "artifact"
+search_hints = ["show the user a page or slides", "publish an html report", "render a visual result"]
+
+[capabilities_required]
+permissions = ["fs.artifacts:w"]
+
+[capabilities_provided]
+outputs = ["artifact_id", "url", "title", "kind"]
+
+[intent_schema]
+input  = "ArtifactWriteIntent"
+output = "ArtifactWriteResult"
+
+[payload_schema]
+type = "object"
+required = ["title", "content"]
+
+[payload_schema.properties.title]
+type        = "string"
+description = "Short human title shown as the artifact heading (≤120 chars)."
+
+[payload_schema.properties.content]
+type        = "string"
+description = "The artifact body. kind=markdown → markdown. kind=slides → markdown with '---' on its own line between slides. kind=html → a complete self-contained HTML document; inline all CSS/JS, no external URLs (they are blocked)."
+
+[payload_schema.properties.kind]
+type        = "string"
+enum        = ["markdown", "html", "slides"]
+description = "markdown = report/summary (default). slides = deck, split on '---'. html = custom layout or interactive page."
+
+[payload_schema.properties.artifact_id]
+type        = "string"
+description = "Omit to create. Supply an id you previously received to replace that artifact in place."
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 2000
+syscalls      = []

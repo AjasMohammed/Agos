@@ -51,6 +51,12 @@ pub struct ApiConvoDetail {
     pub participants: Vec<String>,
     /// `"running"` | `"complete"` | `"stopped"` | `"error"`.
     pub status: String,
+    /// Turn ceiling the orchestration loop runs to (clamped 2..=50 at creation).
+    pub max_turns: u32,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
+    /// RFC3339 last-updated timestamp.
+    pub updated_at: String,
     /// The conversation's turns, ordered by `turn_number`.
     pub messages: Vec<ApiConvoTurn>,
 }

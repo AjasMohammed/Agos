@@ -43,7 +43,8 @@ pub async fn list(
     responses(
         (status = 200, description = "Pipeline saved", body = crate::response::Envelope<serde_json::Value>),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorBody),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
+        (status = 409, description = "A pipeline with this name exists (resend with `overwrite`)", body = crate::error::ApiErrorBody)
     ),
     security(("bearer_auth" = []))
 )]
@@ -116,7 +117,8 @@ pub async fn delete(
     responses(
         (status = 200, description = "Pipeline imported", body = crate::response::Envelope<serde_json::Value>),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorBody),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
+        (status = 409, description = "A pipeline with the imported name already exists", body = crate::error::ApiErrorBody)
     ),
     security(("bearer_auth" = []))
 )]

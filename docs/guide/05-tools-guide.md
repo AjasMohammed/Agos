@@ -150,7 +150,7 @@ When a runtime is missing from the host entirely (e.g. `python3` isn't installed
 |------|------------|-------------|
 | `agent-message` | `agent.message:x` | Send a direct message to another agent |
 | `agent-list` | `agent.registry:r` | List registered agents and their status |
-| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent (non-blocking) |
+| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent and block until it finishes (use `spawn-async` for fire-and-forget) |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
 

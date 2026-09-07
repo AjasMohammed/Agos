@@ -35,8 +35,8 @@ fn lexically_normalize(path: &Path) -> PathBuf {
             Component::RootDir => out.push("/"),
             Component::Prefix(p) => out.push(p.as_os_str()),
             Component::Normal(part) => out.push(part),
-            // `..` is rejected by `validate_workspace_path` upstream; treat
-            // defensively here as a pop of the last `Normal` component.
+            // Unreachable in practice: `grant()` rejects `..` before calling
+            // this. Kept as a pop so the function stays total.
             Component::ParentDir => {
                 out.pop();
             }
@@ -141,6 +141,24 @@ impl WorkspaceGrantStore {
         source: &str,
         granted_by: &str,
     ) -> Result<WorkspaceGrant, AgentOSError> {
+        // Reject `..` BEFORE normalizing. `lexically_normalize` pops parent
+        // components, so `/home/u/Desktop/..` would otherwise be stored as
+        // `/home/u` — a whole-home grant that never looked like one to the
+        // caller, and that `validate_workspace_path`'s own `..` check can no
+        // longer see. Callers guard on the path they were handed, so the path
+        // they were handed is the one that has to be honest.
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "fs.workspace_grant".into(),
+                operation: format!(
+                    "workspace path '{}' must not contain '..' components",
+                    path.display()
+                ),
+            });
+        }
         let normalized = lexically_normalize(path);
         let path_str = normalized.to_string_lossy().to_string();
         validate_workspace_path(&path_str).map_err(|e| AgentOSError::PermissionDenied {

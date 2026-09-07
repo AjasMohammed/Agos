@@ -818,6 +818,15 @@ fn operator_permissions() -> agentos_types::PermissionSet {
     p.grant("agent.".into(), true, false, true, None);
     // Data and pipeline tools.
     p.grant("data.".into(), true, true, false, None);
+    // Artifacts (artifact_write). Note `"fs:"` above does NOT cover this:
+    // `check()` is a prefix match and "fs.artifacts" does not start with "fs:".
+    p.grant("fs.artifacts".into(), true, true, false, None);
+    // Scheduling: schedule.job (schedule_*), schedule.timer (set_timer,
+    // list_timers), schedule.self (list_my_schedules, get_task_logs).
+    p.grant("schedule.".into(), true, true, false, None);
+    // Host introspection: system.mounts / system.open_files / system.services.
+    // Read-only, and this is the operator's own session by definition.
+    p.grant("system.".into(), true, false, false, None);
     p
 }
 

@@ -40,7 +40,25 @@ impl FallbackAdapter {
         // values that don't match the chain's actual native-call behavior.
         if providers.len() > 1 {
             let p0_native = providers[0].supports_native_tool_calling();
+            let p0_gateway = providers[0].uses_tool_gateway();
             for (idx, p) in providers.iter().enumerate().skip(1) {
+                // Gateway disagreement is the more consequential of the two: a
+                // gateway prompt on a non-gateway leg tells the model to call
+                // `invoke_tool`, which is not in that leg's tool array, so every
+                // tool call fails for the rest of the task. `uses_tool_gateway()`
+                // resolves to the conservative `false` in that case, but the
+                // primary then runs with a prompt that under-describes it.
+                if p.uses_tool_gateway() != p0_gateway {
+                    warn!(
+                        primary = providers[0].provider_name(),
+                        fallback = p.provider_name(),
+                        index = idx,
+                        primary_gateway = p0_gateway,
+                        fallback_gateway = p.uses_tool_gateway(),
+                        "FallbackAdapter providers disagree on uses_tool_gateway; the chain \
+                         degrades to the non-gateway prompt for every leg"
+                    );
+                }
                 if p.supports_native_tool_calling() != p0_native {
                     warn!(
                         primary = providers[0].provider_name(),
@@ -85,6 +103,13 @@ impl LLMCore for FallbackAdapter {
         self.providers
             .iter()
             .all(|p| p.supports_native_tool_calling())
+    }
+
+    fn uses_tool_gateway(&self) -> bool {
+        // Same all-candidates rule as native tool calling: the prompt must not
+        // promise gateway meta-tools if failover can land on a provider that
+        // exposes the real tool array instead.
+        self.providers.iter().all(|p| p.uses_tool_gateway())
     }
 
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {

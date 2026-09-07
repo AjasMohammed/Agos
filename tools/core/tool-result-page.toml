@@ -1,4 +1,5 @@
 tags = ["meta", "read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "tool-result-page"
@@ -6,7 +7,6 @@ version     = "1.0.0"
 description = "Retrieve a paged section of a previously truncated tool result. Use this when an earlier tool result was truncated and the response included a 'page_id=...' hint."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
 
 [capabilities_required]
 permissions = []

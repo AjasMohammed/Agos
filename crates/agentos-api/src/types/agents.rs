@@ -30,10 +30,24 @@ fn epoch() -> DateTime<Utc> {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiAgentDetail {
     pub summary: ApiAgentSummary,
+    /// Result of a live health check against the agent's LLM provider
+    /// (`None` when no adapter is attached or the check timed out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_healthy: Option<bool>,
     pub permissions: Vec<String>,
     pub recent_tasks: Vec<super::tasks::ApiTaskSummary>,
     #[schema(value_type = Option<Object>)]
     pub cost_snapshot: Option<CostSnapshot>,
+    /// Current profile description (empty when unset). Exposed so an editor can
+    /// prefill instead of submitting blanks over the stored values.
+    #[serde(default)]
+    pub description: String,
+    /// Current default thinking level, lowercase (`off`/`low`/`medium`/`high`/`max`).
+    #[serde(default)]
+    pub thinking_level: String,
+    /// Current custom system prompt, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -55,11 +69,19 @@ pub struct ConnectAgentRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+/// Partial update of an agent's mutable profile settings.
+///
+/// Every field is optional and **absent means "leave unchanged"** — a client that
+/// only wants to edit the description must not have to resend the system prompt it
+/// never displayed. To *clear* the system prompt, send it as an empty string.
 pub struct UpdateAgentSettingsRequest {
     pub agent_name: String,
-    pub description: String,
-    #[schema(value_type = String)]
-    pub thinking_level: ThinkingLevel,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub thinking_level: Option<ThinkingLevel>,
+    /// `None` leaves the prompt untouched; `Some("")` clears it.
     #[serde(default)]
     pub system_prompt: Option<String>,
 }

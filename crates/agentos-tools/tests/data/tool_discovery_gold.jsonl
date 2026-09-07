@@ -1,30 +1,62 @@
-{"query": "download the contents of a web page", "expect_tools": ["web-fetch", "web-search"], "category": "core", "type": "synonym"}
+{"query": "download the contents of a web page", "expect_tools": ["web-fetch", "web-search"], "category": "web", "type": "synonym"}
 {"query": "persist a fact about the user for later", "expect_tools": ["memory-write"], "category": "memory", "type": "synonym"}
 {"query": "save this information to long-term storage", "expect_tools": ["memory-write", "context-memory-update"], "category": "memory", "type": "synonym"}
 {"query": "recall what I told you last session", "expect_tools": ["memory-search", "context-memory-read"], "category": "memory", "type": "synonym"}
-{"query": "look up prior context about my preferences", "expect_tools": ["context-memory-read", "memory-search"], "category": "core", "type": "synonym"}
-{"query": "search for information online", "expect_tools": ["web-search", "web-fetch"], "category": "core", "type": "synonym"}
-{"query": "retrieve a URL from the internet", "expect_tools": ["web-fetch"], "category": "core", "type": "synonym"}
-{"query": "what files are mounted on this host", "expect_tools": ["system-mounts"], "category": "core", "type": "synonym"}
-{"query": "show running system processes and services", "expect_tools": ["system-services"], "category": "core", "type": "synonym"}
-{"query": "delegate this task to another specialist agent", "expect_tools": ["spawn-agent"], "category": "core", "type": "synonym"}
+{"query": "look up prior context about my preferences", "expect_tools": ["context-memory-read", "memory-search"], "category": "memory", "type": "synonym"}
+{"query": "search for information online", "expect_tools": ["web-search", "web-fetch"], "category": "web", "type": "synonym"}
+{"query": "retrieve a URL from the internet", "expect_tools": ["web-fetch"], "category": "web", "type": "synonym"}
+{"query": "what files are mounted on this host", "expect_tools": ["system-mounts"], "category": "system", "type": "synonym"}
+{"query": "show running system processes and services", "expect_tools": ["system-services"], "category": "system", "type": "synonym"}
+{"query": "delegate this task to another specialist agent", "expect_tools": ["spawn-agent"], "category": "agent", "type": "synonym"}
 {"query": "ask the human operator for approval", "expect_tools": ["ask-user"], "category": "notifications", "type": "synonym"}
 {"query": "send a notification to the user", "expect_tools": ["notify-user", "ask-user"], "category": "notifications", "type": "synonym"}
-{"query": "create a sandboxed Python environment", "expect_tools": ["kmc-env-create"], "category": "capabilities", "type": "synonym"}
-{"query": "write a note to my scratch space", "expect_tools": ["scratchpad-write"], "category": "scratchpad", "type": "synonym"}
+{"query": "create a sandboxed Python environment", "expect_tools": ["env-create"], "category": "capabilities", "type": "synonym"}
+{"query": "write a note to my scratch space", "expect_tools": ["scratch-write"], "category": "scratchpad", "type": "synonym"}
 {"query": "schedule something to run later today", "expect_tools": ["schedule-once"], "category": "scheduling", "type": "synonym"}
 {"query": "post a message to a connected channel", "expect_tools": ["channel-send"], "category": "channel", "type": "synonym"}
-{"query": "what network ports are listening on this machine", "expect_tools": ["network-sockets", "system-mounts"], "category": "core", "type": "synonym"}
+{"query": "what network ports are listening on this machine", "expect_tools": ["network-sockets", "system-mounts"], "category": "system", "type": "synonym"}
 {"query": "inspect the tool schema before calling it", "expect_tools": ["describe-tool"], "category": "core", "type": "synonym"}
 {"query": "find a tool that can help with my task", "expect_tools": ["search-tools", "describe-tool", "list-tools"], "category": "core", "type": "synonym"}
-{"query": "shell-exec", "expect_tools": ["shell-exec"], "category": "core", "type": "lexical"}
-{"query": "file-reader", "expect_tools": ["file-reader"], "category": "core", "type": "lexical"}
-{"query": "file-writer", "expect_tools": ["file-writer"], "category": "core", "type": "lexical"}
+{"query": "shell-exec", "expect_tools": ["shell-exec"], "category": "shell", "type": "lexical"}
+{"query": "file-reader", "expect_tools": ["file-reader"], "category": "fs", "type": "lexical"}
+{"query": "file-writer", "expect_tools": ["file-writer"], "category": "fs", "type": "lexical"}
 {"query": "memory-search", "expect_tools": ["memory-search"], "category": "memory", "type": "lexical"}
-{"query": "spawn-agent", "expect_tools": ["spawn-agent"], "category": "core", "type": "lexical"}
+{"query": "spawn-agent", "expect_tools": ["spawn-agent"], "category": "agent", "type": "lexical"}
 {"query": "schedule-once", "expect_tools": ["schedule-once"], "category": "scheduling", "type": "lexical"}
 {"query": "channel-send", "expect_tools": ["channel-send"], "category": "channel", "type": "lexical"}
 {"query": "search-tools", "expect_tools": ["search-tools"], "category": "core", "type": "lexical"}
 {"query": "describe-tool", "expect_tools": ["describe-tool"], "category": "core", "type": "lexical"}
-{"query": "web-search", "expect_tools": ["web-search"], "category": "core", "type": "lexical"}
+{"query": "web-search", "expect_tools": ["web-search"], "category": "web", "type": "lexical"}
 {"query": "memory-write", "expect_tools": ["memory-write"], "category": "memory", "type": "lexical"}
+{"query": "find all rust files under src", "expect_tools": ["file-glob", "file-grep"], "category": "fs", "type": "synonym"}
+{"query": "where is this function defined", "expect_tools": ["file-grep"], "category": "fs", "type": "synonym"}
+{"query": "what time is it in Tokyo", "expect_tools": ["datetime"], "category": "core", "type": "synonym"}
+{"query": "how much disk space is left", "expect_tools": ["sys-monitor"], "category": "system", "type": "synonym"}
+{"query": "is the machine under heavy load", "expect_tools": ["sys-monitor", "hardware-info"], "category": "system", "type": "synonym"}
+{"query": "call the payments api with a json body", "expect_tools": ["http-client", "web-fetch"], "category": "web", "type": "synonym"}
+{"query": "think through the plan before acting", "expect_tools": ["think"], "category": "core", "type": "synonym"}
+{"query": "wait ten minutes then continue", "expect_tools": ["set-timer", "schedule-once"], "category": "scheduling", "type": "synonym"}
+{"query": "cron a job every monday at 9", "expect_tools": ["schedule-recurring"], "category": "scheduling", "type": "synonym"}
+{"query": "what do I have scheduled", "expect_tools": ["list-my-schedules"], "category": "scheduling", "type": "synonym"}
+{"query": "which tasks are still running", "expect_tools": ["task-list", "task-status"], "category": "task", "type": "synonym"}
+{"query": "is that background job finished", "expect_tools": ["task-status", "task-list"], "category": "task", "type": "synonym"}
+{"query": "kill the process that is hogging the cpu", "expect_tools": ["process-manager", "shell-exec"], "category": "shell", "type": "synonym"}
+{"query": "run a bash command", "expect_tools": ["shell-exec"], "category": "shell", "type": "synonym"}
+{"query": "who else is online", "expect_tools": ["agent-list"], "category": "agent", "type": "synonym"}
+{"query": "tell the researcher agent to start", "expect_tools": ["agent-message", "spawn-agent"], "category": "agent", "type": "synonym"}
+{"query": "what cpu and gpu does this box have", "expect_tools": ["hardware-info", "sys-monitor"], "category": "system", "type": "synonym"}
+{"query": "how much do I remember", "expect_tools": ["memory-stats"], "category": "memory", "type": "synonym"}
+{"query": "how did I solve this last time", "expect_tools": ["procedure-search", "memory-search"], "category": "memory", "type": "synonym"}
+{"query": "show the user a slide deck", "expect_tools": ["artifact-write"], "category": "artifact", "type": "synonym"}
+{"query": "what did we discuss yesterday", "expect_tools": ["chat-search", "memory-search"], "category": "memory", "type": "synonym"}
+{"query": "open the config file and show me its contents", "expect_tools": ["file-reader"], "category": "fs", "type": "synonym"}
+{"query": "save this text to disk", "expect_tools": ["file-writer"], "category": "fs", "type": "synonym"}
+{"query": "google the latest rust release", "expect_tools": ["web-search"], "category": "web", "type": "synonym"}
+{"query": "report progress to the human", "expect_tools": ["notify-user"], "category": "notifications", "type": "synonym"}
+{"query": "I need clarification from the operator", "expect_tools": ["ask-user"], "category": "notifications", "type": "synonym"}
+{"query": "which services are running on this host", "expect_tools": ["system-services"], "category": "system", "type": "synonym"}
+{"query": "mounted drives", "expect_tools": ["system-mounts"], "category": "system", "type": "synonym"}
+{"query": "file-glob", "expect_tools": ["file-glob"], "category": "fs", "type": "lexical"}
+{"query": "http-client", "expect_tools": ["http-client"], "category": "web", "type": "lexical"}
+{"query": "datetime", "expect_tools": ["datetime"], "category": "core", "type": "lexical"}
+{"query": "task-status", "expect_tools": ["task-status"], "category": "task", "type": "lexical"}

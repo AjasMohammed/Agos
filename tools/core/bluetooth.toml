@@ -1,4 +1,5 @@
 tags = ["read", "write", "network"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "bluetooth"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Scan, pair, connect, disconnect, and perform GATT read/write operations via the HAL bluetooth driver."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "hal"
 
 [capabilities_required]
 permissions = [

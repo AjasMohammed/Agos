@@ -69,6 +69,16 @@ pub struct InferenceOptions {
     /// Ignored when `enable_prompt_caching` is false and by other providers.
     #[serde(default)]
     pub cache_ttl: PromptCacheTtl,
+    /// Index + 1 of the last *stable* tool definition; the Anthropic tools
+    /// cache breakpoint goes there so tools armed on demand (appended after
+    /// it) never bust the cached prefix. `None` = last tool (legacy).
+    #[serde(default)]
+    pub tools_cache_prefix_len: Option<usize>,
+    /// Tools at index ≥ n are sent with `defer_loading: true` (provider-native
+    /// deferral, Anthropic). `None` = every tool loaded. Only set when the
+    /// adapter reports `supports_deferred_tools()`.
+    #[serde(default)]
+    pub deferred_tools_from: Option<usize>,
 }
 
 /// Anthropic prompt-cache entry lifetime.
@@ -434,6 +444,8 @@ And here is the rest of the response."#;
             thinking_budget_tokens: None,
             enable_prompt_caching: false,
             cache_ttl: PromptCacheTtl::OneHour,
+            tools_cache_prefix_len: None,
+            deferred_tools_from: None,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let deserialized: InferenceOptions = serde_json::from_str(&json).unwrap();

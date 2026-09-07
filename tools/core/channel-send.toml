@@ -1,4 +1,5 @@
 tags = ["write", "network"]
+risk_class = "exec_capable"
 
 [manifest]
 name        = "channel-send"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Send a message to one connected channel (Telegram, Slack, …). Pick by display name or ID. The agent's connected channels are listed in its system prompt under '## Channels'. Per-platform features: 'agent-manual section=channel-<kind>'. Distinct from notify-user, which fans out to all delivery adapters."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "exec_capable"
+search_hints = ["post to slack", "send on telegram", "message the discord channel"]
 tags        = ["write", "network", "channel"]
 
 [capabilities_required]

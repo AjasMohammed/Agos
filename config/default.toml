@@ -66,6 +66,14 @@ max_parallel_tool_calls = 10
 # when the channel is full.  Increase this value if you observe dropped events under
 # heavy load (10+ agents, frequent tool calls).
 channel_capacity = 1024
+# Per-agent event-reaction batching. Matching events are coalesced for this many
+# seconds, then spawn ONE task carrying a digest of the batch instead of one task
+# per event. Critical subscriptions and agent-to-agent messages always bypass the
+# window. Set to 0 to disable batching (one task per matching event, as before).
+reaction_batch_window_secs = 5
+# Flush an agent's batch early once it holds this many events, without waiting
+# out the window above.
+reaction_batch_max_events = 200
 
 [kernel.context_compaction]
 # Cadence in completed iterations: the compactor fires every N iterations
@@ -117,16 +125,31 @@ data_dir = "/tmp/agentos/data"
 # usage-ranked tool names per category, soft-capped by l0_max_tokens.
 l0_max_names_per_category = 5
 l0_max_tokens = 200
-# Scope the native tool array to task-relevant categories (frontier models).
-# Anything scoped out is still reachable via search-tools. Set false to always
-# send every tool. classifier: "heuristic" (default) | "heuristic+semantic" | "llm".
+# Admit a working set into the native tool array (see pinned_tools /
+# working_set_size below); everything else is deferred and reachable via
+# search-tools. Set false to always send every tool. `scoping_classifier` is
+# only consulted for tasks that pass an explicit `tool_categories` override.
 default_scoping = true
 scoping_classifier = "heuristic"
 # Re-arm a scoped-out tool's native schema mid-task after the agent successfully
-# calls describe-tool on it. Without this, category scoping is a hard wall for
+# calls describe-tool on it or it appears in a search-tools result. Without this, category scoping is a hard wall for
 # native tool calling (the model never receives the schema). Costs one
 # tools-block cache bust per newly armed tool.
 rearm_on_describe = true
+# Working-set admission (deferred tool loading). The native tool array is:
+# T0 = meta-tagged escape hatch + pinned_tools + the agent's pinned_usage_top_n
+# most-used tools; T1 = working_set_size tools picked by hybrid retrieval over
+# the task prompt; T2 = tools armed on demand via search-tools/describe-tool,
+# capped at armed_cap (oldest evicted). Everything else stays deferred and is
+# reachable through search-tools.
+pinned_tools = ["think", "ask-user", "notify-user", "datetime", "agent-self"]
+pinned_usage_top_n = 3
+working_set_size = 8
+armed_cap = 20
+# Provider-native deferral (Anthropic tool search): send the whole catalogue with
+# the deferred tail flagged and let the API expand search hits. Falls back to
+# kernel emulation on providers without it or if the API rejects the flag.
+provider_native_deferral = true
 
 [tools.workspace]
 # Additional directories the agent can access beyond data_dir.
@@ -284,17 +307,49 @@ time_trigger_hours = 24
 max_episodes_per_cycle = 500
 
 [memory.context]
-# Per-agent self-curated context memory — injected into context window at every task start.
+# Per-agent self-curated context memory — injected into the context window at
+# every task start AND every chat turn.
 enabled = true
-max_tokens = 4096
+# Budget is deliberately tight: a hard cap is what forces the agent to curate
+# (condense/replace) instead of appending prose forever. ~1k tokens ≈ 4k chars.
+max_tokens = 1024
 max_versions = 50
 db_path = "context_memory.db"
+
+[memory.background_review]
+# Post-task background review fork: after a non-trivial task or chat turn, an
+# auxiliary inference pass extracts a reusable procedure, a context-memory
+# patch, and/or durable facts, and writes them to the memory stores. Runs
+# detached — never delays the reply.
+enabled = true
+# Review only tasks with at least this many tool calls (a task where the agent
+# recovered from an error always qualifies).
+min_tool_calls = 5
+max_episodes = 40
+max_facts = 3
 
 [memory.lifecycle]
 # Reinforcement: retrieved memories are touched (last_used_at / use_count) on
 # injection, and procedures injected into a task get success/failure feedback
 # (Laplace-smoothed confidence recompute) when the task completes.
 reinforcement_enabled = true
+# Curator lifecycle for procedures: unused for stale_after_days -> 'stale',
+# for archive_after_days -> 'archived'. The curator never deletes; only the
+# retention sweep prunes, and only archived rows. Procedures tagged "pinned"
+# are exempt. Setting either to 0 disables the curator — procedure pruning then
+# falls back to the plain retention_days age sweep (any status).
+stale_after_days = 30
+archive_after_days = 90
+
+[chat]
+# Enforce <final>...</final> tags on chat answers (off = stream everything the
+# model emits outside tool-intent blocks).
+# enforce_final_tag = false
+# Hard cap on tool-calling iterations per chat turn.
+# max_tool_iterations = 25
+# Every N user turns, inject a one-line system nudge asking the agent to persist
+# durable learnings (facts / preferences / procedures). 0 disables.
+nudge_every_turns = 10
 
 [context_budget]
 total_tokens = 128000
@@ -354,7 +409,7 @@ scrub_tool_outputs = true
 [notifications]
 # Maximum messages stored in the user inbox.
 # When this limit is reached, the oldest read messages are purged on each write.
-max_inbox_size = 1000
+max_inbox_size = 20000
 # Automatically notify user when a root task completes successfully.
 notify_on_task_complete = true
 # Automatically notify user when a root task fails.
@@ -591,8 +646,10 @@ restate_confidence_boost = 0.10
 #   auto        — auto-approve everything except ControlPlane operations.
 #                  ControlPlane (kernel admin: key rotation, audit truncation,
 #                  agent shutdown) always prompts regardless of mode.
-#   ask_edit    — DEFAULT. Auto-approve readonly tools; prompt for writes,
-#                  exec, and control-plane. Mirrors Claude Code defaults.
+#   ask_edit    — DEFAULT. Auto-approve readonly tools and WriteAgentState
+#                  (the agent writing its own memory / scratchpad / inbox);
+#                  prompt for writes, exec, and control-plane. Mirrors Claude
+#                  Code defaults.
 #   ask_always  — Prompt for everything except trivially-cheap
 #                  ReadonlyScoped tools.
 #   deny        — Hard-deny anything that would otherwise prompt. For

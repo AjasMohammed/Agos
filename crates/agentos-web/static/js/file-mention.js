@@ -1,9 +1,11 @@
 /**
- * file-mention.js — @mention typeahead for file references in chat textareas.
+ * file-mention.js — @mention typeahead for chat textareas.
  *
  * Attaches to textareas with [data-file-mention]. When the user types "@",
  * a dropdown appears with fuzzy-matched file suggestions from the server.
- * Selecting a file inserts `@filename` into the textarea.
+ * Typed prefixes mention other entities: `@task:`, `@pipeline:`, `@agent:`,
+ * `@schedule:` (served by /api/mentions/search). Selecting an item inserts
+ * `@filename` or `@<type>:<name>` into the textarea.
  *
  * Usage: <textarea data-file-mention data-session-id="optional-uuid"></textarea>
  */
@@ -13,6 +15,8 @@
   const DEBOUNCE_MS = 200;
   const MIN_QUERY_LEN = 0; // Show suggestions immediately on @
   const MAX_RESULTS = 12;
+  const ENTITY_TYPES = ['task', 'pipeline', 'agent', 'schedule'];
+  const TYPED_RE = /^(task|pipeline|agent|schedule):/;
 
   /** Simple debounce helper. */
   function debounce(fn, ms) {
@@ -34,6 +38,15 @@
     if (mime.includes('json') || mime.includes('xml') || mime.includes('yaml')) return '📋';
     if (mime.startsWith('text/')) return '📝';
     return '📄';
+  }
+
+  /** Entity type to emoji icon mapping. */
+  function typeIcon(type) {
+    if (type === 'task') return '⚙️';
+    if (type === 'pipeline') return '🔀';
+    if (type === 'agent') return '🤖';
+    if (type === 'schedule') return '⏰';
+    return '🔗';
   }
 
   /** Format file size for display. */
@@ -60,7 +73,7 @@
       el.className = 'file-mention-dropdown';
       el.style.cssText = 'position:absolute;z-index:9999;display:none;';
       el.setAttribute('role', 'listbox');
-      el.setAttribute('aria-label', 'File suggestions');
+      el.setAttribute('aria-label', 'Mention suggestions');
       el._mentionTextarea = textarea; // Back-reference for cleanup.
       document.body.appendChild(el);
       return el;
@@ -80,15 +93,16 @@
     function renderDropdown() {
       if (!dropdown) dropdown = createDropdown();
       if (items.length === 0) {
-        dropdown.innerHTML = '<div class="file-mention-empty">No files found</div>';
+        dropdown.innerHTML = '<div class="file-mention-empty">No matches</div>';
       } else {
         dropdown.innerHTML = items.map(function (item, i) {
           var cls = 'file-mention-item' + (i === selectedIndex ? ' selected' : '');
+          var icon = item.type === 'file' ? mimeIcon(item.mime) : typeIcon(item.type);
           return '<div class="' + cls + '" data-index="' + i + '" role="option"' +
             (i === selectedIndex ? ' aria-selected="true"' : '') + '>' +
-            '<span class="file-mention-icon">' + mimeIcon(item.mime) + '</span>' +
-            '<span class="file-mention-name">' + escapeHtml(item.original_name || item.name) + '</span>' +
-            '<span class="file-mention-meta">' + escapeHtml(formatSize(item.size_kb)) + '</span>' +
+            '<span class="file-mention-icon">' + icon + '</span>' +
+            '<span class="file-mention-name">' + escapeHtml(item.label) + '</span>' +
+            '<span class="file-mention-meta">' + escapeHtml(item.detail || '') + '</span>' +
             '</div>';
         }).join('');
       }
@@ -117,18 +131,21 @@
     function selectItem(index) {
       if (index < 0 || index >= items.length) return;
       var item = items[index];
-      var name = item.name || item.original_name;
-      // Replace the @query with @name
+      var insert = item.insert;
+      // Hint rows insert a bare prefix ("task:") with no trailing space so the
+      // re-dispatched input event immediately opens the typed search.
+      var trailing = item.hint ? '' : ' ';
+      // Replace the @query with @insert
       var val = textarea.value;
       var before = val.substring(0, mentionStart);
       var after = val.substring(textarea.selectionStart);
-      textarea.value = before + '@' + name + ' ' + after;
+      textarea.value = before + '@' + insert + trailing + after;
       // Position cursor after the inserted mention.
-      var newPos = mentionStart + 1 + name.length + 1;
+      var newPos = mentionStart + 1 + insert.length + trailing.length;
       textarea.setSelectionRange(newPos, newPos);
       textarea.focus();
       hideDropdown();
-      // Trigger input event for Alpine.js reactivity.
+      // Trigger input event for Alpine.js reactivity (and hint re-search).
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
@@ -136,16 +153,41 @@
       if (abortCtrl) abortCtrl.abort();
       abortCtrl = new AbortController();
 
-      var url = '/api/files/search?q=' + encodeURIComponent(query);
-      if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+      var typed = TYPED_RE.test(query);
+      var url;
+      if (typed) {
+        url = '/api/mentions/search?q=' + encodeURIComponent(query);
+      } else {
+        url = '/api/files/search?q=' + encodeURIComponent(query);
+        if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+      }
 
       fetch(url, {
         signal: abortCtrl.signal,
         credentials: 'same-origin'
       })
-        .then(function (r) { return r.ok ? r.json() : { files: [] }; })
+        .then(function (r) { return r.ok ? r.json() : {}; })
         .then(function (data) {
-          items = (data.files || []).slice(0, MAX_RESULTS);
+          if (typed) {
+            items = (data.items || []).slice(0, MAX_RESULTS);
+          } else {
+            // Prefix hints ride below file results so typed mentions are
+            // discoverable; selecting one re-opens the dropdown in typed mode.
+            var hints = ENTITY_TYPES.filter(function (t) {
+              return t.indexOf(query.toLowerCase()) === 0;
+            }).map(function (t) {
+              return { type: t, insert: t + ':', label: '@' + t + ':', detail: 'search ' + t + 's', hint: true };
+            });
+            items = (data.files || []).slice(0, MAX_RESULTS - hints.length).map(function (f) {
+              return {
+                type: 'file',
+                insert: f.name || f.original_name,
+                label: f.original_name || f.name,
+                detail: formatSize(f.size_kb),
+                mime: f.mime
+              };
+            }).concat(hints);
+          }
           selectedIndex = items.length > 0 ? 0 : -1;
           renderDropdown();
         })

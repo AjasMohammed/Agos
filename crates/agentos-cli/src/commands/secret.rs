@@ -10,12 +10,16 @@ pub enum SecretCommands {
     Set {
         /// Secret name (e.g. OPENAI_API_KEY)
         name: String,
-        /// Scope: "global", "agent:<name>", or "tool:<name>"
-        #[arg(long, default_value = "global")]
+        /// Scope: "agent:<name>", "tool:<name>", or "global". REQUIRED — there
+        /// is deliberately no default, because "global" makes the secret
+        /// readable by EVERY agent and tool on this host. Prefer the narrowest
+        /// scope that works (e.g. --scope agent:worker).
+        #[arg(long)]
         scope: String,
         /// Secret value. If omitted: prompts on a TTY, else reads one line from
         /// stdin. NOTE: passing on the command line exposes it in the process
-        /// list — prefer the stdin form (`… | agentos secret set NAME`) in CI.
+        /// list — prefer the stdin form
+        /// (`… | agentos secret set NAME --scope agent:<name>`) in CI.
         #[arg(long)]
         value: Option<String>,
     },
@@ -42,13 +46,21 @@ pub enum SecretCommands {
 pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::Result<()> {
     match command {
         SecretCommands::Set { name, scope, value } => {
+            // Validate (and warn about) the scope before prompting, so a typo
+            // doesn't cost the operator a re-typed secret.
+            let parsed_scope = parse_scope(&scope)?;
+            if scope == "global" {
+                eprintln!(
+                    "⚠ scope 'global' makes '{name}' readable by EVERY agent and tool. \
+                     Prefer --scope agent:<name> or --scope tool:<name>."
+                );
+            }
+
             let value = resolve_secret_value(
                 &name,
                 value,
                 &format!("Enter value for '{name}' (input hidden): "),
             )?;
-
-            let parsed_scope = parse_scope(&scope)?;
 
             let response = client
                 .send_command(KernelCommand::SetSecret {
@@ -154,7 +166,7 @@ fn resolve_secret_value(
         Some(v) => {
             eprintln!(
                 "⚠ --value exposes the secret in the process list and shell history; \
-                 prefer piping it on stdin (printf %s \"$TOKEN\" | agentos secret set {name})"
+                 prefer piping it on stdin instead (printf %s \"$TOKEN\" | agentos secret …)"
             );
             v
         }
@@ -182,6 +194,10 @@ fn parse_scope(s: &str) -> anyhow::Result<SecretScope> {
     // NOTE: agent: and tool: scopes are resolved server-side by the kernel using
     // the scope_raw field — which always accompanies the scope placeholder sent here.
     // This function validates the format and returns a client-side placeholder only.
+    // The placeholder is `Kernel`, not `Global`: if the scope_raw wiring ever
+    // regresses, the secret ends up kernel-only (unreadable by agents) instead of
+    // world-readable. Same fail-closed choice as the REST twin in
+    // `agentos-api/src/kernel_impl.rs::parse_scope`.
     match s {
         "global" => Ok(SecretScope::Global),
         s if s.starts_with("agent:") => {
@@ -189,14 +205,14 @@ fn parse_scope(s: &str) -> anyhow::Result<SecretScope> {
             if name.is_empty() {
                 anyhow::bail!("agent scope requires a name, e.g. 'agent:worker'");
             }
-            Ok(SecretScope::Global) // placeholder; kernel resolves via scope_raw
+            Ok(SecretScope::Kernel) // fail-closed placeholder; kernel resolves via scope_raw
         }
         s if s.starts_with("tool:") => {
             let name = &s[5..];
             if name.is_empty() {
                 anyhow::bail!("tool scope requires a name, e.g. 'tool:file-reader'");
             }
-            Ok(SecretScope::Global) // placeholder; kernel resolves via scope_raw
+            Ok(SecretScope::Kernel) // fail-closed placeholder; kernel resolves via scope_raw
         }
         _ => anyhow::bail!(
             "Invalid scope: '{}'. Use 'global', 'agent:<name>', or 'tool:<name>'",

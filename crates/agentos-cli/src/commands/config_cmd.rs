@@ -57,7 +57,8 @@ pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
     if is_secret {
         eprintln!(
             "warning: '{key}' looks like a secret. Storing secrets in the config \
-             file is plaintext on disk — prefer `agentos secret set {key}` (vault) \
+             file is plaintext on disk — prefer \
+             `agentos secret set {key} --scope agent:<name>` (vault) \
              and reference it via a `*_env` key. The value below is redacted in \
              output and revision history."
         );

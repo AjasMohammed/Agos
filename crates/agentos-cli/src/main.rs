@@ -398,23 +398,41 @@ async fn tokio_main() -> anyhow::Result<()> {
 
     // Try to read logging config before init so we know where to write log files.
     // Fall back to defaults if config is missing or unparseable at this point.
-    let logging_cfg = {
+    // The same load also tells us where the kernel keeps its data, which is
+    // where embedded assets have to land.
+    let loaded_config = {
         let config_path = Path::new(&cli.config);
         if config_path.exists() {
-            agentos_kernel::config::load_config(config_path)
-                .map(|c| c.logging)
-                .unwrap_or_default()
+            agentos_kernel::config::load_config(config_path).ok()
         } else {
-            agentos_kernel::config::LoggingSettings::default()
+            None
         }
     };
+    let logging_cfg = loaded_config
+        .as_ref()
+        .map(|c| c.logging.clone())
+        .unwrap_or_default();
 
     init_logging(&logging_cfg);
 
-    // Extract embedded assets to working directory if not present
+    // Extract embedded assets next to the kernel's data directory. Using the
+    // process cwd (the old behaviour) put `config/`, `skills/core/` and
+    // `plugins/core/` wherever the service happened to start — under systemd
+    // that is $HOME — while the kernel looks for plugins beside its configured
+    // `tools.data_dir`. The result was an empty Plugins page on every real
+    // install. Explicit `AGENTOS_DATA_DIR` still wins; cwd remains the fallback
+    // when there is no readable config yet (e.g. `agentos init`).
     let data_dir = std::env::var("AGENTOS_DATA_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        .ok()
+        .or_else(|| {
+            loaded_config.as_ref().and_then(|c| {
+                Path::new(&c.tools.data_dir)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     if let Err(e) = embedded::extract_assets_if_needed(&data_dir) {
         eprintln!("Warning: failed to extract embedded assets: {e}");
     }

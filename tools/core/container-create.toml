@@ -1,4 +1,5 @@
 tags = ["write", "exec"]
+risk_class = "exec_capable"
 
 [manifest]
 name = "container-create"
@@ -6,7 +7,6 @@ version = "1.0.0"
 description = "Create an isolated container for running scripts or workloads. Specify a Docker image, memory, CPU, and network mode. Returns a container_id for use with container-exec."
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "exec_capable"
 tags = ["compute", "sandbox", "container"]
 
 [capabilities_required]

@@ -283,9 +283,14 @@ impl FileStore {
         let owner_clause = format!(
             "(owner_principal = ?{owner_ph} OR owner_principal IS NULL OR owner_principal = '')"
         );
+        // `scope <> 'derived'`: derived rows are pages this server rendered from
+        // another upload, addressable only by the context parts that reference
+        // them. Letting one be passed back as an attachment id is the one hole
+        // in an otherwise uniform scope discipline.
         let sql = format!(
             "SELECT id, name, original_name, mime, size, path, tags, uploaded_at, scope
-             FROM uploaded_files WHERE id IN ({placeholders}) AND ({owner_clause}) ORDER BY uploaded_at DESC",
+             FROM uploaded_files WHERE id IN ({placeholders}) AND ({owner_clause})
+               AND scope <> 'derived' ORDER BY uploaded_at DESC",
         );
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(&sql)?;
@@ -423,6 +428,34 @@ impl FileStore {
             )?;
         }
         Ok(path)
+    }
+
+    /// Delete `derived` records older than `max_age_hours` and return their disk
+    /// paths so the caller can unlink them.
+    ///
+    /// Derived files (rendered scanned-PDF pages) are machine-generated and
+    /// hidden from the Files page, so a user can never remove them by hand —
+    /// without this they accumulate forever. Callers invoke it opportunistically
+    /// when writing a new derived file; there is no separate sweeper.
+    pub fn prune_derived(&self, max_age_hours: u32) -> Result<Vec<String>, rusqlite::Error> {
+        let cutoff = format!("-{max_age_hours} hours");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let paths: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT path FROM uploaded_files
+                 WHERE scope = 'derived' AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+            )?;
+            let rows = stmt.query_map(params![cutoff], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        if !paths.is_empty() {
+            conn.execute(
+                "DELETE FROM uploaded_files
+                 WHERE scope = 'derived' AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+                params![cutoff],
+            )?;
+        }
+        Ok(paths)
     }
 }
 

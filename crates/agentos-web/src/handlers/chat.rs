@@ -1088,6 +1088,7 @@ pub async fn message_stream(
             ChatStreamEvent::ToolStart {
                 tool_name,
                 iteration,
+                ..
             } => ChatStreamFrame::ToolStart {
                 tool_name,
                 iteration,

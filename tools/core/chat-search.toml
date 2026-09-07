@@ -1,0 +1,48 @@
+risk_class = "readonly_scoped"
+tags = ["memory", "read"]
+
+[manifest]
+name        = "chat-search"
+version     = "1.0.0"
+description = "Full-text search your own past chat sessions. Use it when the user refers to something from an earlier conversation ('last time', 'we discussed', 'you said') — chat history is not in your context window."
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "memory"
+search_hints = ["what did we talk about before", "search past conversations", "find earlier chat"]
+
+[capabilities_required]
+permissions = ["memory.episodic:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ChatSearchIntent"
+output = "ChatSearchResult"
+
+[payload_schema]
+type = "object"
+required = ["query"]
+
+[payload_schema.properties.query]
+type = "string"
+minLength = 1
+description = "Words or phrase to look for in past messages"
+
+[payload_schema.properties.limit]
+type = "integer"
+default = 10
+minimum = 1
+maximum = 50
+description = "Maximum matching messages to return (newest first)"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+
+[[examples]]
+description = "Find an earlier discussion about the staging database"
+payload = { query = "staging database" }

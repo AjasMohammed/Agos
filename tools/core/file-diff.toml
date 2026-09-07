@@ -1,4 +1,5 @@
 tags = ["read", "fs"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "file-diff"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Compute a unified diff between two files (mode=files) or two inline strings (mode=strings). Returns diff text and similarity ratio."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "fs"
 
 [capabilities_required]
 permissions = ["fs.user_data:r"]

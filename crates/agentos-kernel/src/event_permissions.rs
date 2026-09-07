@@ -29,6 +29,7 @@ pub const ALL_EVENT_CATEGORIES: &[EventCategory] = &[
     EventCategory::AgentCommunication,
     EventCategory::ScheduleEvents,
     EventCategory::ExternalEvents,
+    EventCategory::ChatEvents,
 ];
 
 /// Map an [`EventCategory`] to the permission resource string an agent must
@@ -45,6 +46,7 @@ pub fn permission_for_category(category: EventCategory) -> &'static str {
         EventCategory::AgentCommunication => "events.agent_communication",
         EventCategory::ScheduleEvents => "events.schedule",
         EventCategory::ExternalEvents => "events.external",
+        EventCategory::ChatEvents => "events.chat",
     }
 }
 

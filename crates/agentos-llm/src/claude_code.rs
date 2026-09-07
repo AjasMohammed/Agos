@@ -60,8 +60,15 @@ use agentos_types::{
 /// CLI's own default tier.
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Per-inference subprocess timeout. Generous because the CLI does its own
-/// startup + context-cache work before responding.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// startup + context-cache work before responding, and it must stay ABOVE
+/// `MCP_TOOL_TIMEOUT_MS` (a gateway call may legitimately block for the whole
+/// 5-minute escalation window) or the kernel kills `claude` mid-approval.
+const DEFAULT_TIMEOUT_SECS: u64 = 660;
+
+/// `MCP_TOOL_TIMEOUT` passed to the `claude` subprocess (milliseconds). Must
+/// exceed the kernel's 5-minute escalation expiry so an operator-approved
+/// gateway call resumes instead of timing out on the client side.
+const MCP_TOOL_TIMEOUT_MS: &str = "600000";
 /// Effective context window we advertise. Claude's real window is 200k, but
 /// AgentOS sizes its per-task context budget (and thus how much memory/retrieved
 /// context it injects) to this number — and the *entire* prompt is re-sent to a
@@ -445,6 +452,12 @@ impl ClaudeCodeCore {
         // outside AgentOS's capability/audit/sandbox layer. Without this the
         // `claude` CLI silently merges the user's servers into the agent's toolset.
         cmd.arg("--strict-mcp-config");
+        // Gateway tool calls can legitimately block for minutes: an approval
+        // escalation waits up to 5 min for the operator and `ask-user` waits
+        // for a human answer. The CLI's default MCP tool timeout is well under
+        // that and surfaces as a bare "The operation timed out" to the model,
+        // so raise it above the escalation expiry (ms).
+        cmd.env("MCP_TOOL_TIMEOUT", MCP_TOOL_TIMEOUT_MS);
         // When an MCP config is attached, expose the 4 AgentOS meta-tools as
         // native MCP tools. The built-in denylist above still applies, so only
         // these `mcp__agentos__*` tools are allowed alongside the denied built-ins.
@@ -811,12 +824,28 @@ impl LLMCore for ClaudeCodeCore {
         self.mcp_config_path.is_some()
     }
 
+    /// The CLI subprocess only ever sees the 4 `mcp__agentos__*` gateway tools;
+    /// every real AgentOS tool is reached through `invoke_tool`.
+    fn uses_tool_gateway(&self) -> bool {
+        self.mcp_config_path.is_some()
+    }
+
+    fn inference_hard_timeout_secs(&self) -> u64 {
+        // The subprocess is killed at `self.timeout`; give the kernel ceiling
+        // the same figure so it only ever acts as a backstop for a wedged
+        // child that never reports.
+        self.timeout.as_secs()
+    }
+
     fn inference_watchdog_secs(&self) -> u64 {
         // One claude-code inference spawns a subprocess and, in MCP mode, runs
         // the agent's entire tool loop (discover → invoke → reason → repeat)
-        // before returning — legitimately minutes. Use a generous watchdog so
-        // the kernel doesn't abort real work at the 120s default.
-        300
+        // before returning — legitimately minutes. In that loop a gateway tool
+        // call can park on an approval escalation for the full 5-minute window,
+        // so this MUST NOT be lower than the subprocess timeout: otherwise the
+        // kernel-side watchdog aborts the task while `claude` is still
+        // legitimately waiting for the operator.
+        DEFAULT_TIMEOUT_SECS
     }
 
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
@@ -1216,6 +1245,42 @@ mod tests {
         // Built-ins remain denied.
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
         assert!(args.iter().any(|a| a == "Write"));
+    }
+
+    #[test]
+    fn base_command_raises_mcp_tool_timeout_for_blocking_gateway_calls() {
+        let core = ClaudeCodeCore::new("default");
+        let cmd = core.base_command("hi", "", None, None);
+        let envs: Vec<(String, String)> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        let timeout = envs
+            .iter()
+            .find(|(k, _)| k == "MCP_TOOL_TIMEOUT")
+            .map(|(_, v)| v.parse::<u64>().unwrap())
+            .expect("MCP_TOOL_TIMEOUT must be set");
+        assert!(
+            timeout > 5 * 60 * 1000,
+            "must exceed the 5-minute escalation expiry"
+        );
+        assert!(
+            timeout < DEFAULT_TIMEOUT_SECS * 1000,
+            "must stay below the subprocess timeout or the kernel kills claude mid-approval"
+        );
+        // The kernel-side watchdog must not fire before either of them, or the
+        // task is aborted while `claude` is still legitimately parked on an
+        // approval escalation.
+        assert!(
+            core.inference_watchdog_secs() >= DEFAULT_TIMEOUT_SECS,
+            "inference watchdog must not preempt the subprocess timeout"
+        );
     }
 
     #[test]

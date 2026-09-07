@@ -236,3 +236,71 @@ impl AgentTool for MemorySearch {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_memory::Embedder;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn ctx(data_dir: &Path, agent_id: AgentID) -> ToolExecutionContext {
+        let mut permissions = PermissionSet::new();
+        permissions.grant("memory.semantic".to_string(), true, false, false, None);
+        ToolExecutionContext {
+            data_dir: data_dir.to_path_buf(),
+            task_id: TaskID::new(),
+            agent_id,
+            trace_id: TraceID::new(),
+            permissions,
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
+
+    /// With the zero-vector embedder every cosine is 0.0, so the default
+    /// `min_score = 0.3` used to drop every candidate and this tool returned
+    /// `[]` forever. Lexical (FTS5) hits must still come back.
+    #[tokio::test]
+    async fn noop_embedder_still_returns_lexical_matches() {
+        let dir = TempDir::new().unwrap();
+        let semantic = Arc::new(
+            SemanticStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap(),
+        );
+        let episodic = Arc::new(EpisodicStore::open(dir.path()).unwrap());
+        let agent = AgentID::new();
+        semantic
+            .write(
+                "deploy-runbook",
+                "Restart the ingest worker after deploying the kernel",
+                Some(&agent),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let tool = MemorySearch::new(semantic, episodic);
+        let out = tool
+            .execute(
+                serde_json::json!({"query": "ingest worker"}),
+                ctx(dir.path(), agent),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out["count"], 1, "lexical match was filtered out: {}", out);
+        assert_eq!(out["results"][0]["key"], "deploy-runbook");
+    }
+}

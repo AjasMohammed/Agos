@@ -6,22 +6,28 @@ impl Kernel {
     /// Parse a permission string like `"fs.data:rwq"` into individual op flags.
     ///
     /// Supported flag characters: r=Read, w=Write, x=Execute, q=Query, o=Observe.
+    /// Parse `resource:BITS`. Resources themselves contain colons
+    /// (`fs:agents/<name>/`, `net:`), so the bits are whatever follows the
+    /// *last* colon, and must be drawn from `r w x q o` only — otherwise
+    /// `fs:/data/:rw` would parse as resource `fs` with bits `/data/:rw`.
     pub fn parse_permission(perm: &str) -> Option<(String, bool, bool, bool, bool, bool)> {
-        let parts: Vec<&str> = perm.splitn(2, ':').collect();
-        if parts.len() != 2 {
+        let (resource, flags) = perm.rsplit_once(':')?;
+        if resource.is_empty()
+            || flags.is_empty()
+            || !flags
+                .chars()
+                .all(|c| matches!(c, 'r' | 'w' | 'x' | 'q' | 'o'))
+        {
             return None;
         }
-        let resource = parts[0].to_string();
-        let flags = parts[1];
-        let read = flags.contains('r');
-        let write = flags.contains('w');
-        let execute = flags.contains('x');
-        let query = flags.contains('q');
-        let observe = flags.contains('o');
-        if !read && !write && !execute && !query && !observe {
-            return None;
-        }
-        Some((resource, read, write, execute, query, observe))
+        Some((
+            resource.to_string(),
+            flags.contains('r'),
+            flags.contains('w'),
+            flags.contains('x'),
+            flags.contains('q'),
+            flags.contains('o'),
+        ))
     }
 
     pub(crate) async fn cmd_grant_permission(
@@ -125,6 +131,23 @@ impl Kernel {
             }
         };
 
+        // Effective permissions also include role grants; those are not in
+        // the agent's own set, so a revoke here would report success and
+        // change nothing. Say so instead.
+        if !agent
+            .permissions
+            .entries()
+            .iter()
+            .any(|e| e.resource == resource)
+        {
+            return KernelResponse::Error {
+                message: format!(
+                    "Permission '{}' is not granted directly to '{}' (it comes from a role or is absent); edit the role instead",
+                    permission, agent_name
+                ),
+            };
+        }
+
         let mut perms = agent.permissions.clone();
         perms.revoke(&resource, read, write, execute);
         if query {
@@ -133,7 +156,21 @@ impl Kernel {
         if observe {
             perms.revoke_op(&resource, PermissionOp::Observe);
         }
-        registry.update_agent_permissions(&agent.id, perms).ok();
+        // A fully-revoked default would otherwise be handed back on the next
+        // connect: `revoke` deletes the entry once every bit clears, and
+        // `backfill_late_default_grants` reads an absent entry as "never
+        // granted". Record the operator's decision as a deny, which `check()`
+        // honours ahead of any grant and the backfill skips.
+        if !perms.entries().iter().any(|e| e.resource == resource)
+            && crate::commands::agent::is_late_default_grant(&resource)
+        {
+            perms.deny(resource.clone());
+        }
+        if let Err(e) = registry.update_agent_permissions(&agent.id, perms) {
+            return KernelResponse::Error {
+                message: format!("Failed to update permissions: {e}"),
+            };
+        }
         drop(registry);
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -335,5 +372,37 @@ impl Kernel {
         });
 
         KernelResponse::Success { data: None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(r: bool, w: bool, x: bool, q: bool, o: bool) -> String {
+        [(r, 'r'), (w, 'w'), (x, 'x'), (q, 'q'), (o, 'o')]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, c)| *c)
+            .collect()
+    }
+
+    /// The API lists permissions as `resource:BITS` and hands them straight
+    /// back to revoke; resources with colons must survive the round trip.
+    #[test]
+    fn permission_string_round_trips_colon_resources() {
+        for s in [
+            "fs:agents/nimo/:rwx",
+            "net::rx",
+            "fs.user_data:rw",
+            "*:rwxqo",
+        ] {
+            let (res, r, w, x, q, o) = Kernel::parse_permission(s).unwrap();
+            assert_eq!(format!("{res}:{}", bits(r, w, x, q, o)), s);
+        }
+        assert!(Kernel::parse_permission("fs:/home/user").is_none());
+        assert!(Kernel::parse_permission("fs:/data/").is_none());
+        assert!(Kernel::parse_permission(":rw").is_none());
+        assert!(Kernel::parse_permission("fs").is_none());
     }
 }

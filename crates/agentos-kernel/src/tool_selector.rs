@@ -366,7 +366,12 @@ impl ToolSelector {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    /// Remove tools whose required permissions the PermissionSet cannot satisfy.
+    /// Remove tools the PermissionSet cannot satisfy at all.
+    ///
+    /// Any-of, matching [`agentos_capability::any_permission_granted`] — a
+    /// manifest lists the UNION of everything a tool can need, so requiring
+    /// all of it would drop `webcam`/`audio`/`bluetooth`/`raw-usb` from an
+    /// agent that legitimately holds the list-only half.
     fn filter_by_permissions(
         &self,
         manifests: &[ToolManifest],
@@ -375,10 +380,10 @@ impl ToolSelector {
         manifests
             .iter()
             .filter(|m| {
-                m.capabilities_required
-                    .permissions
-                    .iter()
-                    .all(|perm_str| permission_granted(permissions, perm_str))
+                agentos_capability::any_permission_granted(
+                    permissions,
+                    &m.capabilities_required.permissions,
+                )
             })
             .cloned()
             .collect()
@@ -525,32 +530,9 @@ fn keyword_rank(query: &str, candidates: &[ToolManifest], k: usize) -> Vec<ToolM
 
 /// Returns true if the agent's PermissionSet satisfies the raw permission
 /// string from a tool manifest (e.g. `"fs.user_data:r"`, `"memory.semantic:rw"`).
+/// Fails closed on a malformed string.
 fn permission_granted(permissions: &PermissionSet, perm_str: &str) -> bool {
-    // Empty string / wildcard — no permission required.
-    if perm_str.is_empty() || perm_str == "*" {
-        return true;
-    }
-
-    match parse_permission_str(perm_str) {
-        Ok(entry) => {
-            let res = &entry.resource;
-            let mut ok = true;
-            if entry.read {
-                ok = ok && permissions.check(res, PermissionOp::Read);
-            }
-            if entry.write {
-                ok = ok && permissions.check(res, PermissionOp::Write);
-            }
-            if entry.execute {
-                ok = ok && permissions.check(res, PermissionOp::Execute);
-            }
-            ok
-        }
-        Err(_) => {
-            // Malformed permission string — exclude tool (fail closed for security).
-            false
-        }
-    }
+    agentos_capability::permission_str_granted(permissions, perm_str)
 }
 
 #[cfg(test)]
@@ -561,6 +543,8 @@ mod tests {
     fn make_manifest(name: &str, group: &str, description: &str, perms: &[&str]) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 description: description.to_string(),

@@ -3,6 +3,7 @@ pub mod approval;
 pub mod audit;
 pub mod background;
 pub mod channel;
+pub mod connector;
 pub mod container;
 pub mod context_memory;
 pub mod cost;

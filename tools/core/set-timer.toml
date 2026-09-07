@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "set-timer"
@@ -6,8 +7,8 @@ version     = "1.0.0"
 description = "Create a one-shot timer that fires after a delay — send a reminder, run a deferred task, or both"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["set a timer", "wait 10 minutes then", "countdown"]
 group       = "events"
-risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["schedule.timer:w"]

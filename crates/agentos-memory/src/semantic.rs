@@ -229,6 +229,10 @@ impl SemanticStore {
         let db = self.conn.clone();
 
         tokio::task::spawn_blocking(move || {
+            // With the zero-vector stub every cosine is 0.0, so a `min_score`
+            // gate would drop every row and this search would silently return
+            // nothing forever. Fall back to lexical-only (FTS5) ranking.
+            let lexical_only = embedder.is_noop();
             // Embedding is CPU-intensive; run it here on the blocking thread pool
             // so async worker threads are not blocked by ONNX model inference.
             let query_embedding = embedder
@@ -403,7 +407,7 @@ impl SemanticStore {
                 }
 
                 let semantic_score = SemanticStore::cosine_similarity(&query_embedding, &embedding);
-                if semantic_score < min_score {
+                if !lexical_only && semantic_score < min_score {
                     continue;
                 }
 
@@ -411,7 +415,15 @@ impl SemanticStore {
                 let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
 
                 // RRF: combine semantic rank and FTS rank
-                let rrf_score = if use_fts && fts_score > 0.0 {
+                let rrf_score = if lexical_only {
+                    // 0.0 without an FTS hit (the recency fallback), which
+                    // keeps that path's existing "everything ties" behaviour.
+                    if fts_score > 0.0 {
+                        fts_score / (fts_score + SemanticStore::RRF_K)
+                    } else {
+                        0.0
+                    }
+                } else if use_fts && fts_score > 0.0 {
                     let fts_normalized = fts_score / (fts_score + SemanticStore::RRF_K);
                     0.7 * semantic_score + 0.3 * fts_normalized
                 } else {
@@ -531,8 +543,22 @@ impl SemanticStore {
     }
 
     pub async fn get_by_key(&self, key: &str) -> Result<Option<MemoryEntry>, AgentOSError> {
+        self.get_by_key_scoped(key, None).await
+    }
+
+    /// Like [`Self::get_by_key`] but restricted to one agent's entries.
+    ///
+    /// Writes are agent-scoped, so a global key lookup is the wrong dedup test:
+    /// it makes agent B's fact vanish because agent A already stored the same
+    /// key. `None` keeps the global behaviour.
+    pub async fn get_by_key_scoped(
+        &self,
+        key: &str,
+        agent_id: Option<&AgentID>,
+    ) -> Result<Option<MemoryEntry>, AgentOSError> {
         let db = self.conn.clone();
         let key_owned = key.to_owned();
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
         tokio::task::spawn_blocking(move || {
             let conn = db.lock().map_err(|_| {
                 AgentOSError::StorageError("Failed to lock semantic db for get_by_key".to_string())
@@ -541,12 +567,13 @@ impl SemanticStore {
                 .prepare(
                     "SELECT id, agent_id, key, content, created_at, updated_at, tags,
                             last_used_at, use_count, confidence, status
-                     FROM semantic_memory WHERE key = ?1",
+                     FROM semantic_memory
+                     WHERE key = ?1 AND (?2 IS NULL OR agent_id = ?2)",
                 )
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
             let mut rows = stmt
-                .query_map(params![key_owned], Self::row_to_entry)
+                .query_map(params![key_owned, agent_id_str], Self::row_to_entry)
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
             match rows.next() {
@@ -740,6 +767,10 @@ impl SemanticStore {
             tx.commit().map_err(|e| {
                 AgentOSError::StorageError(format!("Failed to commit sweep transaction: {}", e))
             })?;
+
+            if deleted > 0 {
+                crate::compact_fts_index(&conn, "semantic_fts")?;
+            }
 
             Ok(deleted)
         })

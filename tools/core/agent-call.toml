@@ -1,4 +1,5 @@
-tags = ["meta", "exec"]
+tags = ["exec"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "agent-call"
@@ -6,7 +7,8 @@ version     = "1.0.0"
 description = "Synchronously call another agent with a prompt and wait for its response. Returns the target agent's output as text. Times out after timeout_secs (default 300s)."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "agent"
+search_hints = ["ask another agent to do something and wait for its answer", "call a peer agent synchronously"]
 
 [capabilities_required]
 permissions = ["agent.call:x"]

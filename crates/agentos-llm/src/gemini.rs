@@ -26,7 +26,8 @@ pub struct GeminiCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same upstream endpoint.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
@@ -52,7 +53,9 @@ impl GeminiCore {
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    crate::traits::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             api_key,
@@ -72,7 +75,11 @@ impl GeminiCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            // Gemini has no configurable base URL — every instance talks to
+            // the one Google endpoint, so they all share one limiter.
+            concurrency: crate::retry::concurrency_limiter_for(
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -350,11 +357,19 @@ impl LLMCore for GeminiCore {
         });
 
         let active = context.active_entries();
-        if let Some(sys) = active
+        // ALL system entries joined — a `.find()` here dropped the
+        // `<agent-context-memory>` block and the memory nudge on every turn.
+        let sys = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
+            .filter(|e| e.role == ContextRole::System)
             .map(|e| e.text())
-        {
+            // Drop blank entries so N empty System entries can't join into
+            // "\n\n", which is not `is_empty()` and would emit a whitespace
+            // `systemInstruction` where `.find()` previously omitted the key.
+            .filter(|t| !t.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !sys.is_empty() {
             body["systemInstruction"] = json!({"parts": [{"text": sys}]});
         }
 
@@ -394,7 +409,9 @@ impl LLMCore for GeminiCore {
             body["generationConfig"] = Value::Object(gen_config);
         }
 
-        let res = crate::retry::send_with_retry(
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (res, _permit) = crate::retry::send_with_retry(
             "gemini",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -553,11 +570,17 @@ impl LLMCore for GeminiCore {
         let mut body = json!({ "contents": contents });
 
         let active = context.active_entries();
-        if let Some(sys) = active
+        let sys = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
+            .filter(|e| e.role == ContextRole::System)
             .map(|e| e.text())
-        {
+            // Drop blank entries so N empty System entries can't join into
+            // "\n\n", which is not `is_empty()` and would emit a whitespace
+            // `systemInstruction` where `.find()` previously omitted the key.
+            .filter(|t| !t.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !sys.is_empty() {
             body["systemInstruction"] = json!({ "parts": [{"text": sys}] });
         }
         if !function_declarations.is_empty() {
@@ -568,7 +591,11 @@ impl LLMCore for GeminiCore {
         // forwarded) so a transient upstream 5xx / network blip doesn't fail
         // the whole chat turn — matching the resilience of the non-streaming
         // path. `send_with_retry` returns the live `Response` with its body
-        // stream intact on 2xx.
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
         let res = crate::retry::send_with_retry(
             "gemini",
             &self.retry_policy,
@@ -583,7 +610,7 @@ impl LLMCore for GeminiCore {
             },
         )
         .await;
-        let res = match res {
+        let (res, _permit) = match res {
             Ok(r) => r,
             Err(e) => {
                 let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
@@ -992,6 +1019,8 @@ mod tests {
         };
         let manifest = ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: "file-reader".to_string(),
                 version: "1.0.0".to_string(),
                 description: "Read a file".to_string(),

@@ -598,6 +598,15 @@ pub struct ChatConfig {
     /// before reaching real action; raise this if chat sessions hit the cap.
     #[serde(default = "default_chat_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    /// Every N user turns in a chat session, inject a one-line system nudge
+    /// asking the agent to persist durable learnings (facts, preferences,
+    /// procedures). 0 disables. Mirrors Hermes's periodic memory nudge.
+    #[serde(default = "default_chat_nudge_every_turns")]
+    pub nudge_every_turns: u32,
+}
+
+fn default_chat_nudge_every_turns() -> u32 {
+    10
 }
 
 fn default_chat_max_tool_iterations() -> u32 {
@@ -622,7 +631,7 @@ pub struct NotificationsConfig {
 }
 
 fn default_max_inbox_size() -> usize {
-    1000
+    20_000
 }
 
 fn default_true() -> bool {
@@ -984,18 +993,37 @@ pub struct EventChannelConfig {
     /// Tune this up when observing `EventChannelFull` audit entries under load.
     #[serde(default = "default_event_channel_capacity")]
     pub channel_capacity: usize,
+    /// How long matching events are coalesced per agent before one reaction
+    /// task is spawned for the whole batch. `0` disables batching entirely —
+    /// every matching subscription spawns its own task immediately.
+    #[serde(default = "default_reaction_batch_window_secs")]
+    pub reaction_batch_window_secs: u64,
+    /// Flush an agent's reaction batch early once it holds this many events,
+    /// without waiting out the window.
+    #[serde(default = "default_reaction_batch_max_events")]
+    pub reaction_batch_max_events: usize,
 }
 
 impl Default for EventChannelConfig {
     fn default() -> Self {
         Self {
             channel_capacity: default_event_channel_capacity(),
+            reaction_batch_window_secs: default_reaction_batch_window_secs(),
+            reaction_batch_max_events: default_reaction_batch_max_events(),
         }
     }
 }
 
 fn default_event_channel_capacity() -> usize {
     1024
+}
+
+fn default_reaction_batch_window_secs() -> u64 {
+    5
+}
+
+fn default_reaction_batch_max_events() -> usize {
+    200
 }
 
 fn default_max_output_bytes() -> usize {
@@ -1203,17 +1231,56 @@ pub struct DiscoverySettings {
     /// Default ON. Anything scoped out stays reachable via `search-tools`.
     #[serde(default = "default_true")]
     pub default_scoping: bool,
-    /// Task classifier: "heuristic" | "heuristic+semantic" | "llm".
-    /// Only "heuristic" is implemented today; others degrade to heuristic.
+    /// Legacy, no-op since deferred tool loading (admission is by retrieval,
+    /// see `pinned_tools`/`working_set_size`). Kept so existing configs parse.
     #[serde(default = "default_scoping_classifier")]
     pub scoping_classifier: String,
     /// Re-arm a scoped-out tool's native schema mid-task after the agent
-    /// successfully calls `describe-tool` on it. Without this, category
+    /// successfully calls `describe-tool` on it, or after it appears in a
+    /// `search-tools` result (so search → call needs no describe hop). Without this, category
     /// scoping is a hard wall for native tool calling: the model cannot emit
     /// a well-formed `tool_use` for a schema it never received. Costs one
     /// tools-block cache bust per newly armed tool.
     #[serde(default = "default_true")]
     pub rearm_on_describe: bool,
+    /// Always-loaded (T0) tools by name, in addition to `meta`-tagged escape-hatch
+    /// tools and the agent's `pinned_usage_top_n` most-used tools.
+    #[serde(default = "default_pinned_tools")]
+    pub pinned_tools: Vec<String>,
+    /// Per-agent most-used tools pinned into T0.
+    #[serde(default = "default_pinned_usage_top_n")]
+    pub pinned_usage_top_n: usize,
+    /// T1 working set: tools admitted by hybrid retrieval over the task prompt.
+    #[serde(default = "default_working_set_size")]
+    pub working_set_size: usize,
+    /// Max tools armed on demand (T2) per task; oldest armed tool is evicted
+    /// back to the deferred pool beyond this.
+    #[serde(default = "default_armed_cap")]
+    pub armed_cap: usize,
+    /// Use provider-native deferred loading when the adapter supports it
+    /// (Anthropic `defer_loading` + `tool_reference`): the whole catalogue is
+    /// sent, the API expands search hits itself, no kernel re-arm.
+    #[serde(default = "default_true")]
+    pub provider_native_deferral: bool,
+}
+
+fn default_pinned_tools() -> Vec<String> {
+    ["think", "ask-user", "notify-user", "datetime", "agent-self"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn default_pinned_usage_top_n() -> usize {
+    3
+}
+
+fn default_working_set_size() -> usize {
+    8
+}
+
+fn default_armed_cap() -> usize {
+    20
 }
 
 fn default_l0_max_names() -> usize {
@@ -1236,6 +1303,11 @@ impl Default for DiscoverySettings {
             default_scoping: true,
             scoping_classifier: default_scoping_classifier(),
             rearm_on_describe: true,
+            pinned_tools: default_pinned_tools(),
+            pinned_usage_top_n: default_pinned_usage_top_n(),
+            working_set_size: default_working_set_size(),
+            armed_cap: default_armed_cap(),
+            provider_native_deferral: true,
         }
     }
 }
@@ -1567,6 +1639,50 @@ pub struct MemorySettings {
     pub retention_days: u32,
     #[serde(default)]
     pub lifecycle: MemoryLifecycleSettings,
+    /// Post-task background review fork (see `hooks/background_review_hook.rs`).
+    #[serde(default)]
+    pub background_review: BackgroundReviewConfig,
+}
+
+/// Post-task background review configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackgroundReviewConfig {
+    /// Master switch for the review fork.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum tool calls in a task before it is worth reviewing. A task with
+    /// fewer still qualifies if the agent recovered from an error.
+    #[serde(default = "default_review_min_tool_calls")]
+    pub min_tool_calls: usize,
+    /// Cap on episodic rows read into the review digest.
+    #[serde(default = "default_review_max_episodes")]
+    pub max_episodes: u32,
+    /// Cap on semantic facts persisted per review.
+    #[serde(default = "default_review_max_facts")]
+    pub max_facts: usize,
+}
+
+fn default_review_min_tool_calls() -> usize {
+    5
+}
+
+fn default_review_max_episodes() -> u32 {
+    40
+}
+
+fn default_review_max_facts() -> usize {
+    3
+}
+
+impl Default for BackgroundReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            min_tool_calls: default_review_min_tool_calls(),
+            max_episodes: default_review_max_episodes(),
+            max_facts: default_review_max_facts(),
+        }
+    }
 }
 
 /// Memory lifecycle (reinforcement / decay) configuration.
@@ -1578,12 +1694,30 @@ pub struct MemoryLifecycleSettings {
     /// at task completion.
     #[serde(default = "default_true")]
     pub reinforcement_enabled: bool,
+    /// Days a procedure can go unused before it is marked `stale`. 0 disables
+    /// the curator sweep.
+    #[serde(default = "default_stale_after_days")]
+    pub stale_after_days: u32,
+    /// Days a procedure can go unused before it is `archived` (never deleted
+    /// by the curator — the retention sweep prunes archived rows only).
+    #[serde(default = "default_archive_after_days")]
+    pub archive_after_days: u32,
+}
+
+fn default_stale_after_days() -> u32 {
+    30
+}
+
+fn default_archive_after_days() -> u32 {
+    90
 }
 
 impl Default for MemoryLifecycleSettings {
     fn default() -> Self {
         Self {
             reinforcement_enabled: true,
+            stale_after_days: default_stale_after_days(),
+            archive_after_days: default_archive_after_days(),
         }
     }
 }
@@ -1639,6 +1773,7 @@ impl Default for MemorySettings {
             context: ContextMemoryConfig::default(),
             retention_days: default_memory_retention_days(),
             lifecycle: MemoryLifecycleSettings::default(),
+            background_review: BackgroundReviewConfig::default(),
         }
     }
 }

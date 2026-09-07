@@ -1,12 +1,13 @@
-tags = ["meta", "network", "exec"]
+tags = ["network", "exec"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "a2a-delegate"
 version     = "1.0.0"
-risk_class  = "control_plane"
 description = "Delegate a task to an external A2A-compliant agent (LangGraph, PydanticAI, Google ADK, etc.). Discovers the agent's capabilities via its Agent Card and submits a task delegation."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
 capability_tags = ["a2a", "multi-agent", "inter-framework", "delegation", "external-agent"]
 
 [capabilities_required]

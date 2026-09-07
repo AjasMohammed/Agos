@@ -120,7 +120,16 @@ pub async fn view(State(state): State<AppState>, Query(q): Query<ViewQuery>) -> 
         task_id: TaskID::new(),
         agent_id: AgentID::new(),
         trace_id: TraceID::new(),
-        permissions: PermissionSet::new(),
+        // Operator-facing page, not an agent surface: the manual filters its
+        // `tools`/`suggest` sections by the caller's permissions, and an empty
+        // set would render the operator an empty catalogue.
+        permissions: {
+            let mut p = PermissionSet::new();
+            p.grant("*".to_string(), true, true, true, None);
+            p.grant_op("*".to_string(), agentos_types::PermissionOp::Query, None);
+            p.grant_op("*".to_string(), agentos_types::PermissionOp::Observe, None);
+            p
+        },
         vault: None,
         hal: None,
         file_lock_registry: None,

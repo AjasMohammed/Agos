@@ -1,12 +1,13 @@
 tags = ["write", "network"]
+risk_class = "control_plane"
 
 [manifest]
 name = "iot-ha-call-service"
 version = "1.0.0"
-risk_class  = "control_plane"
 description = "Call a Home Assistant service (e.g., turn_on, set_temperature) to control smart home devices."
 author = "agentos-core"
 trust_tier = "core"
+category    = "hal"
 tags = ["iot", "homeassistant", "hardware"]
 
 [capabilities_required]

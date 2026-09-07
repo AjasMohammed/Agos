@@ -4,7 +4,7 @@ pub mod profiles;
 pub mod token;
 
 pub use engine::CapabilityEngine;
-pub use permissions::parse_permission_str;
+pub use permissions::{any_permission_granted, parse_permission_str, permission_str_granted};
 pub use profiles::{PermissionProfile, ProfileManager};
 pub use token::{compute_signature, verify_token_signature};
 

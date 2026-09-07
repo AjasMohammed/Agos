@@ -143,18 +143,23 @@ pub async fn publish_tool(
     Json(req): Json<PublishRequest>,
 ) -> impl IntoResponse {
     // Parse the manifest TOML.
-    let manifest: agentos_types::ToolManifest = match toml::from_str(&req.manifest_toml) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid manifest TOML: {}", e),
-                }),
-            )
-                .into_response();
-        }
-    };
+    // `parse_manifest` (not raw `toml::from_str`): `risk_class` is a top-level
+    // field that is easy to nest under `[manifest]`, and it is part of the
+    // signed payload — parsing it differently here than the publishing CLI
+    // would make the registry verify a different manifest than the author signed.
+    let manifest: agentos_types::ToolManifest =
+        match agentos_tools::parse_manifest(&req.manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid manifest TOML: {}", e),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
     // Reject Core and Blocked trust tiers — only Verified and Community can be published.
     // Core tools are distribution-trusted and skip signature verification, so allowing

@@ -38,8 +38,11 @@ impl Kernel {
         };
 
         // Parse throttle policy
+        // Fail closed: unspecified throttle = bounded default (see the
+        // event-subscribe kernel action for rationale); "none" opts out.
         let throttle_policy = match throttle.as_deref() {
-            None | Some("none") => ThrottlePolicy::None,
+            None | Some("") => crate::event_bus::default_role_subscription_throttle(),
+            Some("none") => ThrottlePolicy::None,
             Some(s) => match parse_throttle(s) {
                 Some(p) => p,
                 None => {

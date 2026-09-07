@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "procedure-create"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Save a learned procedure or SOP to procedural memory for future reuse"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "memory"
 
 [capabilities_required]
 permissions = ["memory.procedural:w"]

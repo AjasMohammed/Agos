@@ -1,9 +1,12 @@
 use crate::config::{SlackAdapterConfig, WebhookAdapterConfig};
 use crate::user_inbox::UserInbox;
 use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
+use agentos_channels::manager::ChannelManager;
+use agentos_channels::types::{MessageContent, OutboundMessage};
 use agentos_types::{
-    AgentID, AgentOSError, ChannelInstanceID, DeliveryChannel, DeliveryStatus, NotificationID,
-    NotificationPriority, NotificationSource, TraceID, UserMessage, UserMessageKind, UserResponse,
+    AgentID, AgentOSError, AttachmentKind, ChannelInstanceID, DeliveryChannel, DeliveryStatus,
+    NotificationID, NotificationPriority, NotificationSource, TraceID, UserMessage,
+    UserMessageKind, UserResponse,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -147,6 +150,14 @@ pub struct NotificationRouter {
     waiting_tasks: Arc<RwLock<HashMap<NotificationID, oneshot::Sender<UserResponse>>>>,
     /// Per-agent rate limiter state.
     rate_limiter: Arc<RwLock<HashMap<AgentID, RateLimiterState>>>,
+    /// Handle to the *other* outbound stack — the `agentos-channels`
+    /// `ChannelManager`, which owns Discord/Slack/WhatsApp/Webhook while this
+    /// router owns Telegram/Ntfy/Email (see `Kernel::build_channel_adapter`).
+    ///
+    /// Attached lazily rather than passed to `new`: the kernel builds the
+    /// router before the manager exists. Set on the first channel connect /
+    /// restore, which is the earliest point any send can happen.
+    channel_manager: std::sync::OnceLock<Arc<ChannelManager>>,
 }
 
 impl NotificationRouter {
@@ -157,7 +168,15 @@ impl NotificationRouter {
             adapters: RwLock::new(vec![Arc::new(CliDeliveryAdapter)]),
             waiting_tasks: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RwLock::new(HashMap::new())),
+            channel_manager: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Give the router a handle to the `ChannelManager` outbound stack so
+    /// [`send_to_channel`](Self::send_to_channel) can reach manager-owned
+    /// kinds. Idempotent; later calls are ignored.
+    pub fn attach_channel_manager(&self, manager: Arc<ChannelManager>) {
+        let _ = self.channel_manager.set(manager);
     }
 
     /// Add a delivery adapter.  Called once during kernel startup or on channel connect.
@@ -172,6 +191,21 @@ impl NotificationRouter {
             .write()
             .await
             .retain(|a| a.adapter_instance_id().as_deref() != Some(instance_id));
+    }
+
+    /// The `adapter_instance_id` of every registered adapter.
+    ///
+    /// Used by the escalation sink to avoid sending the same approval prompt
+    /// twice: a connected channel is registered here as a delivery adapter
+    /// (`cmd_connect_channel`), so `deliver` already reaches it, and the sink's
+    /// paired-DM loop must skip senders on that channel.
+    pub async fn adapter_instance_ids(&self) -> std::collections::HashSet<String> {
+        self.adapters
+            .read()
+            .await
+            .iter()
+            .filter_map(|a| a.adapter_instance_id())
+            .collect()
     }
 
     /// Notify delivery adapters that a channel instance now has a concrete external
@@ -504,34 +538,120 @@ impl NotificationRouter {
         target_instance_id: &str,
     ) -> Result<(), AgentOSError> {
         self.check_rate_limit(&msg.from).await?;
-        let adapters = self.adapters.read().await;
-        for adapter in adapters.iter() {
-            if adapter.adapter_instance_id().as_deref() == Some(target_instance_id) {
-                if adapter.is_available().await {
-                    // Propagate delivery failure so callers (e.g. channel-send)
-                    // report it instead of falsely claiming success — important
-                    // for media sends where sendPhoto/sendDocument can 400.
-                    if let Err(e) = adapter.deliver(&msg).await {
-                        tracing::warn!(
-                            notification_id = %msg.id,
-                            target = %target_instance_id,
-                            error = %e,
-                            "Targeted channel delivery failed"
-                        );
-                        return Err(AgentOSError::ToolExecutionFailed {
-                            tool_name: "channel-delivery".to_string(),
-                            reason: e.to_string(),
-                        });
-                    }
-                }
-                return Ok(());
-            }
+        let Some(adapter) = self.adapter_for(target_instance_id).await else {
+            // Was `debug!`: a reply dropped here costs an LLM turn and the user
+            // sees nothing, so it must be visible at the default log level.
+            tracing::warn!(
+                target = %target_instance_id,
+                notification_id = %msg.id,
+                "deliver_to_channel: no DeliveryAdapter for this channel instance — \
+                 message dropped (a ChannelManager-owned kind such as Discord/Slack/\
+                 WhatsApp/Webhook must go through send_to_channel)"
+            );
+            return Ok(());
+        };
+        Self::deliver_via(&adapter, msg, target_instance_id).await
+    }
+
+    /// Deliver to an **already-resolved** adapter.
+    ///
+    /// Split out so `send_to_channel` does not re-resolve what it just looked
+    /// up: besides the second read-lock per send, the gap between the two
+    /// lookups was a TOCTOU window in which a concurrent `deregister_adapter`
+    /// turned a would-be `ChannelManager` retry into a silent `Ok(())`.
+    async fn deliver_via(
+        adapter: &Arc<dyn DeliveryAdapter>,
+        msg: UserMessage,
+        target_instance_id: &str,
+    ) -> Result<(), AgentOSError> {
+        // Unavailable is a failure, not a silent success. Falling through to
+        // `Ok(())` made `channel-send` answer `{"status":"delivered"}` and
+        // write a `ChannelMessageSent` audit row for a message nothing sent —
+        // permanently for the Email stub (`is_available` is hardcoded false),
+        // and for Telegram whenever `chat_id` has not been discovered yet.
+        if !adapter.is_available().await {
+            let reason = format!(
+                "channel '{target_instance_id}' ({}) reported itself unavailable — nothing was \
+                 sent (unconfigured credentials, an adapter that is not implemented, or a \
+                 recipient not yet discovered: send the bot a message first)",
+                adapter.channel_id()
+            );
+            tracing::warn!(
+                notification_id = %msg.id,
+                target = %target_instance_id,
+                reason = %reason,
+                "Targeted channel delivery refused: adapter unavailable"
+            );
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "channel-delivery".to_string(),
+                reason,
+            });
         }
-        tracing::debug!(
-            target = %target_instance_id,
-            "deliver_to_channel: no adapter found for instance id"
-        );
+        // Propagate delivery failure so callers (e.g. channel-send)
+        // report it instead of falsely claiming success — important
+        // for media sends where sendPhoto/sendDocument can 400.
+        if let Err(e) = adapter.deliver(&msg).await {
+            tracing::warn!(
+                notification_id = %msg.id,
+                target = %target_instance_id,
+                error = %e,
+                "Targeted channel delivery failed"
+            );
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "channel-delivery".to_string(),
+                reason: e.to_string(),
+            });
+        }
         Ok(())
+    }
+
+    /// Send one message to a single channel instance on **whichever outbound
+    /// stack owns it** — the single entry point every channel-bound sender
+    /// should use.
+    ///
+    /// The kernel has two stacks and they are disjoint: `DeliveryAdapter`s
+    /// registered on this router (Telegram, Ntfy, Email) and `ChannelAdapter`s
+    /// registered with the `agentos-channels` [`ChannelManager`] (Discord,
+    /// Slack, WhatsApp, Webhook) — the split is decided in
+    /// `Kernel::build_channel_adapter`. Callers that picked a stack themselves
+    /// were each blind to half the connected channels (replies never reached
+    /// Discord; escalation prompts never reached Telegram), so routing is
+    /// resolved here from where the instance is actually registered rather
+    /// than from a `ChannelKind` match that every caller had to repeat.
+    pub async fn send_to_channel(
+        &self,
+        msg: UserMessage,
+        target_instance_id: &str,
+    ) -> Result<(), AgentOSError> {
+        if let Some(adapter) = self.adapter_for(target_instance_id).await {
+            self.check_rate_limit(&msg.from).await?;
+            return Self::deliver_via(&adapter, msg, target_instance_id).await;
+        }
+        let Some(manager) = self.channel_manager.get() else {
+            tracing::warn!(
+                target = %target_instance_id,
+                "send_to_channel: no DeliveryAdapter for this channel instance and no \
+                 ChannelManager attached — message dropped"
+            );
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "channel-delivery".to_string(),
+                reason: format!("no outbound adapter for channel '{target_instance_id}'"),
+            });
+        };
+        self.check_rate_limit(&msg.from).await?;
+        manager
+            .send(target_instance_id, outbound_from(&msg, target_instance_id))
+            .await
+    }
+
+    /// The `DeliveryAdapter` registered for `instance_id`, if this router owns it.
+    async fn adapter_for(&self, instance_id: &str) -> Option<Arc<dyn DeliveryAdapter>> {
+        self.adapters
+            .read()
+            .await
+            .iter()
+            .find(|a| a.adapter_instance_id().as_deref() == Some(instance_id))
+            .cloned()
     }
 
     /// Return a clone of the `UserInbox` handle for use by command handlers.
@@ -576,6 +696,70 @@ impl NotificationRouter {
         }
         state.count += 1;
         Ok(())
+    }
+}
+
+/// Project a `UserMessage` onto the `ChannelManager` wire type.
+///
+/// `UserMessage::thread_id` is the kernel's own conversation key
+/// (`"channel:<uuid>"`); the *platform* thread is `reply_to_external_id`, which
+/// is what an adapter must reply into.
+fn outbound_from(msg: &UserMessage, instance_id: &str) -> OutboundMessage {
+    // The delivery-stack adapters render "<subject>\n\n<body>". Mirror that,
+    // except when the subject is just a truncated copy of the body (how
+    // `InboundRouter` fills it) — repeating it reads as a bug.
+    let text = if msg.subject.is_empty() || msg.body.starts_with(&msg.subject) {
+        msg.body.clone()
+    } else {
+        format!("**{}**\n\n{}", msg.subject, msg.body)
+    };
+
+    let content = match &msg.attachment {
+        // ponytail: `attachment.inline` (base64 upload) is Telegram-only, i.e.
+        // delivery-stack-only; manager-stack adapters get the URL form.
+        Some(att) => {
+            let media = match att.kind {
+                AttachmentKind::Image => MessageContent::Image {
+                    url: att.url.clone(),
+                    alt: att.caption.clone(),
+                },
+                AttachmentKind::Document => MessageContent::File {
+                    url: att.url.clone(),
+                    filename: att.filename.clone().unwrap_or_else(|| "file".into()),
+                    mime: String::new(),
+                },
+            };
+            let mut parts = Vec::new();
+            if !text.is_empty() {
+                parts.push(MessageContent::Text(text));
+            }
+            parts.push(media);
+            // No native album off Telegram — emit each extra URL as its own part.
+            for extra in &att.group_urls {
+                parts.push(MessageContent::Image {
+                    url: extra.clone(),
+                    alt: None,
+                });
+            }
+            if parts.len() == 1 {
+                parts.remove(0)
+            } else {
+                MessageContent::Mixed(parts)
+            }
+        }
+        // `Text`, not `Markdown`: every manager-stack adapter renders the two
+        // arms identically (`render_for_delivery`/`as_text`/`text_caption`),
+        // except the Webhook adapter, which serializes `content` verbatim into
+        // an HMAC-signed POST body. `MessageContent` is
+        // `#[serde(tag = "type", content = "data")]`, so `Markdown` silently
+        // changed that published contract to `{"type":"Markdown",…}`.
+        None => MessageContent::Text(text),
+    };
+
+    OutboundMessage {
+        channel_instance_id: instance_id.to_string(),
+        content,
+        thread_id: msg.reply_to_external_id.clone(),
     }
 }
 
@@ -1027,5 +1211,239 @@ impl DeliveryAdapter for SlackDeliveryAdapter {
 
     async fn is_available(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stand-in for a Telegram/Ntfy `DeliveryAdapter`: records bodies instead
+    /// of hitting the network.
+    struct RecordingAdapter {
+        instance_id: String,
+        seen: Arc<RwLock<Vec<String>>>,
+        /// Mirrors Telegram before `chat_id` discovery / the Email stub.
+        available: bool,
+    }
+
+    impl RecordingAdapter {
+        fn new(instance_id: &str, seen: Arc<RwLock<Vec<String>>>) -> Self {
+            Self {
+                instance_id: instance_id.to_string(),
+                seen,
+                available: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DeliveryAdapter for RecordingAdapter {
+        fn channel_id(&self) -> DeliveryChannel {
+            DeliveryChannel::custom("telegram".to_string())
+        }
+        async fn deliver(&self, msg: &UserMessage) -> Result<(), DeliveryError> {
+            self.seen.write().await.push(msg.body.clone());
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            self.available
+        }
+        fn adapter_instance_id(&self) -> Option<String> {
+            Some(self.instance_id.clone())
+        }
+    }
+
+    fn kernel_msg(body: &str) -> UserMessage {
+        UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: None,
+            trace_id: TraceID::new(),
+            kind: UserMessageKind::Notification,
+            priority: NotificationPriority::Info,
+            subject: body.chars().take(80).collect(),
+            body: body.to_string(),
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: Some("channel:abc".to_string()),
+            reply_to_external_id: None,
+            attachment: None,
+        }
+    }
+
+    fn test_router() -> Arc<NotificationRouter> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = Arc::new(
+            crate::user_inbox::UserInbox::new(&dir.path().join("inbox.db"), 100)
+                .expect("open user inbox"),
+        );
+        let audit = Arc::new(
+            agentos_audit::AuditLog::open(&dir.path().join("audit.db")).expect("open audit log"),
+        );
+        // Keep the SQLite files alive for the duration of the test.
+        Box::leak(Box::new(dir));
+        Arc::new(NotificationRouter::new(inbox, audit))
+    }
+
+    fn empty_channel_manager() -> Arc<ChannelManager> {
+        let (tx, rx) = mpsc::channel(1);
+        // Hold the receiver open so `send` failures are "not found", not "closed".
+        Box::leak(Box::new(rx));
+        Arc::new(ChannelManager::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_routes_delivery_stack_kind_to_its_adapter() {
+        // Telegram/Ntfy/Email are owned by this router's DeliveryAdapters.
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        router.attach_channel_manager(empty_channel_manager());
+
+        router
+            .send_to_channel(kernel_msg("hello telegram"), "telegram-1")
+            .await
+            .expect("delivery-stack send must succeed");
+        let delivered = seen.read().await.clone();
+        assert_eq!(delivered, vec!["hello telegram".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_routes_manager_stack_kind_past_the_delivery_adapters() {
+        // Discord/Slack/WhatsApp/Webhook have no DeliveryAdapter, so the send
+        // must fall through to the ChannelManager. Nothing is registered there
+        // either, so the manager's own "channel not found" surfaces — which is
+        // the proof that the manager stack was the one consulted. Before this
+        // fix the send stopped at the delivery stack and returned Ok(()).
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        router.attach_channel_manager(empty_channel_manager());
+
+        let err = router
+            .send_to_channel(kernel_msg("hello discord"), "discord-1")
+            .await
+            .expect_err("unregistered manager channel must report failure");
+        assert!(
+            err.to_string().contains("not found"),
+            "expected the ChannelManager's error, got: {err}"
+        );
+        assert!(
+            seen.read().await.is_empty(),
+            "must not have been delivered to the Telegram adapter"
+        );
+    }
+
+    /// `deliver_to_channel` deliberately returns `Ok(())` when no adapter owns
+    /// the instance. Boot restore leaves a channel `active: true` in the
+    /// registry when `build_channel_adapter` fails (an ntfy topic on
+    /// `http://ntfy.local` is now rejected by the SSRF blocklist), so the
+    /// agent-facing `channel-send` used to pass the `active` check, find no
+    /// adapter, and tell the agent the operator had been notified.
+    /// `send_to_channel` must fail closed instead.
+    #[tokio::test]
+    async fn send_to_channel_fails_closed_when_the_adapter_never_registered() {
+        let router = test_router();
+        router.attach_channel_manager(empty_channel_manager());
+
+        assert!(
+            router
+                .deliver_to_channel(kernel_msg("silent"), "ntfy-1")
+                .await
+                .is_ok(),
+            "deliver_to_channel swallows this by design — that is why the \
+             agent-facing send must not use it"
+        );
+
+        let err = router
+            .send_to_channel(kernel_msg("silent"), "ntfy-1")
+            .await
+            .expect_err("an unregistered instance must not report success");
+        assert!(
+            err.to_string().contains("not found"),
+            "expected a delivery failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_channel_errors_when_no_stack_owns_the_channel() {
+        let router = test_router();
+        assert!(router
+            .send_to_channel(kernel_msg("nowhere"), "unknown-1")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn outbound_from_uses_platform_thread_and_avoids_duplicate_subject() {
+        // Subject is a truncated copy of the body (how InboundRouter fills it):
+        // do not repeat it as a header.
+        let mut msg = kernel_msg("just the body");
+        msg.reply_to_external_id = Some("42".to_string());
+        let out = outbound_from(&msg, "discord-1");
+        assert_eq!(out.thread_id.as_deref(), Some("42"));
+        // `Text`, not `Markdown`: the Webhook adapter serializes this variant
+        // verbatim into an HMAC-signed body, so the tag is a published contract.
+        assert!(matches!(&out.content, MessageContent::Text(t) if t == "just the body"));
+
+        // A distinct subject (scheduled delivery) is rendered as a header.
+        msg.subject = "Nightly backup".to_string();
+        let out = outbound_from(&msg, "discord-1");
+        assert!(
+            matches!(&out.content, MessageContent::Text(t) if t == "**Nightly backup**\n\njust the body")
+        );
+        assert_eq!(
+            serde_json::to_value(&out.content).expect("serialize")["type"],
+            "Text",
+            "webhook consumers key off this discriminant"
+        );
+    }
+
+    /// An adapter that reports itself unavailable must fail the send, not
+    /// return `Ok(())` — `channel-send` answers `{"status":"delivered"}` and
+    /// writes a `ChannelMessageSent` audit row on `Ok`. Hits the Email stub
+    /// permanently and Telegram until its `chat_id` is discovered.
+    #[tokio::test]
+    async fn send_to_channel_errors_when_the_adapter_is_unavailable() {
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        let mut adapter = RecordingAdapter::new("email-1", Arc::clone(&seen));
+        adapter.available = false;
+        router.register_adapter(Arc::new(adapter)).await;
+        router.attach_channel_manager(empty_channel_manager());
+
+        let err = router
+            .send_to_channel(kernel_msg("into the void"), "email-1")
+            .await
+            .expect_err("an unavailable adapter must not report success");
+        assert!(
+            err.to_string().contains("unavailable"),
+            "expected an unavailability error, got: {err}"
+        );
+        assert!(seen.read().await.is_empty(), "nothing may have been sent");
+
+        // `deliver_to_channel` shares the same helper, so it fails closed too.
+        assert!(router
+            .deliver_to_channel(kernel_msg("into the void"), "email-1")
+            .await
+            .is_err());
     }
 }

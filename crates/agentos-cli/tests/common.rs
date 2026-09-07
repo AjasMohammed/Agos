@@ -98,6 +98,11 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             embedder_init_timeout_secs: 120,
             retention_days: 0,
             lifecycle: Default::default(),
+            // No auxiliary review inference in CLI tests.
+            background_review: agentos_kernel::config::BackgroundReviewConfig {
+                enabled: false,
+                ..Default::default()
+            },
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),

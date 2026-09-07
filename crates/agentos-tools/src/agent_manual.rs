@@ -350,6 +350,7 @@ pub enum ManualSection {
     Coordination,
     Suggest,
     Scratchpad,
+    Artifacts,
     Channels,
     Mcp,
     Hal,
@@ -387,6 +388,7 @@ impl ManualSection {
             "coordination" => Some(Self::Coordination),
             "suggest" => Some(Self::Suggest),
             "scratchpad" => Some(Self::Scratchpad),
+            "artifacts" | "artifact" => Some(Self::Artifacts),
             "channels" => Some(Self::Channels),
             "mcp" => Some(Self::Mcp),
             "hal" => Some(Self::Hal),
@@ -424,6 +426,7 @@ impl ManualSection {
             ("coordination", "coordinate spawn-agent await-agents parallel children sub-agent depth"),
             ("suggest", "suggest hint recommendation discover unknown"),
             ("scratchpad", "scratchpad notebook page wikilink notes draft"),
+            ("artifacts", "artifact publish document report deck slides dashboard shareable url render html markdown present"),
             ("channels", "channel discord slack telegram teams matrix mattermost line whatsapp dm pair approve"),
             ("mcp", "mcp model-context-protocol attach external tool server"),
             ("hal", "hardware sensor audio display network printer usb camera bluetooth host process-manager system-services system-mounts system-open-files network-sockets"),
@@ -461,6 +464,7 @@ impl ManualSection {
             "coordination" => Some("spawn-agent, await-agents, parallel children. Max spawn depth 5; spawn narrow not broad."),
             "suggest" => Some("Free-text query → ranked tool suggestions when you don't know the exact tool name."),
             "scratchpad" => Some("Persistent agent notebook with wikilinks and backlink graph for working memory."),
+            "artifacts" => Some("Publish a document the user will look at — report, deck, dashboard. Returns a shareable url; sandboxed rendering, no external assets."),
             "channels" => Some("Discord/Slack/Telegram/Teams/Matrix outbound, DM pairing, and inbound slash-commands."),
             "mcp" => Some("Attach external Model Context Protocol servers; their tools appear in your registry at runtime."),
             "hal" => Some("Hardware Abstraction Layer: process-manager, network-sockets, system-services, system-mounts, audio, display, USB, etc. Use these for HOST inspection — shell-exec is sandboxed."),
@@ -495,6 +499,7 @@ impl ManualSection {
             "coordination",
             "suggest",
             "scratchpad",
+            "artifacts",
             "channels",
             "mcp",
             "hal",
@@ -531,6 +536,9 @@ pub struct ToolSummary {
     pub trust_tier: String,
     /// Semantic capability tags for discoverability.
     pub capability_tags: Vec<String>,
+    /// User-phrased intents from the manifest, folded into the search corpus.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_hints: Vec<String>,
     /// Inferred category for browsing (core/memory/mcp/scratchpad/channel/events/skills/plugins/capabilities).
     pub category: String,
     /// Semantic tags from manifest (read/write/exec/network/fs/meta).
@@ -553,6 +561,11 @@ pub struct AgentManualTool {
     /// When `None`, `skills` falls back to listing the skill-management tools
     /// (skill-install / skill-list / etc.) so older callers still work.
     installed_skills: Option<SharedInstalledSkills>,
+}
+
+/// Lets `summaries_from_manifests` keep the `t.manifest.*` access shape.
+struct ManifestView<'a> {
+    manifest: &'a agentos_types::ToolManifest,
 }
 
 impl AgentManualTool {
@@ -610,6 +623,26 @@ impl AgentManualTool {
             scores.insert(tool_name, score);
         }
         scores
+    }
+
+    /// Category for a manifest: the explicit `[manifest].category` when declared,
+    /// else the name/tag inference. Single choke point so the manual, the L0
+    /// prompt catalogue and task-time scoping can never disagree.
+    pub fn category_of(manifest: &agentos_types::ToolManifest) -> String {
+        if let Some(c) = manifest
+            .manifest
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return c.to_string();
+        }
+        Self::infer_tool_category(
+            &manifest.manifest.name,
+            &manifest.manifest.capability_tags,
+            manifest.manifest.tags.as_deref(),
+        )
     }
 
     /// Derive a browsing category from tool name, capability_tags, and marketplace tags.
@@ -1014,15 +1047,23 @@ impl AgentManualTool {
     /// Build ToolSummary list from a slice of RegisteredTool references.
     /// Called by the kernel/runner when constructing the tool.
     pub fn summaries_from_registry(tools: &[&agentos_types::RegisteredTool]) -> Vec<ToolSummary> {
+        let manifests: Vec<&agentos_types::ToolManifest> =
+            tools.iter().map(|t| &t.manifest).collect();
+        Self::summaries_from_manifests(&manifests)
+    }
+
+    /// Same as `summaries_from_registry` but from bare manifests (the eval
+    /// harness loads `tools/core` without a registry).
+    pub fn summaries_from_manifests(tools: &[&agentos_types::ToolManifest]) -> Vec<ToolSummary> {
         tools
             .iter()
             .map(|t| {
+                let t = ManifestView { manifest: t };
                 let name = t.manifest.manifest.name.clone();
                 let permissions = t.manifest.capabilities_required.permissions.clone();
                 let marketplace_tags = t.manifest.manifest.tags.clone();
                 let capability_tags = t.manifest.manifest.capability_tags.clone();
-                let category =
-                    Self::infer_tool_category(&name, &capability_tags, marketplace_tags.as_deref());
+                let category = Self::category_of(t.manifest);
                 let tags = Self::derive_tool_tags(
                     &name,
                     &t.manifest.tags,
@@ -1049,6 +1090,7 @@ impl AgentManualTool {
                     examples: t.manifest.examples.clone(),
                     trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
                     capability_tags,
+                    search_hints: t.manifest.manifest.search_hints.clone(),
                     category,
                     tags,
                     risk_class,
@@ -1113,6 +1155,7 @@ impl AgentManualTool {
                 {"name": "hal", "description": "Hardware abstraction tools (live, this agent's available drivers)"},
                 {"name": "plugins", "description": "Tools contributed by enabled plugins (live)"},
                 {"name": "skills", "description": "Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} to see its required tools, permissions, triggers, and budget."},
+                {"name": "artifacts", "description": "Rendered deliverables: artifact-write (markdown/slides/html) and the returned viewer url"},
                 {"name": "notifications", "description": "Tools for talking to the operator: notify-user, ask-user"},
                 {"name": "containers", "description": "Container runtime tools (live)"},
                 {"name": "webhooks", "description": "Webhook endpoint tools (live)"},
@@ -1282,7 +1325,7 @@ impl AgentManualTool {
                         "input": {
                             "event_filter": "string (required): 'all' | 'category:<Name>' | '<EventType>'",
                             "payload_filter": "string (optional): predicate like \"severity == 'critical'\"",
-                            "throttle": "string (optional): 'none' | 'once_per:30s' | 'max:5/60s'",
+                            "throttle": "string (optional): 'once_per:30s' | 'max:5/60s' | 'none' to disable; omit for default max:30/60s",
                             "priority": "string (optional): 'critical' | 'high' | 'normal' | 'low'"
                         },
                         "returns": "subscription_id"
@@ -1734,11 +1777,11 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Delegate a Task",
-                    "content": "Use 'task-delegate' to hand off a sub-task to another agent. Provide {\"agent\": \"<name>\", \"task\": \"<prompt>\", \"priority\": 1-10}. The delegation is non-blocking — control returns immediately. Use 'task-status' with the returned task ID to monitor completion."
+                    "content": "Use 'task-delegate' to hand off a sub-task to another agent. Provide {\"agent\": \"<name>\", \"task\": \"<prompt>\", \"priority\": 1-10}. The delegation BLOCKS: your task is paused until the child finishes and is resumed automatically with the child's output already in your context — you do not need to poll. Use 'spawn-async' when you must keep working while the child runs."
                 },
                 {
                     "title": "Coordination Pattern",
-                    "content": "1. Call 'think' to plan the delegation strategy. 2. Call 'agent-list' to find available agents. 3. Call 'task-delegate' with the selected agent. 4. Poll 'task-status' until status='complete' or 'failed'. 5. Act on the result."
+                    "content": "1. Call 'think' to plan the delegation strategy. 2. Call 'agent-list' to find available agents. 3. Call 'task-delegate' with the selected agent — you are paused here and resumed once the child finishes, with its output in your context. 4. Act on the result. (Use 'spawn-async' + 'task-status' polling only when you must not block.)"
                 }
             ]
         }))
@@ -1871,7 +1914,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Await Sub-Agent Results",
-                    "content": "Use 'await-agents' with {\"task_ids\": [\"<id1>\", \"<id2>\"]}. Your task pauses until all specified children complete. Their results are injected into your context as [SUB-AGENT RESULT] blocks. Required permission: agent.spawn:x."
+                    "content": "Use 'await-agents' with {\"task_ids\": [\"<id1>\", \"<id2>\"]}. Your task pauses until all specified children complete. Their results are injected into your context wrapped in <user_data source=\"sub-agent:<name>\"> tags. Required permission: agent.spawn:x."
                 },
                 {
                     "title": "Verify an Output",
@@ -1930,6 +1973,44 @@ impl AgentManualTool {
                 {
                     "title": "When to use",
                     "content": "Scratchpad is best for accumulating knowledge over many tasks: investigation notes, design rationale, troubleshooting playbooks, or anything you want to come back to later. Prefer scratchpad over episodic memory when the data is human-readable and you want to wikilink it. Prefer memory blocks for small structured key-value state."
+                }
+            ]
+        }))
+    }
+
+    fn section_artifacts(&self) -> Result<serde_json::Value, AgentOSError> {
+        Ok(serde_json::json!({
+            "section": "artifacts",
+            "title": "Agent Artifacts",
+            "summary": "Publish a document the user will LOOK AT — report, deck, dashboard — via 'artifact-write'. Returns a shareable /artifacts/<id> url; rendering is sandboxed, no external assets reach it.",
+            "subsections": [
+                {
+                    "title": "kind=markdown (default)",
+                    "content": "Reports, summaries, comparisons. Rendered server-side into the viewer page — no iframe, no scripts. Example payload: {\"title\": \"Q3 Cost Review\", \"content\": \"# Q3 Cost Review\\n\\n| Provider | Spend |\\n|---|---|\\n| Anthropic | $412 |\\n\", \"kind\": \"markdown\"}."
+                },
+                {
+                    "title": "kind=slides",
+                    "content": "A deck. Markdown split on a line that is exactly '---' and nothing else. A '---' inside a fenced code block (``` ... ```) is NOT a slide break — the renderer tracks fence state while splitting. Example payload: {\"title\": \"SQLite vs Postgres\", \"content\": \"# SQLite\\n\\nSingle file, zero ops.\\n\\n---\\n\\n# Postgres\\n\\nConcurrent writers, network service.\", \"kind\": \"slides\"}."
+                },
+                {
+                    "title": "kind=html",
+                    "content": "Custom layout or interactivity: a complete, self-contained HTML document. Example payload: {\"title\": \"Latency Dashboard\", \"content\": \"<!doctype html><html><body><h1>p95 latency</h1><canvas id=c></canvas><script>/* inline chart code */</script></body></html>\", \"kind\": \"html\"}."
+                },
+                {
+                    "title": "The CSP reality — read this before writing HTML",
+                    "content": "Artifacts render under a sandbox CSP: no external CSS, JS, fonts, or images — no CDN <script src=\"https://...\">, no <link> to a webfont, no <img src=\"https://...\">. `data:` URIs only, inline everything: put CSS in an inline <style> block, JS in an inline <script> block, and encode any image as a base64 data: URI. An agent that emits <script src=\"https://cdn...\"> gets a BLANK artifact and NO error — the load is silently blocked, not rejected — and will otherwise retry the identical payload forever."
+                },
+                {
+                    "title": "What else is inert in the sandbox",
+                    "content": "Three more things fail SILENTLY, the same way — no error, just a dead control: (1) target=\"_blank\" links and window.open — no new windows; use a plain <a href> which navigates in place. (2) <form> submission — the sandbox blocks it; handle input in inline JS instead. (3) fetch/XHR/WebSocket — an artifact has no network at all. Build artifacts that are self-contained documents: everything they display must already be in the content you wrote."
+                },
+                {
+                    "title": "Updating an artifact",
+                    "content": "The first artifact-write call returns 'artifact_id'. To revise (fix a typo, add a slide, restyle), keep that 'artifact_id' and pass it back on the next artifact-write call — it replaces the content in place at the same url instead of creating a second artifact. Omit 'artifact_id' only on the first call."
+                },
+                {
+                    "title": "Size limit",
+                    "content": "content is capped at 2 MiB. An artifact is a document a human reads, not a data dump — if you're near the cap, summarize or paginate instead of writing a file-writer-sized blob through this tool."
                 }
             ]
         }))
@@ -2082,9 +2163,13 @@ impl AgentManualTool {
         // the agent from loading 800 tokens of docs for a feature it can't use.
         if let Some(list) = connected {
             if !list.iter().any(|c| c.kind == "telegram") {
+                // Keyed `unavailable`, not `error`: the tool answered correctly,
+                // the feature just isn't wired. `AuditHook` audits any ToolPost
+                // payload with a non-null top-level `error` as
+                // ToolExecutionFailed — same for the mcp/skills sections below.
                 return Ok(serde_json::json!({
                     "section": "channel-telegram",
-                    "error": "no_telegram_channel_connected",
+                    "unavailable": "no_telegram_channel_connected",
                     "message": "No Telegram channel is currently connected. Operator must run 'agentos channel connect telegram' before Telegram-specific features apply.",
                     "available": list
                         .iter()
@@ -2293,7 +2378,7 @@ impl AgentManualTool {
                     let known: Vec<&String> = by_server.keys().collect();
                     Ok(serde_json::json!({
                         "section": "mcp",
-                        "error": format!("MCP server '{target}' not attached"),
+                        "unavailable": format!("MCP server '{target}' not attached"),
                         "attached_servers": known,
                         "usage": "Call agent-manual {\"section\": \"mcp\"} for the server inventory, then drill in with {\"section\": \"mcp\", \"server\": \"<name>\"}."
                     }))
@@ -2411,7 +2496,7 @@ impl AgentManualTool {
                     let known: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
                     Ok(serde_json::json!({
                         "section": "skills",
-                        "error": format!("Skill '{target}' not installed"),
+                        "unavailable": format!("Skill '{target}' not installed"),
                         "installed_skills": known,
                         "usage": "Call agent-manual {\"section\": \"skills\"} for the inventory, then drill in with {\"section\": \"skills\", \"skill\": \"<name>\"}."
                     }))
@@ -2745,13 +2830,32 @@ impl AgentTool for AgentManualTool {
         // and drill-down see a consistent state.
         let skills_snapshot: Option<Vec<SkillSummary>> = self.snapshot_skills().await;
 
+        // The tools the agent can actually call right now.
+        //
+        // Used by the two "what can I call" surfaces — `tools` (the catalogue,
+        // mirroring `list-tools`) and `suggest` (ranked search, mirroring
+        // `search-tools`). The per-domain sections below (`mcp`, `hal`,
+        // `capabilities`, `scheduling`, …) deliberately stay UNFILTERED: they
+        // are the map of what the install offers and therefore what the agent
+        // can ask an operator to grant. Hiding a KMC or HAL tool there would
+        // leave the agent unable to even name what it is missing —
+        // `tool-detail`/`describe-tool` resolve those names and report the
+        // grants they need.
+        let visible: Vec<ToolSummary> = summaries
+            .iter()
+            .filter(|t| {
+                agentos_capability::any_permission_granted(&context.permissions, &t.permissions)
+            })
+            .cloned()
+            .collect();
+
         match section {
             ManualSection::Index => self.section_index(channels_snapshot.as_deref()),
             ManualSection::Tools => {
                 let usage_scores =
                     Self::load_usage_scores_async(context.data_dir.clone(), context.agent_id).await;
                 Self::section_tools(
-                    &summaries,
+                    &visible,
                     &usage_scores,
                     payload.get("category").and_then(|v| v.as_str()),
                     payload.get("tag").and_then(|v| v.as_str()),
@@ -2799,10 +2903,10 @@ impl AgentTool for AgentManualTool {
                 // bad call 8x in a row).
                 let query_opt = payload.get("query").and_then(|v| v.as_str());
                 match query_opt {
-                    Some(q) if !q.trim().is_empty() => Self::section_suggest(&summaries, q),
+                    Some(q) if !q.trim().is_empty() => Self::section_suggest(&visible, q),
                     _ => {
                         let names: Vec<&str> =
-                            summaries.iter().take(20).map(|s| s.name.as_str()).collect();
+                            visible.iter().take(20).map(|s| s.name.as_str()).collect();
                         Ok(serde_json::json!({
                             "section": "suggest",
                             "query": null,
@@ -2820,6 +2924,7 @@ impl AgentTool for AgentManualTool {
                 }
             }
             ManualSection::Scratchpad => self.section_scratchpad(),
+            ManualSection::Artifacts => self.section_artifacts(),
             ManualSection::Channels => self.section_channels(channels_snapshot.as_deref()),
             ManualSection::Mcp => {
                 let server_filter = payload.get("server").and_then(|v| v.as_str());
@@ -3113,7 +3218,7 @@ mod tests {
 
     #[test]
     fn test_all_names_count() {
-        assert_eq!(ManualSection::all_names().len(), 27);
+        assert_eq!(ManualSection::all_names().len(), 28);
     }
 
     #[test]
@@ -3211,7 +3316,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result["error"], "no_telegram_channel_connected");
+        assert_eq!(result["unavailable"], "no_telegram_channel_connected");
     }
 
     #[tokio::test]
@@ -3230,8 +3335,8 @@ mod tests {
             )
             .await
             .unwrap();
-        // Real doc has supported_markdown, no error field.
-        assert!(result.get("error").is_none());
+        // Real doc has supported_markdown, no `unavailable` field.
+        assert!(result.get("unavailable").is_none());
         assert!(result.get("supported_markdown").is_some());
     }
 
@@ -3275,6 +3380,7 @@ mod tests {
                 tags: vec!["read".into(), "fs".into()],
                 risk_class: "readonly_scoped".into(),
                 usage_hints: None,
+                search_hints: vec![],
             },
             ToolSummary {
                 name: "http-client".into(),
@@ -3289,16 +3395,41 @@ mod tests {
                 tags: vec!["network".into(), "write".into()],
                 risk_class: "readonly_external".into(),
                 usage_hints: None,
+                search_hints: vec![],
             },
         ]
     }
 
     #[test]
     fn test_section_index_has_all_sections() {
+        // Assert against the real parseable set, not a magic number. A count
+        // literal here silently allowed `artifacts` to be documented,
+        // parseable, and referenced by the system prompt while being absent
+        // from the index — undiscoverable to any agent that only reads the
+        // index. Only `index` (self-reference) and the dynamic `channel-*`
+        // sections (rendered separately under `channel_sections`) are exempt.
         let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_index(None).unwrap();
-        let sections = result["sections"].as_array().unwrap();
-        assert_eq!(sections.len(), 25); // index is not listed in index
+        let listed: Vec<&str> = result["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+
+        let expected: Vec<&str> = ManualSection::all_names()
+            .iter()
+            .copied()
+            .filter(|n| *n != "index" && !n.starts_with("channel-"))
+            .collect();
+
+        for name in &expected {
+            assert!(
+                listed.contains(name),
+                "section '{name}' is parseable but missing from the manual index"
+            );
+        }
+        assert_eq!(listed.len(), expected.len(), "listed: {listed:?}");
     }
 
     #[test]
@@ -3319,6 +3450,33 @@ mod tests {
         assert!(titles.iter().any(|t| t.contains("Expiry")));
         assert!(titles.iter().any(|t| t.contains("Privileged tools")));
         assert!(titles.iter().any(|t| t.contains("host-package-install")));
+    }
+
+    #[test]
+    fn manual_artifacts_section_resolves() {
+        assert_eq!(
+            ManualSection::from_str("artifacts"),
+            Some(ManualSection::Artifacts)
+        );
+        assert_eq!(
+            ManualSection::from_str("artifact"),
+            Some(ManualSection::Artifacts)
+        );
+    }
+
+    #[test]
+    fn manual_artifacts_body_warns_no_external_assets() {
+        let tool = AgentManualTool::from_static(vec![]);
+        let result = tool.section_artifacts().unwrap();
+        assert_eq!(result["section"], "artifacts");
+        let body = result.to_string();
+        assert!(body.contains("data:"), "must mention data: URIs");
+        assert!(body.contains("CSS"), "must mention inline CSS");
+        assert!(body.contains("JS"), "must mention inline JS");
+        assert!(
+            body.contains("slides"),
+            "must document the slides kind and its `---` syntax"
+        );
     }
 
     #[test]
@@ -3398,6 +3556,7 @@ mod tests {
             tags: vec!["read".into()],
             risk_class: "readonly_scoped".into(),
             usage_hints: None,
+            search_hints: vec![],
         }];
 
         let result = AgentManualTool::section_tool_detail(&summaries, "file-reader", true).unwrap();
@@ -3435,6 +3594,7 @@ mod tests {
                 tags: vec!["write".into()],
                 risk_class: "write_scoped".into(),
                 usage_hints: None,
+                search_hints: vec![],
             },
             ToolSummary {
                 name: "archival-search".into(),
@@ -3449,6 +3609,7 @@ mod tests {
                 tags: vec!["read".into()],
                 risk_class: "readonly_scoped".into(),
                 usage_hints: None,
+                search_hints: vec![],
             },
         ];
         let result = AgentManualTool::section_memory(&summaries).unwrap();
@@ -3644,6 +3805,7 @@ mod tests {
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "mcp".into(),
+            search_hints: Vec::new(),
             tags: vec!["mcp".into(), server.into()],
             risk_class: "exec_capable".into(),
             usage_hints: None,
@@ -3726,7 +3888,7 @@ mod tests {
             mcp_summary("github-create-pr", "github"),
         ];
         let result = AgentManualTool::section_mcp(&summaries, Some("notreal")).unwrap();
-        assert!(result.get("error").is_some());
+        assert!(result.get("unavailable").is_some());
         let known: Vec<&str> = result["attached_servers"]
             .as_array()
             .unwrap()
@@ -3781,6 +3943,7 @@ mod tests {
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: category.into(),
+            search_hints: Vec::new(),
             tags: vec![],
             risk_class: "exec_capable".into(),
             usage_hints: None,
@@ -3980,7 +4143,7 @@ mod tests {
         ];
         let result =
             AgentManualTool::section_skills(Some(&installed), &[], Some("not-a-skill")).unwrap();
-        assert!(result.get("error").is_some());
+        assert!(result.get("unavailable").is_some());
         let known: Vec<&str> = result["installed_skills"]
             .as_array()
             .unwrap()

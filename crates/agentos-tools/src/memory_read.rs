@@ -112,12 +112,21 @@ impl AgentTool for MemoryRead {
                     )
                 })?;
 
-                let entry = self.semantic.get_by_key(key).await.map_err(|e| {
-                    AgentOSError::ToolExecutionFailed {
+                // Agent-scoped: a bare `get_by_key` is a global lookup, so any
+                // agent that guessed a key could read another agent's private
+                // fact (the episodic branch above already checks ownership).
+                // ponytail: strict `agent_id = ?` also hides operator-imported
+                // rows that carry no agent (still reachable via `memory-search`,
+                // whose predicate is `agent_id IS NULL OR agent_id = ?`); widen
+                // this lookup the same way if such shared rows ever matter.
+                let entry = self
+                    .semantic
+                    .get_by_key_scoped(key, Some(&context.agent_id))
+                    .await
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
                         tool_name: "memory-read".into(),
                         reason: format!("Read failed: {}", e),
-                    }
-                })?;
+                    })?;
 
                 match entry {
                     Some(e) => Ok(serde_json::json!({
@@ -143,5 +152,70 @@ impl AgentTool for MemoryRead {
                 other
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_memory::Embedder;
+    use agentos_types::{AgentID, PermissionSet, TaskID, TraceID};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn ctx(data_dir: &Path, agent_id: AgentID) -> ToolExecutionContext {
+        let mut permissions = PermissionSet::new();
+        permissions.grant("memory.read".to_string(), true, false, false, None);
+        permissions.grant("memory.semantic".to_string(), true, false, false, None);
+        ToolExecutionContext {
+            data_dir: data_dir.to_path_buf(),
+            task_id: TaskID::new(),
+            agent_id,
+            trace_id: TraceID::new(),
+            permissions,
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_read_by_key_is_agent_scoped() {
+        let dir = TempDir::new().unwrap();
+        let semantic = Arc::new(
+            SemanticStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap(),
+        );
+        let episodic = Arc::new(EpisodicStore::open(dir.path()).unwrap());
+        let (alice, bob) = (AgentID::new(), AgentID::new());
+        semantic
+            .write("api-token-note", "alice private fact", Some(&alice), &[])
+            .await
+            .unwrap();
+
+        let tool = MemoryRead::new(semantic, episodic);
+        let payload = serde_json::json!({"scope": "semantic", "key": "api-token-note"});
+
+        // Owner still reads its own entry.
+        let own = tool
+            .execute(payload.clone(), ctx(dir.path(), alice))
+            .await
+            .unwrap();
+        assert_eq!(own["found"], true);
+        assert_eq!(own["content"], "alice private fact");
+
+        // Another agent guessing the key gets nothing.
+        let other = tool.execute(payload, ctx(dir.path(), bob)).await.unwrap();
+        assert_eq!(other["found"], false);
     }
 }

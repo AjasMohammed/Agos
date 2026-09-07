@@ -93,21 +93,23 @@ impl AgentTool for FileWriter {
             "file-writer: starting"
         );
 
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
         // SECURITY: resolve path against the *writable* workspace list. A
         // grant with mode `r` only does not appear here, so a read-only grant
         // cannot be written through even if the agent's `PermissionSet`
         // allows fs.user_data writes.
         let resolved = crate::traits::resolve_tool_path(
             path_str,
-            &context.data_dir,
+            &agent_root,
             &context.workspace_paths_writable,
         )?;
 
         // Normalize lexically (can't use canonicalize — file may not exist yet).
         let normalized = normalize_path(&resolved);
-        let canonical_data_dir =
-            context
-                .data_dir
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-writer".into(),
@@ -124,7 +126,7 @@ impl AgentTool for FileWriter {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &normalized))
             .unwrap_or(false);
-        if !normalized.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
+        if !normalized.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-writer: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
@@ -199,7 +201,7 @@ impl AgentTool for FileWriter {
                 .as_ref()
                 .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_parent))
                 .unwrap_or(false);
-            if !canonical_parent.starts_with(&canonical_data_dir)
+            if !canonical_parent.starts_with(&canonical_agent_root)
                 && !parent_in_workspace
                 && !parent_in_storage_zone
             {

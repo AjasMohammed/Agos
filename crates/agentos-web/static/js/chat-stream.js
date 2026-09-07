@@ -195,6 +195,34 @@
         }
     }
 
+    // Promote /artifacts/<uuid> links to cards. Runs on the SANITIZED fragment and
+    // only ever reads href + textContent, building its own nodes — agent text is
+    // never re-inserted as HTML. The href is re-checked against the exact route
+    // shape so nothing else can wear the card affordance.
+    var ARTIFACT_HREF = /^\/artifacts\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+    function decorateArtifactLinks(root) {
+        if (!root) return;
+        var links = root.querySelectorAll('a[href^="/artifacts/"]');
+        for (var i = 0; i < links.length; i++) {
+            var a = links[i];
+            if (!ARTIFACT_HREF.test(a.getAttribute("href") || "")) continue;
+            var card = document.createElement("a");
+            card.className = "artifact-card";
+            card.href = a.getAttribute("href");
+            var icon = document.createElement("span");
+            icon.className = "artifact-card-icon";
+            icon.setAttribute("aria-hidden", "true");
+            icon.textContent = "▤";
+            var label = document.createElement("span");
+            label.className = "artifact-card-label";
+            label.textContent = a.textContent || "Artifact";
+            card.appendChild(icon);
+            card.appendChild(label);
+            a.replaceWith(card);
+        }
+    }
+
     function renderMarkdownInto(el) {
         if (!el) return;
         var attrRaw = el.getAttribute("data-raw-markdown");
@@ -206,6 +234,7 @@
         }
         el.innerHTML = renderMarkdown(el.dataset.rawMarkdown);
         highlightCode(el);
+        decorateArtifactLinks(el);
     }
 
     function renderAllMarkdown(root) {
@@ -270,6 +299,7 @@
                 renderQueued = false;
                 if (currentTextEl) {
                     currentTextEl.innerHTML = renderMarkdown(currentTextEl.dataset.rawMarkdown || "");
+                    decorateArtifactLinks(currentTextEl);
                     pendingHighlightRoot = currentTextEl;
                 }
                 if (pendingHighlightRoot) {
@@ -405,6 +435,7 @@
             if (existing === answer.trim()) {
                 textSegments().forEach(function (el) {
                     el.innerHTML = renderMarkdown(el.dataset.rawMarkdown || "");
+                    decorateArtifactLinks(el);
                     highlightCode(el);
                 });
                 scrollToBottom(true);
@@ -415,6 +446,7 @@
             currentTextEl = newTextSegment();
             currentTextEl.dataset.rawMarkdown = answer;
             currentTextEl.innerHTML = renderMarkdown(answer);
+            decorateArtifactLinks(currentTextEl);
             highlightCode(currentTextEl);
             scrollToBottom(true);
         }

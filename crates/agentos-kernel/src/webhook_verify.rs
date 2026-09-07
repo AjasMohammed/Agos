@@ -274,3 +274,98 @@ mod tests {
         .unwrap());
     }
 }
+
+/// Why an inbound provider webhook was refused. Both HTTP front-ends map this
+/// to a status; the body stays generic so an anonymous caller learns nothing
+/// about stored configuration.
+#[derive(Debug)]
+pub enum WebhookIngestError {
+    /// Unknown, inactive, or malformed endpoint id.
+    NotFound,
+    RateLimited,
+    /// The stored provider string no longer parses (config drift).
+    UnknownProvider,
+    InvalidSignature,
+}
+
+/// Single ingestion path for `POST /webhooks/incoming/{id}`: resolve the
+/// endpoint, throttle, verify the provider signature, strip credential
+/// headers, record receipt, enqueue for the owning agent. No side effect
+/// happens before the signature check.
+pub async fn ingest_webhook(
+    registry: &crate::webhook_registry::WebhookRegistry,
+    throttle: &crate::webhook_throttle::WebhookThrottle,
+    batcher: &crate::webhook_batcher::WebhookBatcher,
+    endpoint_id: &str,
+    headers: std::collections::HashMap<String, String>,
+    body: &[u8],
+) -> Result<(), WebhookIngestError> {
+    let endpoint_uuid: agentos_types::WebhookEndpointID = endpoint_id
+        .parse()
+        .map_err(|_| WebhookIngestError::NotFound)?;
+    let (meta, secret) = match registry.get_endpoint_with_secret(&endpoint_uuid).await {
+        Some((meta, secret)) if meta.active => (meta, secret),
+        _ => return Err(WebhookIngestError::NotFound),
+    };
+    if !throttle.allow(&endpoint_uuid).await {
+        tracing::warn!(endpoint_id, "Webhook rate-limited");
+        return Err(WebhookIngestError::RateLimited);
+    }
+    let provider: WebhookProvider = serde_json::from_value(serde_json::json!(meta.provider))
+        .map_err(|_| {
+            tracing::error!(endpoint_id, provider = %meta.provider, "Unknown webhook provider");
+            WebhookIngestError::UnknownProvider
+        })?;
+    let sig_valid =
+        verify_webhook_signature(&provider, &secret, body, &headers).unwrap_or_else(|e| {
+            tracing::warn!(endpoint_id, error = %e, "Signature verification error");
+            false
+        });
+    if !sig_valid {
+        tracing::warn!(endpoint_id, "Invalid webhook signature");
+        return Err(WebhookIngestError::InvalidSignature);
+    }
+    let payload = serde_json::from_slice::<serde_json::Value>(body)
+        .unwrap_or_else(|_| serde_json::json!({ "_raw": String::from_utf8_lossy(body) }));
+    // Only provider event-metadata headers reach agents and the audit log;
+    // anything that can carry a credential is dropped.
+    let safe_headers: std::collections::HashMap<String, String> = headers
+        .into_iter()
+        .filter(|(name, _)| {
+            name == "content-type"
+                || name == "user-agent"
+                || (name.starts_with("x-")
+                    && !matches!(
+                        name.as_str(),
+                        "x-api-key"
+                            | "x-auth-token"
+                            | "x-access-token"
+                            | "x-secret"
+                            | "x-secret-key"
+                            | "x-private-key"
+                            | "x-password"
+                            | "x-token"
+                            | "x-authorization"
+                    )
+                    && !name.starts_with("x-auth-")
+                    && !name.starts_with("x-secret-")
+                    && !name.starts_with("x-access-"))
+        })
+        .collect();
+    let event = agentos_types::WebhookEvent {
+        endpoint_id: endpoint_uuid,
+        provider: provider.clone(),
+        headers: safe_headers,
+        payload,
+        received_at: chrono::Utc::now(),
+        signature_valid: true,
+    };
+    if let Err(e) = registry.record_receipt(&endpoint_uuid).await {
+        tracing::warn!(endpoint_id, error = %e, "Failed to record webhook receipt");
+    }
+    batcher
+        .add_event(event, meta.agent_id, provider, meta.debounce_seconds)
+        .await;
+    tracing::debug!(endpoint_id, "Webhook received and enqueued");
+    Ok(())
+}

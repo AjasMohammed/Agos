@@ -65,6 +65,12 @@ pub struct ContextWindow {
     /// key a cached CLI session by conversation. `None` ⇒ resume disabled.
     #[serde(default)]
     pub resume_key: Option<String>,
+    /// Deferred-tool references keyed by the `tool_call_id` of a discovery tool
+    /// result (`search-tools`/`describe-tool`): tool names the result surfaced.
+    /// Adapters with provider-native deferral (Anthropic) render them as
+    /// `tool_reference` blocks inside that `tool_result`. Empty otherwise.
+    #[serde(default)]
+    pub tool_references: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// A single entry in the context window.
@@ -408,6 +414,7 @@ impl ContextWindow {
             overflow_strategy: OverflowStrategy::default(),
             needs_checkpoint: false,
             resume_key: None,
+            tool_references: Default::default(),
         }
     }
 
@@ -420,6 +427,7 @@ impl ContextWindow {
             overflow_strategy: strategy,
             needs_checkpoint: false,
             resume_key: None,
+            tool_references: Default::default(),
         }
     }
 
@@ -560,6 +568,11 @@ impl ContextWindow {
         notice_e.importance = 0.9;
         notice_e.pinned = true;
         notice_e.category = ContextCategory::System;
+        // MUST be flagged as a summary. The task-path history filter keeps
+        // System-role entries only when `is_summary` is set, so without this
+        // the compactor paid for a summary, wrote this notice, and then had it
+        // silently dropped before the model ever saw it.
+        notice_e.is_summary = true;
         self.entries.insert(insert_pos, notice_e);
     }
 
@@ -612,10 +625,14 @@ impl ContextWindow {
                     // Evict oldest non-System entry, or a summary entry (which may be System
                     // role but is evictable because it was synthetically generated).
                     // If all remaining entries are pinned system entries, evict the oldest.
+                    // `!e.pinned` matches the other strategies. Without it the
+                    // pinned compaction notice — System-role + is_summary, and
+                    // inserted at the front of the evictable region — is the
+                    // FIRST match and gets dropped ahead of real turns.
                     if let Some(idx) = self
                         .entries
                         .iter()
-                        .position(|e| e.role != ContextRole::System || e.is_summary)
+                        .position(|e| (e.role != ContextRole::System || e.is_summary) && !e.pinned)
                     {
                         self.entries.remove(idx);
                     } else {
@@ -630,7 +647,7 @@ impl ContextWindow {
                     let evictable_count = self
                         .entries
                         .iter()
-                        .filter(|e| e.role != ContextRole::System || e.is_summary)
+                        .filter(|e| (e.role != ContextRole::System || e.is_summary) && !e.pinned)
                         .count();
                     let to_summarize = (evictable_count / 2).max(1);
 
@@ -641,6 +658,7 @@ impl ContextWindow {
                         let entry_has_images = self.entries[i].has_images();
                         if (self.entries[i].role != ContextRole::System
                             || self.entries[i].is_summary)
+                            && !self.entries[i].pinned
                             && !entry_has_images
                         {
                             let e = self.entries.remove(i);
@@ -1576,7 +1594,18 @@ mod tests {
         assert!(notice.pinned);
         assert!((notice.importance - 0.9).abs() < f32::EPSILON);
         assert_eq!(notice.category, ContextCategory::System);
-        assert!(!notice.is_summary);
+        // MUST be flagged as a summary. The task-path history filter in
+        // `task_executor` keeps System-role entries only when `is_summary` is
+        // set, so a `false` here means the compactor writes this notice and it
+        // is silently dropped before the model ever sees it. `is_summary` is
+        // already documented as "synthetic System-role entry that can be
+        // regenerated" (see the Summarize overflow strategy), which this is.
+        assert!(notice.is_summary);
+        // Mirror the real filter predicate so this invariant cannot regress.
+        assert!(
+            notice.role != ContextRole::System || notice.is_summary,
+            "context notice must survive the task-path history filter"
+        );
     }
 
     #[test]

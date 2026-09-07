@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-list"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "List all registered agents with their status. Optional 'status' filter (online/idle/offline). Use to discover available peers before sending agent messages."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
+search_hints = ["which agents exist", "who is online", "list peers"]
 
 [capabilities_required]
 permissions = ["agent.registry:r"]

@@ -28,8 +28,14 @@ const SCHEDULE_TOOL_DENYLIST: &[&str] = &[
 ];
 
 /// True if `tool_name` may NOT be invoked from a `RunTool` schedule action.
+///
+/// The name is normalized to the hyphenated spelling first. `ToolRunner::execute`
+/// auto-corrects `_` → `-` at dispatch, so an exact match against the raw name
+/// would let `spawn_agent` past the denylist and then run it as `spawn-agent`.
+/// Normalizing here (rather than at the call site) keeps every present and
+/// future caller covered.
 pub fn is_tool_blocked_for_schedule(tool_name: &str) -> bool {
-    SCHEDULE_TOOL_DENYLIST.contains(&tool_name)
+    SCHEDULE_TOOL_DENYLIST.contains(&tool_name.replace('_', "-").as_str())
 }
 
 /// Maximum size of a `tool_args` JSON payload.
@@ -54,11 +60,24 @@ mod tests {
         assert!(is_tool_blocked_for_schedule("ask-user"));
     }
 
+    /// C1 regression: the denylist was an exact match on the raw name while
+    /// `ToolRunner::execute` resolves `_` → `-` afterwards, so every entry was
+    /// bypassable by scheduling the underscore spelling.
+    #[test]
+    fn underscore_spelling_is_blocked() {
+        assert!(is_tool_blocked_for_schedule("spawn_agent"));
+        assert!(is_tool_blocked_for_schedule("schedule_once"));
+        assert!(is_tool_blocked_for_schedule("set_cron"));
+        assert!(is_tool_blocked_for_schedule("a2a_delegate"));
+        assert!(is_tool_blocked_for_schedule("ask_user"));
+    }
+
     #[test]
     fn ordinary_tools_not_blocked() {
         assert!(!is_tool_blocked_for_schedule("datetime"));
         assert!(!is_tool_blocked_for_schedule("notify-user"));
         assert!(!is_tool_blocked_for_schedule("file-read"));
+        assert!(!is_tool_blocked_for_schedule("file_read"));
     }
 
     #[test]

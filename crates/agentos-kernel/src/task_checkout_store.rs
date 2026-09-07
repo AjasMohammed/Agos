@@ -106,17 +106,26 @@ impl TaskCheckoutStore {
         .map_err(|e| AgentOSError::StorageError(format!("spawn_blocking join: {e}")))?
     }
 
-    /// Release a claim. Returns whether a row was removed (idempotent — releasing
-    /// a never-claimed task is a harmless no-op returning `false`).
-    pub async fn release(&self, task_id: &TaskID) -> Result<bool, AgentOSError> {
+    /// Release a claim held by `owner`. Returns whether a row was removed
+    /// (idempotent — releasing a never-claimed task is a harmless no-op
+    /// returning `false`).
+    ///
+    /// Owner-scoped on purpose: a slow owner whose lease was swept by
+    /// `sweep_expired`, and whose task was then re-claimed by a second owner,
+    /// must not delete the new owner's claim when it finally finishes.
+    pub async fn release(&self, task_id: &TaskID, owner: &AgentID) -> Result<bool, AgentOSError> {
         let conn = Arc::clone(&self.conn);
         let tid = task_id.to_string();
+        let oid = owner.to_string();
         tokio::task::spawn_blocking(move || {
             let guard = conn
                 .lock()
                 .map_err(|e| AgentOSError::StorageError(format!("lock poisoned: {e}")))?;
             let n = guard
-                .execute("DELETE FROM task_checkout WHERE task_id = ?1", params![tid])
+                .execute(
+                    "DELETE FROM task_checkout WHERE task_id = ?1 AND owner_agent_id = ?2",
+                    params![tid, oid],
+                )
                 .map_err(|e| AgentOSError::StorageError(format!("release delete: {e}")))?;
             Ok(n > 0)
         })
@@ -204,14 +213,35 @@ mod tests {
             .try_claim(&task, &agent, Duration::from_secs(60))
             .await
             .unwrap());
-        assert!(s.release(&task).await.unwrap());
+        assert!(s.release(&task, &agent).await.unwrap());
         // Releasing again is a harmless no-op.
-        assert!(!s.release(&task).await.unwrap());
+        assert!(!s.release(&task, &agent).await.unwrap());
         // After release the task is claimable again.
         assert!(s
             .try_claim(&task, &agent, Duration::from_secs(60))
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn release_by_non_owner_leaves_claim() {
+        let s = TaskCheckoutStore::in_memory().unwrap();
+        let (task, slow_owner) = ids();
+        let new_owner = AgentID::new();
+        // Slow owner claims, its lease lapses, the task is re-claimed by a peer.
+        s.try_claim(&task, &slow_owner, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(s.sweep_expired().await.unwrap(), 1);
+        assert!(s
+            .try_claim(&task, &new_owner, Duration::from_secs(60))
+            .await
+            .unwrap());
+        // The slow owner finally finishes — its release must not evict the peer.
+        assert!(!s.release(&task, &slow_owner).await.unwrap());
+        assert_eq!(s.owner_of(&task).await.unwrap(), Some(new_owner));
+        // The real owner can still release.
+        assert!(s.release(&task, &new_owner).await.unwrap());
     }
 
     #[tokio::test]

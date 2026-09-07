@@ -1,4 +1,5 @@
 tags = ["exec"]
+risk_class = "exec_capable"
 
 [manifest]
 name = "build-run"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Execute a build/test/script command with structured output parsing. Pass `workspace` to activate a managed environment's venv / node_modules / cargo bin paths and run the command inside it."
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "exec_capable"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = ["build.run:x"]

@@ -1,4 +1,5 @@
 tags = ["meta"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "think"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Record an explicit reasoning step. Use before any irreversible action to think through the approach. The thought is captured in the audit log."
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["reason step by step", "plan before acting", "scratch reasoning"]
 
 [capabilities_required]
 permissions = []

@@ -534,6 +534,42 @@ impl ScheduleStore {
         .context("Run list task failed")?
     }
 
+    /// Runs recorded per parent schedule id. The in-memory `run_count` on a
+    /// job is bumped at fire time and can lag after restarts; the run history
+    /// is the durable count the panel should show.
+    pub async fn count_runs_by_parent(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, u64>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Schedule DB mutex poisoned"))?;
+            let mut stmt = guard
+                .prepare(
+                    "SELECT parent_id, COUNT(*) FROM scheduled_runs \
+                     WHERE parent_kind = ?1 GROUP BY parent_id",
+                )
+                .context("Failed to prepare run count query")?;
+            // Cron schedules only. The stored value is `RunParentKind`'s
+            // storage name (`schedule`) — NOT the API's `kind: "cron"` label,
+            // which silently matched zero rows.
+            let rows = stmt
+                .query_map(params![RunParentKind::Schedule.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .context("Failed to query run counts")?;
+            let mut out = std::collections::HashMap::new();
+            for row in rows {
+                let (parent, n) = row.context("Failed to decode run count row")?;
+                out.insert(parent, n.max(0) as u64);
+            }
+            Ok(out)
+        })
+        .await
+        .context("Run count task failed")?
+    }
+
     pub async fn list_runs_by_creator(
         &self,
         creator: AgentID,

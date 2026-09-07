@@ -513,7 +513,10 @@ async fn run_conversation(
 
         match result {
             Ok(inf) => {
-                let answer = inf.answer.clone();
+                // Strip here, not just on persist: this `answer` also feeds the
+                // streamed TurnEnd event and the in-memory `completed` transcript
+                // that the next turn's prompt is built from.
+                let answer = agentos_kernel::convo_store::strip_user_data_tags(&inf.answer);
                 let tool_count = inf.tool_calls.len() as u32;
 
                 // Re-check stop status — the user may have hit stop while the LLM was running.
@@ -679,6 +682,7 @@ fn translate_event(ev: ChatStreamEvent, agent: &str, turn: u32) -> Option<ConvoS
         ChatStreamEvent::ToolStart {
             tool_name,
             iteration,
+            ..
         } => ConvoStreamEvent::ToolStart {
             agent: agent.to_string(),
             turn,

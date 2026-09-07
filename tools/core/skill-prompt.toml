@@ -1,4 +1,4 @@
-tags = ["meta", "read"]
+tags = ["read"]
 # `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
 # Nesting it under [manifest] makes serde silently drop it and default the
 # outer field — kept top-level here so the intent is provable, matching

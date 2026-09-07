@@ -1,11 +1,11 @@
 use crate::escalation::PendingEscalation;
-use agentos_types::{AgentID, AgentTask, TaskID, TaskState};
+use agentos_types::{AgentID, AgentTask, EventSubscription, SubscriptionID, TaskID, TaskState};
 use anyhow::{anyhow, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const LATEST_MIGRATION_VERSION: i64 = 1;
+const LATEST_MIGRATION_VERSION: i64 = 4;
 
 /// Persisted usage counters for an agent.
 #[derive(Debug, Clone)]
@@ -216,6 +216,139 @@ impl KernelStateStore {
         })
         .await
         .context("Scheduler prune task failed")?
+    }
+
+    /// Record the failure reason for a persisted task (no-op if the row is
+    /// missing — the task may have been pruned already).
+    pub async fn set_scheduler_task_error(
+        &self,
+        task_id: &TaskID,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        let error = error.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "UPDATE scheduler_tasks SET last_error = ?2 WHERE task_id = ?1",
+                    params![task_id, error],
+                )
+                .context("Failed to record scheduler task error")?;
+            Ok(())
+        })
+        .await
+        .context("Scheduler error-persist task failed")?
+    }
+
+    /// Persist the final answer of a completed task next to its row so the
+    /// task detail page can show it after the executor (and a restart) is gone.
+    pub async fn set_scheduler_task_result(
+        &self,
+        task_id: &TaskID,
+        result: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        let result = result.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "UPDATE scheduler_tasks SET last_result = ?2 WHERE task_id = ?1",
+                    params![task_id, result],
+                )
+                .context("Failed to record scheduler task result")?;
+            Ok(())
+        })
+        .await
+        .context("Scheduler result-persist task failed")?
+    }
+
+    /// `(updated_at, last_result)` for a task row. For a terminal task
+    /// `updated_at` is the moment of its last state change — its completion time.
+    pub async fn scheduler_task_outcome(
+        &self,
+        task_id: &TaskID,
+    ) -> anyhow::Result<Option<(chrono::DateTime<chrono::Utc>, Option<String>)>> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<_>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let row: Option<(String, Option<String>)> = guard
+                .query_row(
+                    "SELECT updated_at, last_result FROM scheduler_tasks WHERE task_id = ?1",
+                    params![task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .context("Failed to read scheduler task outcome")?;
+            Ok(row.and_then(|(at, result)| {
+                chrono::DateTime::parse_from_rfc3339(&at)
+                    .ok()
+                    .map(|at| (at.with_timezone(&chrono::Utc), result))
+            }))
+        })
+        .await
+        .context("Scheduler outcome read task failed")?
+    }
+
+    /// Most recent finished tasks (complete/failed/cancelled), newest first,
+    /// with their failure reason. Used to rebuild task history after a
+    /// restart; nothing here is ever re-queued.
+    pub async fn load_recent_terminal_scheduler_tasks(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(AgentTask, Option<String>)>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Vec<(AgentTask, Option<String>)>> {
+                let guard = conn
+                    .lock()
+                    .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+                let mut stmt = guard
+                    .prepare(
+                        "SELECT task_id, payload,
+                            CASE WHEN state = 'failed' THEN last_error END
+                     FROM scheduler_tasks
+                     WHERE state IN ('complete', 'failed', 'cancelled')
+                     ORDER BY updated_at DESC
+                     LIMIT ?1",
+                    )
+                    .context("Failed to prepare scheduler history query")?;
+                let rows = stmt
+                    .query_map(params![limit as i64], |row| {
+                        let task_id: String = row.get(0)?;
+                        let payload: Vec<u8> = row.get(1)?;
+                        let last_error: Option<String> = row.get(2)?;
+                        Ok((task_id, payload, last_error))
+                    })
+                    .context("Failed to query scheduler history rows")?;
+                let mut tasks = Vec::new();
+                for row in rows {
+                    let (task_id, payload, last_error) =
+                        row.context("Failed to decode scheduler history row")?;
+                    match serde_json::from_slice::<AgentTask>(&payload) {
+                        Ok(task) => tasks.push((task, last_error)),
+                        Err(err) => tracing::warn!(
+                            task_id = %task_id,
+                            error = %err,
+                            "Skipping corrupted scheduler task payload during history load"
+                        ),
+                    }
+                }
+                Ok(tasks)
+            },
+        )
+        .await
+        .context("Scheduler history load task failed")?
     }
 
     pub async fn upsert_escalation(&self, escalation: PendingEscalation) -> anyhow::Result<()> {
@@ -597,6 +730,125 @@ impl KernelStateStore {
         .context("Cost snapshot lookup task failed")?
     }
 
+    // ── Event subscriptions ───────────────────────────────────────
+    //
+    // Durable half of `EventBus`, whose registry is otherwise an in-memory
+    // `Vec` that a restart empties. Only long-lived subscriptions land here —
+    // task-scoped and TTL ones are deliberately not persisted (see
+    // `EventBus::subscribe_transient`).
+
+    pub async fn upsert_event_subscription(&self, sub: EventSubscription) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let payload = serde_json::to_vec(&sub)
+                .context("Failed to serialize event subscription for persistence")?;
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "INSERT INTO event_subscriptions (
+                        subscription_id, agent_id, created_at, payload
+                     ) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(subscription_id) DO UPDATE SET
+                        agent_id = excluded.agent_id,
+                        created_at = excluded.created_at,
+                        payload = excluded.payload",
+                    params![
+                        sub.id.to_string(),
+                        sub.agent_id.to_string(),
+                        sub.created_at.to_rfc3339(),
+                        payload
+                    ],
+                )
+                .context("Failed to persist event subscription")?;
+            Ok(())
+        })
+        .await
+        .context("Event subscription persist task failed")?
+    }
+
+    pub async fn delete_event_subscription(&self, id: SubscriptionID) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "DELETE FROM event_subscriptions WHERE subscription_id = ?1",
+                    params![id.to_string()],
+                )
+                .context("Failed to delete event subscription")?;
+            Ok(())
+        })
+        .await
+        .context("Event subscription delete task failed")?
+    }
+
+    pub async fn delete_event_subscriptions_for_agent(
+        &self,
+        agent_id: AgentID,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "DELETE FROM event_subscriptions WHERE agent_id = ?1",
+                    params![agent_id.to_string()],
+                )
+                .context("Failed to delete event subscriptions for agent")?;
+            Ok(())
+        })
+        .await
+        .context("Event subscription agent-delete task failed")?
+    }
+
+    pub async fn load_event_subscriptions(&self) -> anyhow::Result<Vec<EventSubscription>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<EventSubscription>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let mut stmt = guard
+                .prepare(
+                    "SELECT subscription_id, payload FROM event_subscriptions
+                     ORDER BY created_at ASC",
+                )
+                .context("Failed to prepare event subscription query")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let payload: Vec<u8> = row.get(1)?;
+                    Ok((id, payload))
+                })
+                .context("Failed to query event subscriptions")?;
+
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, payload) = row.context("Failed to read event subscription row")?;
+                // A row whose payload no longer deserializes (an EventType
+                // removed from the enum, say) is dropped rather than failing
+                // the whole boot — the alternative is a kernel that will not
+                // start until someone edits SQLite by hand.
+                match serde_json::from_slice::<EventSubscription>(&payload) {
+                    Ok(sub) => out.push(sub),
+                    Err(err) => tracing::warn!(
+                        subscription_id = %id,
+                        error = %err,
+                        "Dropping unreadable persisted event subscription"
+                    ),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .context("Event subscription load task failed")?
+    }
+
     fn configure_connection(conn: &Connection) -> anyhow::Result<()> {
         conn.execute_batch(
             "
@@ -629,9 +881,10 @@ impl KernelStateStore {
             )
             .context("Failed to read state DB migration version")?;
 
-        let migrations: &[(i64, &str)] = &[(
-            1,
-            "
+        let migrations: &[(i64, &str)] = &[
+            (
+                1,
+                "
             CREATE TABLE IF NOT EXISTS scheduler_tasks (
                 task_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -675,7 +928,33 @@ impl KernelStateStore {
                 version INTEGER NOT NULL DEFAULT 0
             );
             ",
-        )];
+            ),
+            (
+                2,
+                "
+            ALTER TABLE scheduler_tasks ADD COLUMN last_error TEXT;
+            ",
+            ),
+            (
+                3,
+                "
+            ALTER TABLE scheduler_tasks ADD COLUMN last_result TEXT;
+            ",
+            ),
+            (
+                4,
+                "
+            CREATE TABLE IF NOT EXISTS event_subscriptions (
+                subscription_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload BLOB NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_subscriptions_agent
+                ON event_subscriptions(agent_id);
+            ",
+            ),
+        ];
 
         for (version, ddl) in migrations {
             if *version <= current_version {

@@ -1,4 +1,5 @@
 tags = ["read", "write"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "raw-usb"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Enumerate whitelisted USB devices and perform stateless bulk, interrupt, and control transfers."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "hal"
 
 [capabilities_required]
 permissions = [

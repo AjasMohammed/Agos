@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "schedule-recurring"
@@ -6,8 +7,8 @@ version     = "1.1.0"
 description = "Create a recurring cron schedule that fires repeatedly per cron expression. Supports modes: 'task' (LLM prompt), 'notify' (deterministic user notification, no LLM), and 'tool' (deterministic single-tool invocation, no LLM). Pause / resume / delete via schedule-control."
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["every day at 9am", "cron a job", "repeat this weekly", "recurring reminder"]
 group       = "scheduling"
-risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["schedule.job:w"]

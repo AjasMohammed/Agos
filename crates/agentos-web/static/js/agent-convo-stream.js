@@ -10,6 +10,34 @@
             .replace(/'/g, "&#39;");
     }
 
+    // Promote /artifacts/<uuid> links to cards. Runs on the SANITIZED fragment and
+    // only ever reads href + textContent, building its own nodes — agent text is
+    // never re-inserted as HTML. The href is re-checked against the exact route
+    // shape so nothing else can wear the card affordance.
+    var ARTIFACT_HREF = /^\/artifacts\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+    function decorateArtifactLinks(root) {
+        if (!root) return;
+        var links = root.querySelectorAll('a[href^="/artifacts/"]');
+        for (var i = 0; i < links.length; i++) {
+            var a = links[i];
+            if (!ARTIFACT_HREF.test(a.getAttribute("href") || "")) continue;
+            var card = document.createElement("a");
+            card.className = "artifact-card";
+            card.href = a.getAttribute("href");
+            var icon = document.createElement("span");
+            icon.className = "artifact-card-icon";
+            icon.setAttribute("aria-hidden", "true");
+            icon.textContent = "▤";
+            var label = document.createElement("span");
+            label.className = "artifact-card-label";
+            label.textContent = a.textContent || "Artifact";
+            card.appendChild(icon);
+            card.appendChild(label);
+            a.replaceWith(card);
+        }
+    }
+
     function renderMarkdown(raw) {
         if (window.marked && typeof window.marked.parse === "function"
             && window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
@@ -197,6 +225,7 @@
         s.currentTextEl.dataset.rawMarkdown =
             (s.currentTextEl.dataset.rawMarkdown || "") + (data.text || "");
         s.currentTextEl.innerHTML = renderMarkdown(s.currentTextEl.dataset.rawMarkdown);
+        decorateArtifactLinks(s.currentTextEl);
         s.bubble.style.display = "";
         scrollToBottom();
     }
@@ -245,6 +274,7 @@
                 var seg = newTextSegment(s);
                 seg.dataset.rawMarkdown = data.answer;
                 seg.innerHTML = renderMarkdown(data.answer);
+                decorateArtifactLinks(seg);
             }
         }
         s.bubble.classList.remove("chat-streaming");

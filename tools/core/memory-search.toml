@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "memory-search"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Search semantic memory for relevant past knowledge by keyword or natural language query"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["do I remember anything about", "recall facts", "look up long-term memory"]
 
 [capabilities_required]
 permissions = ["memory.semantic:r", "memory.episodic:r"]

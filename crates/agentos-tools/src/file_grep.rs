@@ -97,12 +97,12 @@ impl AgentTool for FileGrep {
                 AgentOSError::SchemaValidation(format!("file-grep: invalid regex: {}", e))
             })?;
 
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
         // SECURITY: resolve search root, checking workspace paths before falling back to data_dir.
-        let resolved = crate::traits::resolve_tool_path(
-            &search_path,
-            &context.data_dir,
-            &context.workspace_paths,
-        )?;
+        let resolved =
+            crate::traits::resolve_tool_path(&search_path, &agent_root, &context.workspace_paths)?;
 
         let canonical_root =
             resolved
@@ -112,9 +112,8 @@ impl AgentTool for FileGrep {
                     reason: format!("Search path not found: {} ({})", search_path, e),
                 })?;
 
-        let canonical_data_dir =
-            context
-                .data_dir
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-grep".into(),
@@ -131,7 +130,7 @@ impl AgentTool for FileGrep {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_root))
             .unwrap_or(false);
-        if !canonical_root.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
+        if !canonical_root.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", search_path),
@@ -162,7 +161,7 @@ impl AgentTool for FileGrep {
             .transpose()?;
 
         // Allowed roots for this execution: data_dir + any workspace paths.
-        let allowed_roots: Vec<PathBuf> = std::iter::once(canonical_data_dir.clone())
+        let allowed_roots: Vec<PathBuf> = std::iter::once(canonical_agent_root.clone())
             .chain(context.workspace_paths.iter().cloned())
             .collect();
 
@@ -170,7 +169,7 @@ impl AgentTool for FileGrep {
         let results = tokio::task::spawn_blocking(move || {
             search_files(
                 &canonical_root,
-                &canonical_data_dir,
+                &canonical_agent_root,
                 &allowed_roots,
                 &regex,
                 glob_pattern.as_ref(),

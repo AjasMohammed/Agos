@@ -1,12 +1,14 @@
 tags = ["exec", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "http-client"
 version     = "1.0.0"
-risk_class  = "readonly_external"
-description = "Make outbound HTTP requests (GET, POST, PUT, PATCH, DELETE, HEAD). Supports redirect following, SSE streaming, multipart upload, and direct file download. Credentials injected from the secrets vault."
+description = "Make outbound HTTP requests (GET, POST, PUT, PATCH, DELETE, HEAD). Supports redirect following, SSE streaming, multipart upload, and direct file download. Credentials injected from the secrets vault: every secret named in `secret_headers` additionally requires an exact `secret.<NAME>:r` permission grant on the calling agent, or the call is denied."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "web"
+search_hints = ["call an api", "post json to an endpoint", "make an http request"]
 
 [capabilities_required]
 permissions = ["network.outbound:x"]
@@ -62,7 +64,7 @@ type = "string"
 
 [payload_schema.properties.secret_headers]
 type = "object"
-description = "Header values resolved from vault secrets"
+description = "Header values resolved from vault secrets. Each value is either a bare secret name or a template containing `$NAME`. REQUIRES an exact `secret.<NAME>:r` grant per referenced secret (prefix grants do not match); without it the request is denied before it is sent."
 
 [payload_schema.properties.secret_headers.additionalProperties]
 type = "string"

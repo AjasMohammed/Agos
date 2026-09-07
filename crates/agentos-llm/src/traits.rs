@@ -5,6 +5,15 @@ use agentos_types::*;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+/// Hard per-request wall-clock budget for one inference, shared by every
+/// adapter that does not take the value from config or a catalog entry.
+///
+/// This is the *only* hard deadline on an inference. Reasoning models on hosted
+/// gateways routinely run for minutes with nothing on the wire, so a tight
+/// transport cap kills healthy turns; the kernel's inference watchdog is an
+/// advisory prompt, not a second deadline (see `inference_watchdog_secs`).
+pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 600;
+
 #[async_trait]
 pub trait LLMCore: Send + Sync {
     /// Whether the adapter primarily uses provider-native tool-calling
@@ -14,14 +23,51 @@ pub trait LLMCore: Send + Sync {
         false
     }
 
+    /// Whether the adapter can take the whole catalogue with the deferred tail
+    /// flagged (`InferenceOptions::deferred_tools_from`) and expand
+    /// `tool_reference`s itself (Anthropic tool search). When true the kernel
+    /// sends every tool and skips its own re-arm path.
+    fn supports_deferred_tools(&self) -> bool {
+        false
+    }
+
+    /// Whether the adapter reaches AgentOS tools through the MCP *gateway*
+    /// (the 4 `mcp__agentos__*` meta-tools) instead of receiving the real
+    /// kebab-case tool array natively.
+    ///
+    /// This is a distinct axis from [`Self::supports_native_tool_calling`],
+    /// which is a *protocol* proxy: an Anthropic or OpenAI adapter is native
+    /// but not gatewayed, and must never be told it only has the 4 wrappers.
+    fn uses_tool_gateway(&self) -> bool {
+        false
+    }
+
     /// Seconds the kernel waits on a single `infer*` call before opening the
-    /// inference user-gate (watchdog). Defaults to the kernel's standard
-    /// threshold. Adapters whose one `infer` call encompasses an entire internal
-    /// tool loop (e.g. the claude-code MCP subprocess, which discovers + invokes
-    /// + reasons in one shot) should return a larger value so legitimate
-    /// long-running turns are not aborted prematurely.
+    /// inference user-gate (watchdog).
+    ///
+    /// This is an *advisory* threshold: it asks an attached operator whether to
+    /// keep waiting. When nobody answers, the inference keeps running and the
+    /// adapter's transport timeout remains the only hard bound
+    /// (`DEFAULT_INFERENCE_TIMEOUT_SECS` for adapters that do not configure
+    /// their own). Adapters whose one `infer` call encompasses an entire
+    /// internal tool loop (e.g. the claude-code MCP subprocess, which discovers
+    /// + invokes + reasons in one shot) return a larger value so operators are
+    /// not prompted about turns that are normal for them.
     fn inference_watchdog_secs(&self) -> u64 {
         120
+    }
+
+    /// Absolute ceiling (seconds) the kernel enforces on one `infer*` call.
+    ///
+    /// The adapter's own transport timeout is supposed to be this bound, but a
+    /// hung upstream is exactly the situation in which a transport timeout is
+    /// least trustworthy (observed: an inference against a multiplexed HTTP/2
+    /// gateway outliving its 600s `reqwest` deadline). The kernel therefore
+    /// re-asserts the adapter's declared budget itself, so no adapter or HTTP
+    /// stack can strand a task indefinitely. Report the real budget here —
+    /// returning a value below what the adapter needs kills healthy turns.
+    fn inference_hard_timeout_secs(&self) -> u64 {
+        DEFAULT_INFERENCE_TIMEOUT_SECS
     }
 
     /// Send a context window to the LLM and get a complete response.
@@ -189,6 +235,8 @@ mod tests {
         let ctx = ContextWindow::new(100);
         let manifest = ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: "file-reader".to_string(),         // 11 chars
                 description: "Reads a file".to_string(), // 12 chars
                 version: "1.0.0".to_string(),

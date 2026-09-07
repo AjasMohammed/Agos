@@ -18,6 +18,9 @@
 //! | `Verified`  | Author Ed25519 signature required and verified.     |
 //! | `Community` | Author Ed25519 signature required and verified.     |
 //! | `Blocked`   | Hard-rejected; `ToolBlocked` error returned.        |
+//!
+//! Independently of tier, only `Core` may declare `risk_class = "interactive"`
+//! (auto-allowed under every approval mode) or `executor.type = "privileged"`.
 
 use agentos_types::{AgentOSError, ToolManifest, TrustTier};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -76,6 +79,36 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
     if manifest.executor.executor_type == agentos_types::ExecutorType::Privileged
         && (info.trust_tier != TrustTier::Core
             || manifest.risk_class != agentos_types::RiskClass::ControlPlane)
+    {
+        return Err(AgentOSError::ToolBlocked {
+            name: info.name.clone(),
+        });
+    }
+
+    // `Interactive` is the only risk class `ApprovalMode::decide` short-circuits
+    // to `Allow` under EVERY mode, `deny` included — prompting a human to approve
+    // a request *for* human input is circular. That makes it a stronger bypass
+    // than `ReadonlyScoped`, so it is reserved for distribution-trusted tools.
+    // Without this gate a Community `tool.toml` declaring `risk_class =
+    // "interactive"` and self-signed with its own generated key (there is no
+    // trusted-key allowlist) would be auto-approved on every call, and the
+    // install prompt never shows risk_class for the operator to catch it.
+    if manifest.risk_class == agentos_types::RiskClass::Interactive
+        && info.trust_tier != TrustTier::Core
+    {
+        return Err(AgentOSError::ToolBlocked {
+            name: info.name.clone(),
+        });
+    }
+
+    // `WriteAgentState` is Core-only for the same reason, one step further: it
+    // is auto-allowed under the default `ask_edit` AND it suppresses the legacy
+    // `risk_classifier` backstop in the task executor. A self-signed Community
+    // manifest claiming it would run writes unattended on both counts. Every
+    // shipped user of the class is a `tools/core` manifest, so this costs
+    // nothing today and closes the self-declaration path.
+    if manifest.risk_class == agentos_types::RiskClass::WriteAgentState
+        && info.trust_tier != TrustTier::Core
     {
         return Err(AgentOSError::ToolBlocked {
             name: info.name.clone(),
@@ -246,6 +279,8 @@ mod tests {
     fn make_manifest(trust_tier: TrustTier) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: "test-tool".into(),
                 version: "1.0.0".into(),
                 description: "Test".into(),
@@ -391,6 +426,64 @@ mod tests {
         let sig = SigningKey::from_bytes(&seed).sign(&payload);
         m.manifest.signature = Some(hex::encode(sig.to_bytes()));
         assert!(verify_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn write_agent_state_risk_class_requires_core_tier() {
+        // Core + WriteAgentState → accepted (every `tools/core` user).
+        let mut m = make_manifest(TrustTier::Core);
+        m.risk_class = RiskClass::WriteAgentState;
+        assert!(verify_manifest(&m).is_ok());
+
+        // Community + WriteAgentState → rejected even with a valid
+        // self-signature. The class is auto-allowed under the default
+        // `ask_edit` and suppresses the executor's legacy risk backstop, so a
+        // third-party manifest must never be able to claim it.
+        let seed = [13u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        m.risk_class = RiskClass::WriteAgentState;
+        let sig = signing_key.sign(&signing_payload(&m));
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolBlocked { .. }
+        ));
+    }
+
+    #[test]
+    fn interactive_risk_class_requires_core_tier() {
+        // Core + Interactive → accepted (this is `ask-user`).
+        let mut m = make_manifest(TrustTier::Core);
+        m.risk_class = RiskClass::Interactive;
+        assert!(verify_manifest(&m).is_ok());
+
+        // Community + Interactive → rejected even with a valid self-signature.
+        // `Interactive` is auto-allowed under every approval mode including
+        // `deny`, so a third-party manifest must never be able to claim it.
+        let seed = [11u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        m.risk_class = RiskClass::Interactive;
+        let sig = signing_key.sign(&signing_payload(&m));
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolBlocked { .. }
+        ));
+
+        // Verified tier is not exempt either.
+        let mut m = make_manifest(TrustTier::Verified);
+        m.manifest.author_pubkey = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        m.risk_class = RiskClass::Interactive;
+        let sig = signing_key.sign(&signing_payload(&m));
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolBlocked { .. }
+        ));
     }
 
     #[test]

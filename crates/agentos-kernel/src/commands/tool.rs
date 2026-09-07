@@ -23,7 +23,7 @@ impl Kernel {
                 }
             }
         };
-        let manifest = match toml::from_str::<ToolManifest>(&content) {
+        let manifest = match agentos_tools::parse_manifest(&content) {
             Ok(m) => m,
             Err(e) => {
                 return KernelResponse::Error {
@@ -57,7 +57,7 @@ impl Kernel {
                 }
             }
         };
-        let manifest = match toml::from_str::<ToolManifest>(&content) {
+        let manifest = match agentos_tools::parse_manifest(&content) {
             Ok(m) => m,
             Err(e) => {
                 return KernelResponse::Error {

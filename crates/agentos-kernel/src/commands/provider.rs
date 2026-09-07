@@ -154,6 +154,13 @@ impl Kernel {
     /// List all available LLM providers: built-in (native) providers and
     /// catalog providers loaded from `config/providers.toml`.
     pub(crate) async fn cmd_list_providers(&self) -> KernelResponse {
+        KernelResponse::ProviderList(self.provider_entries())
+    }
+
+    /// Built-in + catalog providers as JSON entries. Shared by the bus
+    /// `ListProviders` command and the REST `GET /api/v1/providers` handler so
+    /// both surfaces see the same catalog.
+    pub fn provider_entries(&self) -> Vec<Value> {
         let mut entries = Vec::new();
 
         // Built-in providers
@@ -162,6 +169,8 @@ impl Kernel {
             ("anthropic", "Anthropic", "ANTHROPIC_API_KEY"),
             ("gemini", "Gemini", "GEMINI_API_KEY"),
             ("ollama", "Ollama (local)", ""),
+            // Authenticated through the host `claude` CLI, not an API key.
+            ("claude-code", "Claude Code (local CLI)", ""),
         ];
 
         for (name, display_name, api_key_env) in &builtins {
@@ -213,7 +222,7 @@ impl Kernel {
             }));
         }
 
-        KernelResponse::ProviderList(entries)
+        entries
     }
 
     /// Update the base URL for a named catalog provider, persisting the change
@@ -521,6 +530,50 @@ fn validate_entry(entry: &CatalogEntry) -> Result<(), String> {
     }
     if let Some(map) = &entry.extra_headers {
         validate_extra_headers(map)?;
+    }
+
+    // An absolute URL that will be fetched with the API key attached, so it
+    // gets the same SSRF treatment as base_url.
+    if let Some(template) = &entry.status_url_template {
+        reject_control_chars("status_url_template", template)?;
+        if !template.contains("{id}") {
+            return Err("status_url_template must contain the '{id}' placeholder".into());
+        }
+        validate_base_url_target(&template.replace("{id}", "probe"), allow_private)?;
+    }
+
+    // Timeouts reach `reqwest::ClientBuilder` verbatim. Zero is not "no
+    // timeout" there — it fails every request instantly — and an enormous
+    // value means an inference can hang forever holding a concurrency permit.
+    for (label, value) in [
+        ("read_timeout_secs", entry.read_timeout_secs),
+        ("request_timeout_secs", entry.request_timeout_secs),
+    ] {
+        if let Some(secs) = value {
+            if !(1..=3600).contains(&secs) {
+                return Err(format!(
+                    "{label} must be between 1 and 3600 seconds (got {secs})"
+                ));
+            }
+        }
+    }
+    // A read timeout above the total timeout can never fire, so the setting
+    // would silently do nothing.
+    if let (Some(read), Some(total)) = (entry.read_timeout_secs, entry.request_timeout_secs) {
+        if read > total {
+            return Err(format!(
+                "read_timeout_secs ({read}) cannot exceed request_timeout_secs ({total})"
+            ));
+        }
+    }
+    // Reject bad request-body extras here rather than warning at adapter-build
+    // time, which happens far from the operator who typed the command.
+    if let Some(raw) = &entry.extra_body_json {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(v) if v.is_object() => {}
+            Ok(_) => return Err("extra_body_json must be a JSON object".into()),
+            Err(e) => return Err(format!("extra_body_json is not valid JSON: {e}")),
+        }
     }
     Ok(())
 }

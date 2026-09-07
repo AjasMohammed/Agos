@@ -1,12 +1,13 @@
-tags = ["meta", "read", "fs"]
+tags = ["read", "fs"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "system-open-files"
 version     = "1.0.0"
-risk_class  = "readonly_external"
 description = "List host-wide open files and file descriptors mapped to processes via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
 
 [manifest.usage_hints]
 use_for = ["Finding which process has a file open", "Listing all files opened by a specific PID"]

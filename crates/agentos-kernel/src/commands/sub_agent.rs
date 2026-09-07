@@ -310,6 +310,9 @@ impl Kernel {
             spawner_agent_id: None,
             tool_categories: effective_tool_categories,
             disable_tool_scoping: false,
+            // Inherit the parent's causal depth so a spawned sub-agent cannot
+            // restart the event-trigger chain counter at 0.
+            chain_depth: parent_task.event_chain_depth(),
         };
 
         self.scheduler.enqueue(child_task).await;
@@ -508,6 +511,7 @@ mod tests {
             spawner_agent_id: None,
             tool_categories: None,
             disable_tool_scoping: false,
+            chain_depth: 0,
         }
     }
 

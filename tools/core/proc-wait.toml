@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name = "proc-wait"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Wait for a managed process to exit (with timeout)"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "readonly_scoped"
+category    = "process"
 
 [capabilities_required]
 permissions = ["proc.wait:r"]

@@ -29,9 +29,9 @@ pub struct ApiChatSessionSummary {
 
 /// Request body for `POST /api/v1/chat/sessions`.
 ///
-/// `first_message` is optional in the API contract, but the backing store only
-/// exposes `create_session_with_first_message`. When omitted, the session is
-/// created with an empty placeholder first message (see handler/kernel impl).
+/// `first_message` is optional: omit it (or send blank) to open an empty
+/// session, which is what a client that creates the session on the first send
+/// wants — the send/stream endpoints persist the user turn themselves.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateChatSessionRequest {
     /// Agent to bind the new session to.
@@ -40,7 +40,7 @@ pub struct CreateChatSessionRequest {
     /// NULL on create; rename via PATCH to set it).
     #[serde(default)]
     pub title: Option<String>,
-    /// Optional first user message. If omitted, an empty placeholder is stored.
+    /// Optional first user message. Missing or blank means an empty session.
     #[serde(default)]
     pub first_message: Option<String>,
 }

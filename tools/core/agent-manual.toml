@@ -1,4 +1,5 @@
 tags = ["meta", "read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-manual"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Query structured AgentOS documentation: tools, permissions, memory, events, commands, errors. Use {\"section\": \"index\"} to see all sections."
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["how does this system work", "read the docs", "explain a subsystem"]
 
 [capabilities_required]
 permissions = []

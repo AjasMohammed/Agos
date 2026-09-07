@@ -31,6 +31,7 @@ pub mod notifications;
 pub mod pipelines;
 pub mod plugins;
 pub mod prefs;
+pub mod providers;
 pub mod roles;
 pub mod schedules;
 pub mod scratchpad;
@@ -44,6 +45,7 @@ pub mod tools;
 pub mod webhooks;
 pub mod webhooks_admin;
 pub mod workflows;
+pub mod workspace_grants;
 
 use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;

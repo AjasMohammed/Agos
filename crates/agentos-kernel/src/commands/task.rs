@@ -66,11 +66,11 @@ impl Kernel {
         }
 
         let task_id = TaskID::new();
-        let task_timeout = if autonomous {
-            Duration::from_secs(self.config.kernel.autonomous_mode.task_timeout_secs)
-        } else {
-            Duration::from_secs(self.config.kernel.default_task_timeout_secs)
-        };
+        let task_timeout = effective_task_timeout(
+            autonomous,
+            self.config.kernel.default_task_timeout_secs,
+            self.config.kernel.autonomous_mode.task_timeout_secs,
+        );
         let capability_token = match self.capability_engine.issue_token(
             task_id,
             agent.id,
@@ -125,6 +125,8 @@ impl Kernel {
             spawner_agent_id: None,
             tool_categories: None,
             disable_tool_scoping: false,
+            // Operator/CLI-originated root task.
+            chain_depth: 0,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -203,15 +205,15 @@ impl Kernel {
         );
         self.otel.adjust_active_tasks(1);
         let result = self.execute_task_sync(&task, &trace_id, &task_span).await;
+        // Terminal handling mirrors the background `execute_task` path: the shared
+        // `complete_task_*` helpers own the state transition, checkout release,
+        // subscription cleanup, episodic write, stored result, audit rows, WS
+        // events, notification, work-item close and failure-streak breaker. They
+        // are idempotent w.r.t. state (`update_state_if_not_terminal`) and are the
+        // ONLY release/cleanup site now — do not re-add local copies here.
         match result {
             Ok(task_result) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
-                self.scheduler
-                    .update_state_if_not_terminal(&task.id, TaskState::Complete)
-                    .await
-                    .ok();
-                self.cleanup_task_subscriptions(&task.id).await;
-                self.release_task_checkout(&task.id).await;
                 self.trace_collector
                     .finish_task(&task.id, "Complete", chrono::Utc::now())
                     .await;
@@ -219,6 +221,9 @@ impl Kernel {
                 task_span.set_i64_attribute("task.iterations", task_result.iterations as i64);
                 self.otel
                     .record_task_metric(&task.agent_id.to_string(), "complete", duration_ms);
+                self.apply_memory_outcome(&task, true, trace_id).await;
+                self.complete_task_success(&task, &task_result, duration_ms, trace_id)
+                    .await;
                 self.otel.adjust_active_tasks(-1);
                 KernelResponse::Success {
                     data: Some(serde_json::json!({
@@ -230,63 +235,75 @@ impl Kernel {
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let msg = e.to_string();
-                let is_waiting = self
-                    .scheduler
-                    .get_task(&task.id)
-                    .await
-                    .map(|t| t.state == TaskState::Waiting)
-                    .unwrap_or(false);
-                let paused_by_message = msg.to_ascii_lowercase().starts_with("task paused:");
-                if is_waiting || paused_by_message {
+                let task_state = self.scheduler.get_task(&task.id).await.map(|t| t.state);
+                let paused = is_pause_outcome(task_state, &msg);
+                if paused {
+                    // `complete_task_failure` parks a Waiting task and returns without
+                    // transitioning it, so the Waiting state has to be set here for the
+                    // "Task paused:"-by-message case the executor never transitioned.
                     self.scheduler
                         .update_state_if_not_terminal(&task.id, TaskState::Waiting)
                         .await
                         .ok();
-                    self.trace_collector
-                        .finish_task(&task.id, "Waiting", chrono::Utc::now())
-                        .await;
-                    task_span.set_string_attribute("task.status", "waiting");
-                    task_span.record_error(&msg);
-                    self.otel.record_task_metric(
-                        &task.agent_id.to_string(),
-                        "waiting",
-                        duration_ms,
-                    );
-                    self.otel.adjust_active_tasks(-1);
-                    return KernelResponse::Success {
+                }
+                // Pair the `TaskStart` hook the executor fired — without this a failed
+                // CLI task leaves hooks observing an unterminated task.
+                self.hook_registry
+                    .fire(&agentos_types::HookEvent::TaskEnd {
+                        task_id: task.id,
+                        agent_id: task.agent_id,
+                        success: false,
+                    })
+                    .await;
+                let status = if paused { "Waiting" } else { "Failed" };
+                let metric = if paused { "waiting" } else { "failed" };
+                self.trace_collector
+                    .finish_task(&task.id, status, chrono::Utc::now())
+                    .await;
+                task_span.set_string_attribute("task.status", metric);
+                task_span.record_error(&msg);
+                self.otel
+                    .record_task_metric(&task.agent_id.to_string(), metric, duration_ms);
+                if !skips_memory_reinforcement(task_state, &msg) {
+                    // Only a genuine failure reinforces: an unfinished task has not
+                    // finished, so scoring its procedures would punish work still in
+                    // flight.
+                    self.apply_memory_outcome(&task, false, trace_id).await;
+                }
+                // Parks on Waiting/Suspended, otherwise records the failure streak and
+                // runs the full terminal-failure path.
+                self.complete_task_failure(&task, e, duration_ms, trace_id)
+                    .await;
+                self.otel.adjust_active_tasks(-1);
+                if paused {
+                    KernelResponse::Success {
                         data: Some(serde_json::json!({
                             "task_id": task.id.to_string(),
                             "status": "paused",
                             "reason": msg,
                         })),
-                    };
+                    }
+                } else {
+                    KernelResponse::Error { message: msg }
                 }
-
-                self.scheduler
-                    .update_state_if_not_terminal(&task.id, TaskState::Failed)
-                    .await
-                    .ok();
-                self.cleanup_task_subscriptions(&task.id).await;
-                self.release_task_checkout(&task.id).await;
-                self.trace_collector
-                    .finish_task(&task.id, "Failed", chrono::Utc::now())
-                    .await;
-                task_span.set_string_attribute("task.status", "failed");
-                task_span.record_error(&msg);
-                self.otel
-                    .record_task_metric(&task.agent_id.to_string(), "failed", duration_ms);
-                self.otel.adjust_active_tasks(-1);
-                KernelResponse::Error { message: msg }
             }
         }
     }
 
     /// Release a task's atomic checkout. Best-effort: a store error is logged,
     /// not propagated (the lease sweep is the backstop), and releasing a
-    /// never-claimed task is a harmless no-op.
-    pub(crate) async fn release_task_checkout(&self, task_id: &TaskID) {
-        if let Err(e) = self.task_checkout_store.release(task_id).await {
-            tracing::warn!(task_id = %task_id, error = %e, "Task checkout release failed");
+    /// never-claimed task is a harmless no-op. Owner-scoped — a release only
+    /// succeeds for the agent that holds the claim, so a stale caller cannot
+    /// unlock a task another owner has since taken over.
+    pub(crate) async fn release_task_checkout(&self, task_id: &TaskID, owner: &AgentID) {
+        match self.task_checkout_store.release(task_id, owner).await {
+            Ok(false) => {
+                tracing::debug!(task_id = %task_id, owner = %owner, "Task checkout release: not owned by this agent");
+            }
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Task checkout release failed");
+            }
         }
     }
 
@@ -352,6 +369,9 @@ impl Kernel {
     pub(crate) async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
         // Fetch the task before transitioning state so we have prompt + parent info.
         let task_snapshot = self.scheduler.get_task(&task_id).await;
+        // Kept separately: the snapshot is consumed by the notification arm below,
+        // and the owner-scoped checkout release still needs the owning agent.
+        let owner_agent_id = task_snapshot.as_ref().map(|t| t.agent_id);
         match self
             .scheduler
             .update_state(&task_id, TaskState::Cancelled)
@@ -395,7 +415,9 @@ impl Kernel {
                 // dispatch claim immediately rather than waiting for lock-TTL expiry.
                 // Idempotent no-ops when there is no linked item / claim.
                 self.complete_work_item_for_task(&task_id, false).await;
-                self.release_task_checkout(&task_id).await;
+                if let Some(owner) = owner_agent_id {
+                    self.release_task_checkout(&task_id, &owner).await;
+                }
                 // Cascade cancel to all registered sub-agent children.
                 let children = self.scheduler.get_children(&task_id).await;
                 for child_id in children {
@@ -559,6 +581,9 @@ impl Kernel {
             spawner_agent_id: Some(parent_task.agent_id),
             tool_categories: parent_task.tool_categories.clone(),
             disable_tool_scoping: false,
+            // Inherit the parent's causal depth so a delegated child cannot
+            // restart the event-trigger chain counter at 0.
+            chain_depth: parent_task.event_chain_depth(),
         };
 
         // Check for circular dependencies before enqueuing
@@ -573,8 +598,6 @@ impl Kernel {
             });
         }
 
-        let _ = self.scheduler.enqueue(child_task.clone()).await;
-
         // Register the dependency: parent waits on child.
         self.scheduler
             .add_dependency(parent_task.id, child_task.id)
@@ -586,6 +609,26 @@ impl Kernel {
         self.scheduler
             .register_child(parent_task.id, child_task.id)
             .await;
+
+        // Park the parent BEFORE the child becomes runnable. `add_dependency`
+        // alone never blocked anyone: the child's `complete_dependency` →
+        // `requeue(parent)` wake is a deliberate no-op unless the parent is
+        // already `Waiting` (see `TaskScheduler::requeue`), so a `Running`
+        // parent consumed the edge and never observed the result. Parking
+        // before `enqueue` closes the window in which a fast child could
+        // finish while the parent is still `Running`.
+        //
+        // A caller with no scheduler-registered task (the chat path's synthetic
+        // task, the MCP gateway) cannot be parked — it stays fire-and-forget and
+        // reports `queued` so the returned status is never a lie.
+        let parked = matches!(
+            self.scheduler
+                .update_state_if_not_terminal(&parent_task.id, TaskState::Waiting)
+                .await,
+            Ok(true)
+        );
+
+        let _ = self.scheduler.enqueue(child_task.clone()).await;
 
         // Emit TaskDelegated from the parent's perspective
         self.emit_event(
@@ -622,10 +665,24 @@ impl Kernel {
         )
         .await;
 
+        // `waiting_for_child` is the executor's signal to stop iterating (see
+        // `Kernel::parked_on_delegation`); the child's completion requeues us.
+        let (status, note) = if parked {
+            (
+                "waiting_for_child",
+                "You are paused until this child finishes; its output is delivered into your context and you resume automatically.",
+            )
+        } else {
+            (
+                "queued",
+                "Delegation is not blocking for this caller; poll with task-status.",
+            )
+        };
         Ok(serde_json::json!({
             "delegated_to": target_agent_name,
             "child_task_id": child_task.id.to_string(),
-            "status": "queued",
+            "status": status,
+            "note": note,
         }))
     }
 
@@ -699,6 +756,8 @@ impl Kernel {
             // Sub-agents inherit parent's allowlist (no widening allowed in this path).
             tool_categories: spawner_task.tool_categories.clone(),
             disable_tool_scoping: false,
+            // Inherit the spawner's causal depth (see handle_task_delegation).
+            chain_depth: spawner_task.event_chain_depth(),
         };
 
         let _ = self.scheduler.enqueue(child_task.clone()).await;
@@ -753,6 +812,22 @@ impl Kernel {
 
     /// Resume a task from its latest checkpoint.
     pub async fn cmd_resume_task(&self, task_id: TaskID) -> KernelResponse {
+        // 0. A task the scheduler is already driving must not be resumed. The
+        // checkout claim below is not sufficient on its own: a `Queued` task
+        // has no claim row yet, and a long-running one may have had its lease
+        // swept, so `try_claim` succeeds and the enqueue then runs a second
+        // concurrent loop over the same task and context.
+        if let Some(existing) = self.scheduler.get_task(&task_id).await {
+            if matches!(existing.state, TaskState::Running | TaskState::Queued) {
+                return KernelResponse::Error {
+                    message: format!(
+                        "Task '{task_id}' is already {:?}; resume refused",
+                        existing.state
+                    ),
+                };
+            }
+        }
+
         // 1. Load the latest checkpoint.
         let record = match self.checkpoint_store.get_latest(&task_id).await {
             Ok(Some(r)) => r,
@@ -808,7 +883,14 @@ impl Kernel {
             let registry = self.agent_registry.read().await;
             registry.compute_effective_permissions(&agent.id)
         };
-        let task_timeout = Duration::from_secs(self.config.kernel.default_task_timeout_secs);
+        // Resuming must not shrink the task's budget: an autonomous task keeps
+        // the autonomous timeout it was created with (matches `cmd_run_task`),
+        // otherwise a resumed 24h task died at the 1h interactive default.
+        let task_timeout = effective_task_timeout(
+            payload.task.autonomous,
+            self.config.kernel.default_task_timeout_secs,
+            self.config.kernel.autonomous_mode.task_timeout_secs,
+        );
         // Preserve the checkpointed token's tool/intent scoping — resuming must
         // never BROADEN a task's privileges (e.g. a narrowed delegated child
         // must stay narrowed). Only the expiry is refreshed. The permission set
@@ -845,7 +927,9 @@ impl Kernel {
             parent_task: payload.task.parent_task,
             reasoning_hints: payload.task.reasoning_hints,
             max_iterations: payload.task.max_iterations,
-            trigger_source: None,
+            // Resuming restores the SAME task: dropping these silently widened
+            // tool scoping and reset the event-trigger chain counter to 0.
+            trigger_source: payload.task.trigger_source,
             autonomous: payload.task.autonomous,
             parent_task_id: payload.task.parent_task_id,
             spawn_depth: payload.task.spawn_depth,
@@ -854,7 +938,8 @@ impl Kernel {
             thinking_level: payload.task.thinking_level,
             spawner_agent_id: payload.task.spawner_agent_id,
             tool_categories: payload.task.tool_categories,
-            disable_tool_scoping: false,
+            disable_tool_scoping: payload.task.disable_tool_scoping,
+            chain_depth: payload.task.chain_depth,
         };
 
         // 6. Restore context window from checkpoint. Upserts: the failure
@@ -873,25 +958,35 @@ impl Kernel {
         } else {
             resumed_task.timeout + std::time::Duration::from_secs(300)
         };
-        // Only `Ok(false)` (already owned) blocks the resume; `Ok(true)` (claimed)
-        // and `Err` (store hiccup — proceed best-effort) both continue.
-        if let Ok(false) = self
+        // A resume, unlike a first dispatch, has an existing owner by
+        // definition: the run that checkpointed it. So `Err` (store busy /
+        // locked) must REFUSE, not fall through — `cmd_run_task` proceeds
+        // best-effort on `Err` because a fresh task has no owner to collide
+        // with, and that reasoning does not carry over here.
+        let claim = self
             .task_checkout_store
             .try_claim(&task_id, &resumed_task.agent_id, lease)
-            .await
-        {
-            let owner = self
-                .task_checkout_store
-                .owner_of(&task_id)
-                .await
-                .ok()
-                .flatten();
-            tracing::info!(task_id = %task_id, ?owner, "Resume refused: task already checked out");
-            return KernelResponse::Error {
-                message: format!(
-                    "Task '{task_id}' is already owned by another agent; resume refused"
-                ),
+            .await;
+        if resume_claim_refused(&claim) {
+            let message = match claim {
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "Resume refused: checkout claim failed");
+                    format!(
+                        "Task '{task_id}' checkout claim failed ({e}); resume refused — retry once the store recovers"
+                    )
+                }
+                _ => {
+                    let owner = self
+                        .task_checkout_store
+                        .owner_of(&task_id)
+                        .await
+                        .ok()
+                        .flatten();
+                    tracing::info!(task_id = %task_id, ?owner, "Resume refused: task already checked out");
+                    format!("Task '{task_id}' is already owned by another agent; resume refused")
+                }
             };
+            return KernelResponse::Error { message };
         }
 
         // 8. Enqueue the task onto the run queue so the background
@@ -1049,6 +1144,8 @@ impl Kernel {
             spawner_agent_id: None,
             tool_categories: None,
             disable_tool_scoping: false,
+            // REST API-originated root task.
+            chain_depth: 0,
         };
 
         self.trace_collector
@@ -1059,6 +1156,57 @@ impl Kernel {
 
         Ok(task_id)
     }
+}
+
+/// True when a sync run's error means the task *parked* (awaiting an external
+/// decision) rather than failed terminally.
+///
+/// Mirrors the early-return guard in `complete_task_failure`: a parked task keeps
+/// its `Waiting` state and its checkout claim and must never be force-transitioned
+/// to `Failed`. `Suspended` (budget enforcement) is deliberately NOT a park here —
+/// `complete_task_failure` already returns early for it, and forcing `Waiting`
+/// would clobber the suspended state. The "task paused:" prefix is not re-spelled;
+/// `classify_task_failure` owns it.
+fn is_pause_outcome(state: Option<TaskState>, error_message: &str) -> bool {
+    matches!(state, Some(TaskState::Waiting))
+        || Kernel::classify_task_failure(error_message).0 == "task_paused"
+}
+
+/// True when a failed sync run must NOT feed negative memory reinforcement.
+///
+/// Wider than [`is_pause_outcome`]: a budget-`Suspended` task is resumable and
+/// unfinished for exactly the same reason a parked one is, so scoring its
+/// procedures punishes work still in flight. It is excluded from
+/// `is_pause_outcome` only because that predicate also drives the forced
+/// `Waiting` transition, which must never clobber `Suspended`.
+fn skips_memory_reinforcement(state: Option<TaskState>, error_message: &str) -> bool {
+    is_pause_outcome(state, error_message) || matches!(state, Some(TaskState::Suspended))
+}
+
+/// The wall-clock budget a task runs under. Shared by first dispatch and
+/// resume: a resumed autonomous task previously fell back to the interactive
+/// default, so a 24h task started dying after an hour.
+pub(crate) fn effective_task_timeout(
+    autonomous: bool,
+    default_secs: u64,
+    autonomous_secs: u64,
+) -> Duration {
+    Duration::from_secs(if autonomous {
+        autonomous_secs
+    } else {
+        default_secs
+    })
+}
+
+/// Resume refuses on anything but a clean claim.
+///
+/// A first dispatch (`cmd_run_task`) deliberately proceeds on `Err`: a brand-new
+/// task has no other owner to collide with, so a store hiccup must not deny all
+/// work. A resume is the opposite case — the task has an owner by definition
+/// (the run that checkpointed it), so an unreadable store means "unknown owner",
+/// which must not be treated as "no owner".
+pub(crate) fn resume_claim_refused(claim: &Result<bool, AgentOSError>) -> bool {
+    !matches!(claim, Ok(true))
 }
 
 /// Infer reasoning hints from a prompt's characteristics.
@@ -1089,5 +1237,100 @@ pub(crate) fn infer_reasoning_hints(prompt: &str) -> TaskReasoningHints {
         estimated_complexity: complexity,
         preferred_turns,
         preemption_sensitivity: preemption,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        effective_task_timeout, is_pause_outcome, resume_claim_refused, skips_memory_reinforcement,
+    };
+    use agentos_types::{AgentOSError, TaskState};
+
+    // `cmd_run_task` itself cannot be unit-tested in this crate — there is no
+    // in-process Kernel constructor (kernel boot is covered only by tests/e2e),
+    // so these cover the seam the sync path now branches on before handing off
+    // to the shared `complete_task_*` helpers.
+
+    #[test]
+    fn waiting_state_or_paused_error_parks() {
+        // Executor already transitioned to Waiting (escalation raised).
+        assert!(is_pause_outcome(Some(TaskState::Waiting), "boom"));
+        // Only the error message says so — the state must still be set to Waiting.
+        assert!(is_pause_outcome(
+            Some(TaskState::Running),
+            "Task paused: awaiting approval"
+        ));
+        assert!(is_pause_outcome(None, "task paused: awaiting approval"));
+    }
+
+    #[test]
+    fn suspended_and_ordinary_errors_are_not_parks() {
+        // Suspended must not be forced to Waiting — complete_task_failure owns it.
+        assert!(!is_pause_outcome(
+            Some(TaskState::Suspended),
+            "Task suspended: budget exceeded"
+        ));
+        assert!(!is_pause_outcome(
+            Some(TaskState::Running),
+            "LLM error: 500"
+        ));
+        assert!(!is_pause_outcome(
+            Some(TaskState::Running),
+            "tool call rejected: paused"
+        ));
+        assert!(!is_pause_outcome(None, ""));
+    }
+
+    #[test]
+    fn suspended_tasks_skip_negative_reinforcement() {
+        // Suspended is resumable and unfinished — punishing its procedures
+        // scores work still in flight.
+        assert!(skips_memory_reinforcement(
+            Some(TaskState::Suspended),
+            "Task suspended: budget exceeded"
+        ));
+        assert!(skips_memory_reinforcement(Some(TaskState::Waiting), "boom"));
+        // A genuine failure still reinforces.
+        assert!(!skips_memory_reinforcement(
+            Some(TaskState::Running),
+            "LLM error: 500"
+        ));
+    }
+
+    #[test]
+    fn resumed_autonomous_task_keeps_the_autonomous_timeout() {
+        // K-11: resume used the interactive default unconditionally, so a
+        // resumed 24h autonomous task timed out at 1h.
+        assert_eq!(
+            effective_task_timeout(true, 3600, 86_400),
+            std::time::Duration::from_secs(86_400)
+        );
+        assert_eq!(
+            effective_task_timeout(false, 3600, 86_400),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn resume_refuses_on_claim_error_and_on_existing_owner() {
+        // K-09: only `Ok(true)` may proceed. `Err` used to fall through to
+        // enqueue, double-running a task that already had an owner.
+        assert!(!resume_claim_refused(&Ok(true)));
+        assert!(resume_claim_refused(&Ok(false)));
+        assert!(resume_claim_refused(&Err(AgentOSError::StorageError(
+            "database is locked".to_string()
+        ))));
+    }
+
+    #[test]
+    fn delegation_park_reason_is_a_pause_not_a_failure() {
+        // MA-04: the executor's bail after parking on a delegated child must be
+        // classified as a pause, or `complete_task_failure` would terminally
+        // fail the parent instead of leaving it Waiting for the child's wake.
+        let reason = crate::kernel::Kernel::DELEGATION_PARK_REASON;
+        assert!(is_pause_outcome(Some(TaskState::Waiting), reason));
+        assert!(is_pause_outcome(None, reason));
+        assert!(skips_memory_reinforcement(Some(TaskState::Waiting), reason));
     }
 }

@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "context-memory-read"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Read your current context memory document — review it before deciding to update."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "memory"
+search_hints = ["what do I currently know about this user", "read my working notes"]
 
 [capabilities_required]
 permissions = ["memory.context:r"]

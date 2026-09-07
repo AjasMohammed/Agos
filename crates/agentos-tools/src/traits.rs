@@ -92,6 +92,37 @@ pub struct ToolExecutionContext {
     pub tool_categories: Option<Vec<String>>,
 }
 
+impl ToolExecutionContext {
+    /// Root directory that file tools resolve relative paths against:
+    /// `<data_dir>/agents/<agent name>/`.
+    ///
+    /// SECURITY: this is deliberately *not* `data_dir`. `data_dir` is the
+    /// kernel's own state directory — it holds `audit.db`, `api_keys.db`,
+    /// `chat.db` (every agent's conversations), `agents.json` (every agent's
+    /// permission set, reloaded at boot) and the task snapshots. An agent with
+    /// the default `fs.user_data:rw` grant must not reach any of it.
+    ///
+    /// The agent name comes from the registry snapshot. When no registry is
+    /// attached (direct tool calls in tests) the fallback is the agent's ID,
+    /// never bare `data_dir` — resolution fails closed.
+    ///
+    /// The directory is created if missing, since callers canonicalize it.
+    pub fn agent_files_dir(&self) -> Result<PathBuf, AgentOSError> {
+        let name = self
+            .agent_registry
+            .as_ref()
+            .and_then(|r| r.get_agent(&self.agent_id))
+            .map(|a| a.name)
+            .unwrap_or_else(|| self.agent_id.to_string());
+        let dir = self.data_dir.join("agents").join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: "file".into(),
+            reason: format!("Agent home directory error: {} ({})", dir.display(), e),
+        })?;
+        Ok(dir)
+    }
+}
+
 /// Percent-decode ASCII bytes in a path string (e.g. `%2e%2e` → `..`, `%2f` → `/`).
 ///
 /// Only decodes sequences that produce ASCII bytes (0x00–0x7F). Sequences that
@@ -139,12 +170,15 @@ fn contains_traversal(path: &Path) -> bool {
 
 /// Resolve a user-supplied path for file tools, respecting workspace paths.
 ///
+/// `root` is the agent's own home — [`ToolExecutionContext::agent_files_dir`] —
+/// not the kernel's `data_dir`. See that method for why.
+///
 /// Resolution rules:
 /// - The input is first percent-decoded (`%2e%2e` → `..`, `%2f` → `/`) and
 ///   then explicitly rejected if any component is `..` (defence-in-depth on
 ///   top of the canonicalize check the caller must still perform).
-/// - Relative path → joined onto `data_dir`.
-/// - Absolute path that starts with `data_dir` → used as-is.
+/// - Relative path → joined onto `root`.
+/// - Absolute path that starts with `root` → used as-is.
 /// - Absolute path that starts with a configured workspace prefix → used as-is.
 /// - Absolute path with no workspace match → `PermissionDenied`. (Earlier
 ///   builds silently remapped the path into `data_dir`; that hid failures
@@ -152,10 +186,10 @@ fn contains_traversal(path: &Path) -> bool {
 ///   <dir>` to give the agent real access instead.)
 ///
 /// The caller must still canonicalize the result and verify containment within
-/// `data_dir` or one of `workspace_paths`.
+/// `root` or one of `workspace_paths`.
 pub fn resolve_tool_path(
     path_str: &str,
-    data_dir: &Path,
+    root: &Path,
     workspace_paths: &[PathBuf],
 ) -> Result<PathBuf, agentos_types::AgentOSError> {
     // SECURITY: percent-decode first to catch %2e%2e (%2F, etc.)
@@ -175,7 +209,7 @@ pub fn resolve_tool_path(
     }
 
     if p.is_absolute() {
-        if p.starts_with(data_dir) {
+        if p.starts_with(root) {
             return Ok(p.to_path_buf());
         }
         for wp in workspace_paths {
@@ -191,7 +225,7 @@ pub fn resolve_tool_path(
             ),
         })
     } else {
-        Ok(data_dir.join(p))
+        Ok(root.join(p))
     }
 }
 

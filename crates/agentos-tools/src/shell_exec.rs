@@ -69,7 +69,9 @@ impl AgentTool for ShellExec {
             });
         }
 
-        let data_dir_str = context.data_dir.to_string_lossy().to_string();
+        // SECURITY: bind the agent's own home into the sandbox, never the kernel
+        // state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let data_dir_str = context.agent_files_dir()?.to_string_lossy().to_string();
 
         // Check if bwrap is available (at runtime)
         let bwrap_check = Command::new("bwrap").arg("--version").output().await;

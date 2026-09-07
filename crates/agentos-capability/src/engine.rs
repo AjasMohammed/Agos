@@ -1,7 +1,7 @@
 use crate::token::compute_signature;
 use agentos_types::*;
 use rand::RngCore;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Duration;
 use zeroize::Zeroize;
@@ -15,6 +15,19 @@ pub struct CapabilityEngine {
     signing_key: [u8; 32],
     /// Per-agent permission sets. Key is AgentID.
     agent_permissions: RwLock<HashMap<AgentID, PermissionSet>>,
+    /// Agents whose capability tokens are no longer honoured.
+    ///
+    /// Permissions are HMAC-signed *into* each token, so dropping an entry from
+    /// `agent_permissions` cannot invalidate a token already in flight — before
+    /// this set, `revoke_agent` removed a key nothing ever inserted and every
+    /// outstanding token stayed valid until its own expiry. The sole caller,
+    /// `agent remove`, is permanent (identity revocation is key rotation, not
+    /// capability revocation), and AgentIDs are never reissued, so entries are
+    /// kept for the life of the process.
+    ///
+    /// Consulted on all three token paths — `issue_token`, `scope_for_child`,
+    /// and `validate_intent` — so a revoked agent can neither mint nor spend.
+    revoked_agents: RwLock<HashSet<AgentID>>,
 }
 
 impl Drop for CapabilityEngine {
@@ -31,6 +44,7 @@ impl CapabilityEngine {
         Self {
             signing_key,
             agent_permissions: RwLock::new(HashMap::new()),
+            revoked_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -39,6 +53,7 @@ impl CapabilityEngine {
         Self {
             signing_key,
             agent_permissions: RwLock::new(HashMap::new()),
+            revoked_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -122,6 +137,16 @@ impl CapabilityEngine {
     /// This effectively invalidates any tokens issued for the agent since they reference
     /// permissions that no longer exist.
     pub fn revoke_agent(&self, agent_id: &AgentID) {
+        {
+            let mut revoked = self.revoked_agents.write().unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "Recovered from poisoned lock in capability engine revocation path"
+                );
+                error.into_inner()
+            });
+            revoked.insert(*agent_id);
+        }
         let mut map = self.agent_permissions.write().unwrap_or_else(|error| {
             tracing::warn!(
                 error = %error,
@@ -130,6 +155,20 @@ impl CapabilityEngine {
             error.into_inner()
         });
         map.remove(agent_id);
+    }
+
+    /// Whether `agent_id` has been revoked. Shared by the three token paths.
+    fn is_revoked(&self, agent_id: &AgentID) -> bool {
+        self.revoked_agents
+            .read()
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "Recovered from poisoned lock in capability engine revocation path"
+                );
+                error.into_inner()
+            })
+            .contains(agent_id)
     }
 
     /// Get an agent's current permissions.
@@ -161,6 +200,15 @@ impl CapabilityEngine {
         effective_permissions: PermissionSet,
         ttl: Duration,
     ) -> Result<CapabilityToken, AgentOSError> {
+        // Refuse at mint time rather than letting `validate_intent` reject the
+        // token at first use — otherwise removing an agent surfaces as a
+        // confusing mid-task `InvalidToken` instead of a dispatch-time failure.
+        if self.is_revoked(&agent_id) {
+            return Err(AgentOSError::InvalidToken {
+                reason: "Agent has been revoked".into(),
+            });
+        }
+
         let issued_at = chrono::Utc::now();
         let expires_at = issued_at
             + chrono::Duration::from_std(ttl).map_err(|_| AgentOSError::KernelError {
@@ -202,7 +250,17 @@ impl CapabilityEngine {
             return Err(AgentOSError::TokenExpired);
         }
 
-        // 3. Check target tool is allowed (if the target is a tool)
+        // 3. Reject tokens belonging to a revoked agent. The signature above only
+        // proves the token was minted by this kernel, not that the agent is still
+        // trusted — without this, `agent remove` left every outstanding token
+        // usable until it expired on its own.
+        if self.is_revoked(&token.agent_id) {
+            return Err(AgentOSError::InvalidToken {
+                reason: "Agent has been revoked".into(),
+            });
+        }
+
+        // 4. Check target tool is allowed (if the target is a tool)
         if let IntentTarget::Tool(tool_id) = &intent.target {
             if !token.allowed_tools.contains(tool_id) {
                 return Err(AgentOSError::PermissionDenied {
@@ -212,7 +270,7 @@ impl CapabilityEngine {
             }
         }
 
-        // 4. Check intent type is allowed
+        // 5. Check intent type is allowed
         let intent_flag = match intent.intent_type {
             IntentType::Read => IntentTypeFlag::Read,
             IntentType::Write => IntentTypeFlag::Write,
@@ -234,7 +292,7 @@ impl CapabilityEngine {
             });
         }
 
-        // 5. Check required permissions
+        // 6. Check required permissions
         for (resource, op) in required_permissions {
             if !token.permissions.check(resource, *op) {
                 return Err(AgentOSError::PermissionDenied {
@@ -312,11 +370,26 @@ impl CapabilityEngine {
             return Err(AgentOSError::TokenExpired);
         }
 
-        // 3. Intersect parent permissions with what the child requested.
+        // 3. Reject a revoked parent. Signature + expiry only prove the token
+        //    was minted by this kernel and is still in date — a removed agent
+        //    with a task still in flight would otherwise mint a fully valid
+        //    child token carrying its intersected permissions.
+        if self.is_revoked(&parent_token.agent_id) {
+            tracing::warn!(
+                parent_task_id = %parent_token.task_id,
+                parent_agent_id = %parent_token.agent_id,
+                "scope_for_child: parent agent has been revoked"
+            );
+            return Err(AgentOSError::InvalidToken {
+                reason: "Parent agent has been revoked".into(),
+            });
+        }
+
+        // 4. Intersect parent permissions with what the child requested.
         //    This is the core security invariant: child ⊆ parent, always.
         let intersection = parent_token.permissions.intersect(requested);
 
-        // 4. Reject empty intersection — child asked for nothing the parent holds.
+        // 5. Reject empty intersection — child asked for nothing the parent holds.
         if intersection.is_empty() {
             tracing::warn!(
                 parent_task_id = %parent_token.task_id,
@@ -338,7 +411,7 @@ impl CapabilityEngine {
             "scope_for_child: issuing scoped child token"
         );
 
-        // 5. Issue a fresh token scoped to the child's own task/agent IDs.
+        // 6. Issue a fresh token scoped to the child's own task/agent IDs.
         //    Using child_task_id (not parent) prevents scheduler entry collision.
         self.issue_token(
             child_task_id,
@@ -475,6 +548,114 @@ mod tests {
         };
         let result = engine.validate_intent(&token, &intent, &[]);
         assert!(matches!(result, Err(AgentOSError::TokenExpired)));
+    }
+
+    #[test]
+    fn revoked_agent_token_is_refused_even_though_it_still_verifies() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let intent = IntentMessage {
+            id: MessageID::new(),
+            sender_token: token.clone(),
+            intent_type: IntentType::Read,
+            target: IntentTarget::Kernel,
+            payload: SemanticPayload {
+                schema: "Test".to_string(),
+                data: serde_json::Value::Null,
+            },
+            context_ref: ContextID::new(),
+            priority: 0,
+            timeout_ms: 1000,
+            trace_id: TraceID::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        assert!(engine.validate_intent(&token, &intent, &[]).is_ok());
+
+        engine.revoke_agent(&agent_id);
+
+        // The signature still verifies and the token has not expired — revocation
+        // is the only thing standing between a removed agent and its live tokens.
+        assert!(engine.verify_signature(&token));
+        assert!(chrono::Utc::now() < token.expires_at);
+        assert!(matches!(
+            engine.validate_intent(&token, &intent, &[]),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
+    }
+
+    #[test]
+    fn revoked_agent_cannot_mint_a_child_token() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".into(), true, false, false, None);
+
+        let parent_token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms.clone(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let scope = |token: &CapabilityToken| {
+            engine.scope_for_child(
+                token,
+                TaskID::new(),
+                AgentID::new(),
+                &perms,
+                Duration::from_secs(300),
+            )
+        };
+
+        assert!(scope(&parent_token).is_ok());
+
+        engine.revoke_agent(&agent_id);
+
+        // Signature and expiry both still pass — revocation is the only thing
+        // stopping an in-flight task of a removed agent from minting children.
+        assert!(engine.verify_signature(&parent_token));
+        assert!(chrono::Utc::now() < parent_token.expires_at);
+        assert!(matches!(
+            scope(&parent_token),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
+    }
+
+    #[test]
+    fn revoked_agent_cannot_be_issued_a_fresh_token() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        engine.revoke_agent(&agent_id);
+
+        // Fail at dispatch, not at first use — a token minted here would only
+        // blow up later as a confusing mid-task InvalidToken.
+        assert!(matches!(
+            engine.issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            ),
+            Err(AgentOSError::InvalidToken { .. })
+        ));
     }
 
     #[test]

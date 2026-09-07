@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "poll-agent"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Non-blocking check on spawned sub-agent status. Returns current state, iteration count, last tool call, and progress summary without blocking the parent task. Use this to monitor long-running children progressively."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
 capability_tags = ["multi-agent", "monitoring", "coordination", "streaming", "sub-task"]
 
 [capabilities_required]

@@ -1,4 +1,5 @@
-tags = ["meta", "exec"]
+tags = ["exec"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "spawn-agent"
@@ -6,7 +7,8 @@ version     = "1.0.0"
 description = "Spawn a sub-agent to handle a specific subtask. The child runs independently and its result is injected back into your context when complete. Returns the task_id to use with await-agents."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "control_plane"
+category    = "agent"
+search_hints = ["delegate part of this to a sub-agent", "fan out work", "start a helper agent"]
 
 [capabilities_required]
 permissions = ["agent.spawn:x"]

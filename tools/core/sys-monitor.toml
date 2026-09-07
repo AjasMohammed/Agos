@@ -1,12 +1,14 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "sys-monitor"
 version     = "1.0.0"
-risk_class  = "readonly_scoped"
 description = "Return live system monitoring stats (CPU load, memory usage, process counts) via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
+search_hints = ["cpu load", "memory usage", "disk space", "how busy is the machine"]
 
 [manifest.usage_hints]
 use_for = ["Checking current CPU/memory load", "Lightweight host health snapshot"]

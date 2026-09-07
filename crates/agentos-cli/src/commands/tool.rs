@@ -203,8 +203,8 @@ pub async fn handle_offline(command: ToolCommands) -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("Seed must be 32 bytes"))?;
 
             let content = std::fs::read_to_string(&manifest)?;
-            let mut tool_manifest: ToolManifest =
-                toml::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
+            let mut tool_manifest: ToolManifest = agentos_tools::parse_manifest(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
 
             tool_manifest.manifest.author_pubkey = Some(pubkey_hex);
             let sig_hex = sign_manifest(&tool_manifest, &seed_array);
@@ -226,8 +226,8 @@ pub async fn handle_offline(command: ToolCommands) -> anyhow::Result<()> {
 
         ToolCommands::Verify { manifest } => {
             let content = std::fs::read_to_string(&manifest)?;
-            let tool_manifest: ToolManifest =
-                toml::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
+            let tool_manifest: ToolManifest = agentos_tools::parse_manifest(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
 
             let name = &tool_manifest.manifest.name;
             let tier = format!("{:?}", tool_manifest.manifest.trust_tier).to_lowercase();
@@ -432,7 +432,7 @@ async fn cmd_add(
 
     // Parse and verify the manifest locally BEFORE showing info to the user.
     // This prevents displaying a "looks legitimate" prompt for an unsigned tool.
-    let manifest: ToolManifest = toml::from_str(manifest_toml)
+    let manifest: ToolManifest = agentos_tools::parse_manifest(manifest_toml)
         .map_err(|e| anyhow::anyhow!("Invalid manifest from registry: {}", e))?;
 
     verify_manifest(&manifest)
@@ -503,8 +503,8 @@ async fn cmd_publish(
     registry: Option<&str>,
 ) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(manifest_path)?;
-    let mut manifest: ToolManifest =
-        toml::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
+    let mut manifest: ToolManifest = agentos_tools::parse_manifest(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
 
     // If a key file is provided, sign the manifest before publishing.
     if let Some(key) = key_path {

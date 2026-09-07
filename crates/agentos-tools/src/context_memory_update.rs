@@ -51,10 +51,10 @@ impl AgentTool for ContextMemoryUpdateTool {
             .map(|s| s.to_string());
 
         // Return a kernel action for the dispatch loop to handle.
-        // Write-own-only: agent_id is taken from the execution context, not the payload.
+        // Write-own-only: the kernel resolves the target agent from the
+        // executing task, so no agent id travels in the envelope.
         Ok(serde_json::json!({
             "_kernel_action": "context_memory_update",
-            "agent_id": context.agent_id.to_string(),
             "content": content,
             "reason": reason,
         }))

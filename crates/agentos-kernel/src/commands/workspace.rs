@@ -19,12 +19,20 @@ impl Kernel {
         &self,
         agent_name: &str,
     ) -> Result<AgentID, KernelResponse> {
+        let registry = self.agent_registry.read().await;
+        // A UUID still has to name a registered agent. Accepting it unchecked
+        // wrote a grant that `list_for_agent` could never match — silent no-op
+        // folder access that looks live in the list, and that permanently
+        // occupies the (path, agent) slot in the unique index.
         if let Ok(parsed) = agent_name.parse::<AgentID>() {
-            return Ok(parsed);
+            return registry
+                .get_by_id(&parsed)
+                .map(|a| a.id)
+                .ok_or(KernelResponse::Error {
+                    message: format!("Agent not found: {agent_name}"),
+                });
         }
-        self.agent_registry
-            .read()
-            .await
+        registry
             .get_by_name(agent_name)
             .map(|a| a.id)
             .ok_or(KernelResponse::Error {
@@ -32,11 +40,18 @@ impl Kernel {
             })
     }
 
+    /// `source` / `granted_by` record WHO created the grant — `("bus",
+    /// "local-cli")` for the CLI, `("api", "<key name>")` for the REST surface.
+    /// Handing out host filesystem access is exactly the event where "a remote
+    /// key did this" and "someone typed it at a terminal" must not look alike
+    /// in the audit log.
     pub(crate) async fn cmd_grant_workspace(
         &self,
         path: PathBuf,
         agent_name: Option<String>,
         mode: String,
+        source: &str,
+        granted_by: &str,
     ) -> KernelResponse {
         let parsed_mode = match WorkspaceGrantMode::parse(&mode) {
             Ok(m) => m,
@@ -55,7 +70,7 @@ impl Kernel {
         };
         match self
             .workspace_grants
-            .grant(&path, agent_id, parsed_mode, "bus", "local-cli")
+            .grant(&path, agent_id, parsed_mode, source, granted_by)
         {
             Ok(grant) => {
                 self.audit_log(AuditEntry {
@@ -89,6 +104,7 @@ impl Kernel {
         &self,
         path: PathBuf,
         agent_name: Option<String>,
+        revoked_by: &str,
     ) -> KernelResponse {
         let agent_id = match agent_name.as_deref() {
             Some(name) => match self.resolve_agent_for_workspace(name).await {
@@ -99,6 +115,12 @@ impl Kernel {
         };
         match self.workspace_grants.revoke(&path, agent_id.as_ref()) {
             Ok(count) => {
+                // A revoke that matched nothing is not a revocation. Auditing it
+                // anyway filled the log with `WorkspaceRevoked {count: 0}` for
+                // paths that had no grant, which reads as access being removed.
+                if count == 0 {
+                    return KernelResponse::WorkspaceGrantRevoked { count };
+                }
                 self.audit_log(AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: TraceID::new(),
@@ -109,6 +131,7 @@ impl Kernel {
                     details: serde_json::json!({
                         "path": path.to_string_lossy(),
                         "count": count,
+                        "revoked_by": revoked_by,
                     }),
                     severity: AuditSeverity::Info,
                     reversible: false,

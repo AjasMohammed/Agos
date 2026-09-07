@@ -27,6 +27,9 @@ pub struct TaskScheduler {
     state_store: Option<Arc<KernelStateStore>>,
     /// Maps parent task IDs to their spawned child task IDs (for cascade-cancel).
     child_map: RwLock<HashMap<TaskID, Vec<TaskID>>>,
+    /// Failure reason per failed task (first line of the error chain).
+    /// Persisted alongside the task row so it survives restarts.
+    failure_reasons: RwLock<HashMap<TaskID, String>>,
     /// Maximum queued (not running) tasks per agent; 0 disables the cap.
     /// `max_concurrent_tasks` bounds execution, not queue depth — see
     /// `enqueue` for why the rejection path emits no events.
@@ -136,8 +139,106 @@ impl TaskScheduler {
             dependency_graph: RwLock::new(TaskDependencyGraph::new()),
             state_store,
             child_map: RwLock::new(HashMap::new()),
+            failure_reasons: RwLock::new(HashMap::new()),
             max_queued_per_agent,
         }
+    }
+
+    /// Record why a task failed. Kept in memory for `list_tasks` and written
+    /// to the state store so the reason is still available after a restart.
+    pub async fn set_failure_reason(&self, task_id: &TaskID, reason: String) {
+        self.failure_reasons
+            .write()
+            .await
+            .insert(*task_id, reason.clone());
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.set_scheduler_task_error(task_id, &reason).await {
+                tracing::warn!(task_id = %task_id, error = %e, "Failed to persist task failure reason");
+            }
+        }
+    }
+
+    /// Persist the final answer of a task that just completed (write-through;
+    /// nothing in memory reads it — the detail view fetches via `outcome`).
+    pub async fn set_result(&self, task_id: &TaskID, answer: &str) {
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.set_scheduler_task_result(task_id, answer).await {
+                tracing::warn!(task_id = %task_id, error = %e, "Failed to persist task result");
+            }
+        }
+    }
+
+    /// `(completed_at, final answer)` for a terminal task; `None` while it is
+    /// still queued/running or when no state store is configured.
+    pub async fn outcome(
+        &self,
+        task_id: &TaskID,
+    ) -> Option<(chrono::DateTime<chrono::Utc>, Option<String>)> {
+        let terminal = self.tasks.read().await.get(task_id).is_some_and(|t| {
+            matches!(
+                t.state,
+                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+            )
+        });
+        if !terminal {
+            return None;
+        }
+        self.state_store
+            .as_ref()?
+            .scheduler_task_outcome(task_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Failure reason for a task, only while it is actually in `Failed`. A
+    /// task that failed once and later completed (retry/requeue) must not keep
+    /// reporting the stale reason.
+    pub async fn failure_reason(&self, task_id: &TaskID) -> Option<String> {
+        let failed = self
+            .tasks
+            .read()
+            .await
+            .get(task_id)
+            .is_some_and(|t| t.state == TaskState::Failed);
+        if !failed {
+            return None;
+        }
+        self.failure_reasons.read().await.get(task_id).cloned()
+    }
+
+    /// Drop failure reasons for tasks the scheduler no longer tracks (called
+    /// from the periodic prune sweep) so the map can't grow unbounded.
+    pub async fn prune_failure_reasons(&self) -> usize {
+        let live: HashSet<TaskID> = self.tasks.read().await.keys().copied().collect();
+        let mut reasons = self.failure_reasons.write().await;
+        let before = reasons.len();
+        reasons.retain(|id, _| live.contains(id));
+        before - reasons.len()
+    }
+
+    /// Load recently finished tasks (complete/failed/cancelled) from the state
+    /// store into the in-memory map so task history survives a kernel restart.
+    /// They are never re-queued. Returns the number of rows loaded.
+    pub async fn restore_terminal_history(&self, limit: usize) -> anyhow::Result<usize> {
+        let Some(store) = &self.state_store else {
+            return Ok(0);
+        };
+        let rows = store.load_recent_terminal_scheduler_tasks(limit).await?;
+        let mut tasks = self.tasks.write().await;
+        let mut reasons = self.failure_reasons.write().await;
+        let mut loaded = 0usize;
+        for (task, error) in rows {
+            if tasks.contains_key(&task.id) {
+                continue;
+            }
+            if let Some(err) = error {
+                reasons.insert(task.id, err);
+            }
+            tasks.insert(task.id, task);
+            loaded += 1;
+        }
+        Ok(loaded)
     }
 
     async fn persist_task_snapshot(&self, task: AgentTask) {
@@ -276,10 +377,12 @@ impl TaskScheduler {
         &self,
         max_age: chrono::Duration,
     ) -> anyhow::Result<usize> {
-        match &self.state_store {
-            Some(store) => store.prune_terminal_scheduler_tasks(max_age).await,
-            None => Ok(0),
-        }
+        let pruned = match &self.state_store {
+            Some(store) => store.prune_terminal_scheduler_tasks(max_age).await?,
+            None => 0,
+        };
+        self.prune_failure_reasons().await;
+        Ok(pruned)
     }
 
     /// Number of tasks currently in `Queued` state for an agent.
@@ -355,6 +458,15 @@ impl TaskScheduler {
                 let snapshot = task.clone();
                 self.tasks.write().await.insert(task_id, task);
                 self.persist_task_snapshot(snapshot).await;
+                // Persist why, or the task detail view shows a bare "failed".
+                self.set_failure_reason(
+                    &task_id,
+                    format!(
+                        "Rejected: agent already has {} queued tasks (cap {})",
+                        queued, self.max_queued_per_agent
+                    ),
+                )
+                .await;
                 return task_id;
             }
         }
@@ -406,6 +518,12 @@ impl TaskScheduler {
             tasks.remove(id);
         }
         drop(tasks);
+        {
+            let mut reasons = self.failure_reasons.write().await;
+            for id in &doomed {
+                reasons.remove(id);
+            }
+        }
 
         // Rebuild the heap without the purged entries.
         {
@@ -429,7 +547,8 @@ impl TaskScheduler {
         // Release anyone blocked on a purged task. `complete_dependency` only
         // ever fires from the task-completion paths, which a purged task never
         // reaches — without this a delegating parent sits in `Waiting` forever
-        // (`check_timeouts` only inspects `Running` tasks, so nothing reaps it)
+        // (the parked-task reaper in `check_timeouts` would eventually fail it,
+        // but only after its whole timeout budget elapsed)
         // and its graph edges leak.
         let waiters: Vec<TaskID> = {
             let mut graph = self.dependency_graph.write().await;
@@ -613,15 +732,26 @@ impl TaskScheduler {
 
     /// List all tasks (for the CLI `task list` command).
     pub async fn list_tasks(&self) -> Vec<TaskSummary> {
+        // Snapshot + release before taking `tasks`: every other path locks
+        // `tasks` first, so holding `failure_reasons` across that acquire
+        // would be a lock-order inversion.
+        let reasons = self.failure_reasons.read().await.clone();
         self.tasks
             .read()
             .await
             .values()
             .map(|t| TaskSummary {
+                error: if t.state == TaskState::Failed {
+                    reasons.get(&t.id).cloned()
+                } else {
+                    None
+                },
                 id: t.id,
                 state: t.state,
                 agent_id: t.agent_id,
-                prompt_preview: t.original_prompt.chars().take(100).collect(),
+                // Long enough that the panel can skip the bracketed context
+                // headers event-trigger prompts start with and still find a title.
+                prompt_preview: t.original_prompt.chars().take(400).collect(),
                 created_at: t.created_at,
                 tool_calls: 0,
                 tokens_used: 0,
@@ -630,6 +760,24 @@ impl TaskScheduler {
                 parent_task_id: t.parent_task_id,
                 spawn_depth: t.spawn_depth,
             })
+            .collect()
+    }
+
+    /// IDs of every task that is not in a terminal state. Used by the checkpoint
+    /// prune sweep to keep the recovery point of tasks that are still alive
+    /// (a long-parked task must stay resumable).
+    pub async fn non_terminal_task_ids(&self) -> HashSet<TaskID> {
+        self.tasks
+            .read()
+            .await
+            .values()
+            .filter(|t| {
+                !matches!(
+                    t.state,
+                    TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                )
+            })
+            .map(|t| t.id)
             .collect()
     }
 
@@ -660,13 +808,27 @@ impl TaskScheduler {
     }
 
     /// Check for timed-out tasks and mark them as Failed.
+    ///
+    /// Covers parked tasks (`Waiting` / `Suspended`) as well as `Running` ones:
+    /// `requeue` only fires on an explicit answer/resume, so an unanswered
+    /// `ask-user` or a never-resumed budget pause would otherwise sit forever
+    /// with its context, checkout and work item held. The bound is the task's own
+    /// `timeout` (the same effective value used for `Running`, so it already
+    /// honours `autonomous_mode.task_timeout_secs` and the preemption
+    /// multiplier): a task parked past its entire time budget is dead by its own
+    /// configured definition, and the escalation manager already auto-denies
+    /// unanswered prompts after 5 minutes, so anything still parked at `timeout`
+    /// is genuinely orphaned rather than merely waiting on a slow human.
     pub async fn check_timeouts(&self) -> Vec<TimedOutTask> {
         let mut timed_out = Vec::new();
         let mut changed_tasks = Vec::new();
         let mut tasks = self.tasks.write().await;
         let now = chrono::Utc::now();
         for task in tasks.values_mut() {
-            if task.state == TaskState::Running {
+            if matches!(
+                task.state,
+                TaskState::Running | TaskState::Waiting | TaskState::Suspended
+            ) {
                 let baseline = task.started_at.unwrap_or(task.created_at);
                 let elapsed = now
                     .signed_duration_since(baseline)
@@ -700,6 +862,18 @@ impl TaskScheduler {
 
         for task in changed_tasks {
             self.persist_task_snapshot(task).await;
+        }
+        // The run loop also records this, but only for tasks it observes; a
+        // reason written here survives even if that path is skipped.
+        for t in &timed_out {
+            self.set_failure_reason(
+                &t.task_id,
+                format!(
+                    "Task timed out after {}s (limit {}s)",
+                    t.elapsed_seconds, t.timeout_seconds
+                ),
+            )
+            .await;
         }
 
         timed_out
@@ -852,6 +1026,7 @@ mod tests {
             spawner_agent_id: None,
             tool_categories: None,
             disable_tool_scoping: false,
+            chain_depth: 0,
         }
     }
 
@@ -1096,6 +1271,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_timeouts_reaps_parked_tasks() {
+        let scheduler = TaskScheduler::new(10);
+        // Parked on an unanswered ask-user for far longer than its budget.
+        let mut waiting = make_task(5, "waiting on an answer that never came");
+        waiting.state = TaskState::Waiting;
+        waiting.timeout = Duration::from_secs(1);
+        waiting.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        let waiting_id = waiting.id;
+
+        // Budget-paused and never resumed.
+        let mut suspended = make_task(5, "suspended and never resumed");
+        suspended.state = TaskState::Suspended;
+        suspended.timeout = Duration::from_secs(1);
+        suspended.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        let suspended_id = suspended.id;
+
+        // Parked, but still inside its budget — must survive.
+        let mut fresh = make_task(5, "just parked");
+        fresh.state = TaskState::Waiting;
+        fresh.timeout = Duration::from_secs(600);
+        fresh.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+        let fresh_id = fresh.id;
+
+        scheduler.enqueue(waiting).await;
+        scheduler.enqueue(suspended).await;
+        scheduler.enqueue(fresh).await;
+
+        let timed_out = scheduler.check_timeouts().await;
+        let reaped: Vec<TaskID> = timed_out.iter().map(|t| t.task_id).collect();
+        assert_eq!(
+            reaped.len(),
+            2,
+            "both over-budget parked tasks must be reaped"
+        );
+        assert!(reaped.contains(&waiting_id));
+        assert!(reaped.contains(&suspended_id));
+
+        // Reaped tasks go terminal via the normal timeout path.
+        assert_eq!(
+            scheduler.get_task(&waiting_id).await.unwrap().state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            scheduler.get_task(&suspended_id).await.unwrap().state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            scheduler.get_task(&fresh_id).await.unwrap().state,
+            TaskState::Waiting,
+            "a task parked inside its budget must not be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_terminal_task_ids_excludes_terminal() {
+        let scheduler = TaskScheduler::new(10);
+        let mut live = make_task(5, "parked");
+        live.state = TaskState::Waiting;
+        let live_id = live.id;
+        let mut done = make_task(5, "finished");
+        done.state = TaskState::Complete;
+        let done_id = done.id;
+
+        scheduler.register_external(live).await;
+        scheduler.register_external(done).await;
+
+        let ids = scheduler.non_terminal_task_ids().await;
+        assert!(ids.contains(&live_id));
+        assert!(!ids.contains(&done_id));
+    }
+
+    #[tokio::test]
     async fn test_mark_started_sets_timestamp() {
         let scheduler = TaskScheduler::new(10);
         let task = make_task(5, "to be started");
@@ -1109,6 +1356,110 @@ mod tests {
 
         let after = scheduler.get_task(&task_id).await.unwrap();
         assert!(after.started_at.is_some());
+    }
+
+    /// The failure-reason round-trip: recorded while Failed, reported by both
+    /// `failure_reason` and `list_tasks`, NOT reported once the task reaches a
+    /// non-failed state (a retried-then-succeeded task must not keep showing a
+    /// stale reason), and still there after a restart.
+    #[tokio::test]
+    async fn test_failure_reason_is_scoped_to_failed_state_and_survives_restart() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("kernel_state.db");
+        let store = Arc::new(
+            KernelStateStore::open(db_path)
+                .await
+                .expect("state store should open"),
+        );
+
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let task = make_task(5, "will fail");
+        let task_id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler
+            .update_state(&task_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&task_id, "LLM error: connection refused".to_string())
+            .await;
+
+        assert_eq!(
+            scheduler.failure_reason(&task_id).await.as_deref(),
+            Some("LLM error: connection refused")
+        );
+        let listed = scheduler.list_tasks().await;
+        let row = listed.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(row.error.as_deref(), Some("LLM error: connection refused"));
+
+        // Retried and succeeded: the reason must stop being reported.
+        scheduler
+            .update_state(&task_id, TaskState::Complete)
+            .await
+            .unwrap();
+        assert_eq!(
+            scheduler.failure_reason(&task_id).await,
+            None,
+            "a task that later completed must not report its old failure reason"
+        );
+        let listed = scheduler.list_tasks().await;
+        let row = listed.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(row.error, None);
+
+        // A task that stays failed keeps its reason across a restart.
+        let failed = make_task(5, "stays failed");
+        let failed_id = failed.id;
+        scheduler.enqueue(failed).await;
+        scheduler
+            .update_state(&failed_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&failed_id, "boom".to_string())
+            .await;
+
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let loaded = restored
+            .restore_terminal_history(100)
+            .await
+            .expect("history restore should succeed");
+        assert!(loaded >= 2, "both terminal tasks should be restored");
+        assert_eq!(
+            restored.failure_reason(&failed_id).await.as_deref(),
+            Some("boom")
+        );
+        assert_eq!(
+            restored.failure_reason(&task_id).await,
+            None,
+            "the completed task's stale reason must not come back from the DB"
+        );
+    }
+
+    /// `prune_failure_reasons` drops reasons for tasks the scheduler no longer
+    /// tracks, and keeps the ones it does.
+    #[tokio::test]
+    async fn test_prune_failure_reasons_drops_only_untracked() {
+        let scheduler = TaskScheduler::new(10);
+        let task = make_task(5, "tracked");
+        let tracked_id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler
+            .update_state(&tracked_id, TaskState::Failed)
+            .await
+            .unwrap();
+        scheduler
+            .set_failure_reason(&tracked_id, "kept".to_string())
+            .await;
+        // A reason for a task the scheduler never had (e.g. already purged).
+        scheduler
+            .set_failure_reason(&TaskID::new(), "orphan".to_string())
+            .await;
+
+        assert_eq!(scheduler.prune_failure_reasons().await, 1);
+        assert_eq!(
+            scheduler.failure_reason(&tracked_id).await.as_deref(),
+            Some("kept")
+        );
     }
 
     #[tokio::test]
@@ -1311,8 +1662,8 @@ mod tests {
         assert_eq!(scheduler.purge_agent_tasks(&worker, &[]).await, 1);
 
         // The child is gone, so `complete_dependency` will never fire for it.
-        // Without an explicit wake the parent waits forever: `check_timeouts`
-        // only inspects Running tasks, so nothing would ever reap it.
+        // Without an explicit wake the parent stays parked until the
+        // `check_timeouts` reaper fails it a whole timeout budget later.
         let parent_now = scheduler.get_task(&parent_id).await.unwrap();
         assert_eq!(
             parent_now.state,

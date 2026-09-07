@@ -1,11 +1,14 @@
 tags = ["read", "fs"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "user-file-reader"
 version     = "1.0.0"
-description = "Reads files uploaded by users via the AgentOS web UI or API. Accepts a file_id (UUID) or file_name to look up the file in the upload registry and return its content. Text files are returned as UTF-8 strings; binary files as base64."
+description = "Reads files uploaded by users via the AgentOS web UI or API. Accepts a file_id (UUID) or file_name to look up the file in the upload registry and return its content. Returns UTF-8 text for text files and for formats that are converted automatically — PDF, Word/Excel/PowerPoint, OpenDocument, RTF, HTML — so never shell out to decode these yourself. Archives and other opaque binaries come back as base64. Images are refused: this tool returns text only and cannot show a picture to you — an attached image is either already visible in the conversation or unavailable."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "fs"
+search_hints = ["read a file the user uploaded", "open the attachment", "read the uploaded document"]
 group       = "fs"
 
 [capabilities_required]
@@ -29,10 +32,14 @@ description = "UUID of the uploaded file (from the file registry)"
 type        = "string"
 description = "Original filename or display name of the uploaded file"
 
+# Conversion of PDF/Office documents forks an external converter (pdftotext,
+# soffice) that writes to a private temp dir, so this tool is not the pure
+# in-process reader these limits once described. The converter itself is capped
+# at 20s wall clock and 5 MiB of output by agentos-tools::extract.
 [sandbox]
 network       = false
-fs_write      = false
+fs_write      = true
 gpu           = false
-max_memory_mb = 64
-max_cpu_ms    = 10000
+max_memory_mb = 512
+max_cpu_ms    = 30000
 syscalls      = []

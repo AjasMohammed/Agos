@@ -13,11 +13,14 @@
 //! scoping is a follow-up (track `task_owner` against a paired user_id).
 
 use crate::escalation::{BroadcastSink, PendingEscalation};
+use crate::notification_router::NotificationRouter;
 use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_channels::manager::ChannelManager;
 use agentos_channels::pairing::PairingManager;
 use agentos_channels::types::{MessageContent, OutboundMessage};
-use agentos_types::TraceID;
+use agentos_types::{
+    NotificationID, NotificationPriority, NotificationSource, TraceID, UserMessage, UserMessageKind,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,6 +48,12 @@ const GC_EVERY_N_CALLS: u32 = 32;
 /// `window_start` is older than this are dropped at GC time so the map
 /// is bounded by recent activity (review finding S1).
 const RATE_BUCKET_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Ceiling on the notification-router fan-out. `EscalationManager` gives the
+/// whole broadcast 30s; the paired-DM loop runs after the router path, so the
+/// router must not be allowed to consume the entire budget (a webhook adapter
+/// retries with backoff).
+const ROUTER_FANOUT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Per-sender token bucket.
 struct RateBucket {
@@ -86,6 +95,11 @@ fn dedupe_key(esc: &PendingEscalation) -> String {
 ///     surfaces what the operator missed (review finding I7).
 pub struct ChannelBroadcastSink {
     channels: Arc<ChannelManager>,
+    /// Kind-agnostic sender. `channels` alone only reaches Discord/Slack/
+    /// WhatsApp/Webhook, so every Telegram/Ntfy operator was left staring at
+    /// nothing while the agent parked for the full escalation timeout.
+    /// Late-bound via [`BroadcastSink::attach_notification_router`].
+    notification_router: std::sync::OnceLock<Arc<NotificationRouter>>,
     pairing: Arc<PairingManager>,
     audit: Option<Arc<AuditLog>>,
     per_sender_max_per_min: u32,
@@ -133,6 +147,7 @@ impl ChannelBroadcastSink {
     ) -> Self {
         Self {
             channels,
+            notification_router: std::sync::OnceLock::new(),
             pairing,
             audit,
             per_sender_max_per_min,
@@ -232,6 +247,65 @@ impl ChannelBroadcastSink {
         }
     }
 
+    /// Wrap a rendered prompt as a `UserMessage` so it can go out through
+    /// `NotificationRouter::send_to_channel`, which reaches both outbound
+    /// stacks instead of just the `ChannelManager` half.
+    ///
+    /// `from: Kernel` is deliberate: `Agent` would put operator approval
+    /// prompts under the router's 10-per-minute per-agent notification cap on
+    /// top of this sink's own limiter, and a suppressed prompt parks the task
+    /// for the full escalation timeout. `subject` is the prompt's own first
+    /// line so no renderer prints a second header above it.
+    fn as_user_message(esc: &PendingEscalation, body: String) -> UserMessage {
+        UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: Some(esc.task_id),
+            trace_id: esc.trace_id,
+            kind: UserMessageKind::Notification,
+            // A blocking approval prompt is always urgent — the task is parked.
+            priority: NotificationPriority::Urgent,
+            subject: body.lines().next().unwrap_or_default().to_string(),
+            body,
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: Some(esc.expires_at),
+            read: false,
+            thread_id: Some(format!("escalation:{}", esc.id)),
+            reply_to_external_id: None,
+            attachment: None,
+        }
+    }
+
+    /// Render the redacted variant sent through `NotificationRouter`.
+    ///
+    /// The full prompt from [`Self::render`] embeds up to 280 characters of
+    /// `context_summary`, which `ApprovalHook` builds as
+    /// `"… Input preview: <raw tool input JSON>"` — for an `env-*` or
+    /// secret-bearing call that is a plaintext credential. The router fans out
+    /// to operator-configured third-party endpoints (webhook POST, Slack
+    /// incoming webhook, desktop DBus), a target set that never saw escalation
+    /// content before. So the router path gets a pointer, not the payload; the
+    /// full prompt stays on the explicitly paired DM channels.
+    ///
+    /// It also drops the `/approve` reply instructions, which are inbound
+    /// *channel* commands — unusable by the panel-only operator this path
+    /// exists for. They are told where to act instead.
+    fn render_summary(esc: &PendingEscalation) -> String {
+        let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
+        format!(
+            "🛂 AgentOS approval needed (#{id})\n\
+             Urgency: {urgency}\n\
+             Open the escalation queue to review and approve \
+             (auto-denies in ~{exp}s).",
+            id = esc.id,
+            urgency = esc.urgency,
+            exp = expires_in_secs,
+        )
+    }
+
     /// Render a human-readable approval prompt for the given escalation.
     /// Includes the escalation id, urgency, decision_point, and
     /// instructions for the `/approve` and `/deny` reply commands.
@@ -283,17 +357,90 @@ impl BroadcastSink for ChannelBroadcastSink {
             return;
         }
 
-        let approved = self.pairing.list_approved().await;
-        if approved.is_empty() {
-            tracing::debug!(
-                escalation_id = escalation.id,
-                "ChannelBroadcastSink: no paired senders — skipping"
-            );
-            return;
+        let body = Self::render(escalation);
+
+        // Channels already registered as delivery adapters are reached by the
+        // router fan-out below; their paired senders must be skipped or the
+        // operator gets the same prompt twice on the same channel. Populated
+        // only once `deliver` actually succeeded — on failure the paired-DM
+        // loop is the fallback and must not be suppressed.
+        let mut covered_by_router = std::collections::HashSet::new();
+
+        // Fan out through the notification router FIRST. `deliver` persists to
+        // `UserInbox` (so the prompt shows up in the panel's notification bell,
+        // not only on the escalation page) and reaches every registered
+        // delivery adapter — desktop, ntfy, email, webhook. Without this the
+        // only delivery path was a paired DM, so an operator running panel-only
+        // had to sit on the escalation page to notice that a task was parked.
+        // `from: Kernel` keeps it out of the per-agent 10/min cap, so the
+        // sink's own limiter is applied here instead.
+        if let Some(router) = self.notification_router.get() {
+            let agent_bucket = escalation.agent_id.to_string();
+            if !self.allow_send("router", &agent_bucket).await {
+                tracing::warn!(
+                    escalation_id = escalation.id,
+                    "ChannelBroadcastSink: router fan-out rate limit hit — suppressing"
+                );
+                self.audit_suppressed(escalation, "rate_limited", Some("router"), None);
+            } else {
+                let ids = router.adapter_instance_ids().await;
+                // Bound the fan-out. `EscalationManager` wraps this whole
+                // broadcast in a 30s timeout and `WebhookDeliveryAdapter`
+                // retries with backoff — one misconfigured webhook URL would
+                // otherwise burn the entire budget and the paired-DM loop
+                // below would never run.
+                let sent = tokio::time::timeout(
+                    ROUTER_FANOUT_TIMEOUT,
+                    router.deliver(Self::as_user_message(
+                        escalation,
+                        Self::render_summary(escalation),
+                    )),
+                )
+                .await;
+                match sent {
+                    Ok(Ok(_)) => covered_by_router = ids,
+                    Ok(Err(e)) => tracing::warn!(
+                        escalation_id = escalation.id,
+                        error = %e,
+                        "Escalation fan-out failed — falling back to paired DMs"
+                    ),
+                    Err(_) => tracing::warn!(
+                        escalation_id = escalation.id,
+                        "Escalation fan-out timed out — falling back to paired DMs"
+                    ),
+                }
+            }
         }
 
-        let body = Self::render(escalation);
+        let approved = self.pairing.list_approved().await;
+        if approved.is_empty() {
+            // Not fatal any more — the router fan-out above still reached the
+            // inbox and every configured adapter. Still worth a warning when
+            // there is no router either, because then nobody sees the prompt
+            // and the task sits until it auto-denies.
+            if self.notification_router.get().is_none() {
+                tracing::warn!(
+                    escalation_id = escalation.id,
+                    "Escalation not delivered: no paired senders and no notification router — pair one with `agentos channel pair approve <code>`"
+                );
+            } else {
+                tracing::debug!(
+                    escalation_id = escalation.id,
+                    "No paired DM senders; escalation delivered via notification adapters only"
+                );
+            }
+            return;
+        }
         for sender in approved {
+            if covered_by_router.contains(&sender.channel_id) {
+                tracing::debug!(
+                    escalation_id = escalation.id,
+                    channel = %sender.channel_id,
+                    "Paired sender already covered by the router fan-out — skipping duplicate"
+                );
+                continue;
+            }
+
             // Rate limit: skip senders that have already received the
             // configured number of broadcasts in this window.
             if !self.allow_send(&sender.channel_id, &sender.sender_id).await {
@@ -312,12 +459,31 @@ impl BroadcastSink for ChannelBroadcastSink {
                 continue;
             }
 
-            let msg = OutboundMessage {
-                channel_instance_id: sender.channel_id.clone(),
-                content: MessageContent::Markdown(body.clone()),
-                thread_id: None,
+            // Prefer the kind-agnostic router: `self.channels` reaches only the
+            // ChannelManager half (Discord/Slack/WhatsApp/Webhook) and errors
+            // with "channel not found" for every Telegram/Ntfy sender. The
+            // direct-manager path stays as a fallback for the (boot-order)
+            // case where no channel has been connected yet — which also means
+            // there are no paired senders, so it is effectively unreachable.
+            let send_result = match self.notification_router.get() {
+                Some(router) => {
+                    router
+                        .send_to_channel(
+                            Self::as_user_message(escalation, body.clone()),
+                            &sender.channel_id,
+                        )
+                        .await
+                }
+                None => {
+                    let msg = OutboundMessage {
+                        channel_instance_id: sender.channel_id.clone(),
+                        content: MessageContent::Markdown(body.clone()),
+                        thread_id: None,
+                    };
+                    self.channels.send(&sender.channel_id, msg).await
+                }
             };
-            if let Err(e) = self.channels.send(&sender.channel_id, msg).await {
+            if let Err(e) = send_result {
                 tracing::warn!(
                     escalation_id = escalation.id,
                     channel = %sender.channel_id,
@@ -331,6 +497,10 @@ impl BroadcastSink for ChannelBroadcastSink {
 
     fn name(&self) -> &'static str {
         "channel"
+    }
+
+    fn attach_notification_router(&self, router: &Arc<NotificationRouter>) {
+        let _ = self.notification_router.set(Arc::clone(router));
     }
 }
 
@@ -464,6 +634,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn no_paired_senders_still_reaches_the_inbox() {
+        // The panel reads `GET /api/v1/notifications` off the UserInbox. Before
+        // the router fan-out, a panel-only operator with no paired DM channel
+        // saw approval prompts on the escalation page and nowhere else.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = Arc::new(
+            crate::user_inbox::UserInbox::new(&dir.path().join("inbox.db"), 100)
+                .expect("open user inbox"),
+        );
+        let audit = Arc::new(
+            agentos_audit::AuditLog::open(&dir.path().join("audit.db")).expect("open audit log"),
+        );
+        let router = Arc::new(NotificationRouter::new(Arc::clone(&inbox), audit));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let channels = Arc::new(ChannelManager::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+        ));
+        let sink = ChannelBroadcastSink::new(channels, PairingManager::new());
+        sink.attach_notification_router(&router);
+
+        let esc = fixture(42);
+        sink.broadcast(&esc).await;
+
+        let stored = inbox.list(false, 10).await.expect("inbox list");
+        assert_eq!(stored.len(), 1, "escalation must land in the user inbox");
+        assert!(stored[0].body.contains("#42"));
+        assert!(matches!(stored[0].priority, NotificationPriority::Urgent));
+        // The router fans out to third-party webhooks and Slack; the raw tool
+        // input preview that `render` embeds must NOT ride along.
+        assert!(
+            !stored[0].body.contains("install python3"),
+            "router body must not carry the context/input preview"
+        );
+        // Correlation back to the escalation queue.
+        assert_eq!(
+            stored[0].thread_id.as_deref(),
+            Some("escalation:42"),
+            "inbox row must point back at the escalation"
+        );
+    }
+
     #[test]
     fn render_truncates_long_context() {
         let mut esc = fixture(7);
@@ -479,5 +693,21 @@ mod tests {
             .find(|l| l.starts_with("Context:"))
             .expect("Context line present");
         assert!(preview_line.chars().count() < 350);
+    }
+
+    #[test]
+    fn user_message_wrapper_preserves_prompt_and_avoids_double_header() {
+        let esc = fixture(9);
+        let body = ChannelBroadcastSink::render(&esc);
+        let msg = ChannelBroadcastSink::as_user_message(&esc, body.clone());
+        assert_eq!(msg.body, body, "prompt text must survive the wrapping");
+        // Subject is the prompt's own first line, so no renderer stacks a
+        // second header above it.
+        assert!(msg.body.starts_with(&msg.subject));
+        assert!(msg.subject.contains("#9"));
+        // Kernel-sourced on purpose: an `Agent` source would put approval
+        // prompts under the router's per-agent notification cap, and a
+        // suppressed prompt parks the task for the full escalation timeout.
+        assert!(matches!(msg.from, NotificationSource::Kernel));
     }
 }

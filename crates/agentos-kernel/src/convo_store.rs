@@ -8,6 +8,39 @@ pub struct ConvoStore {
     conn: Mutex<Connection>,
 }
 
+/// Drop `<user_data>` framing a model mirrored back from the transcript it was
+/// shown. Orchestrators wrap prior turns in those tags for injection safety and
+/// some models copy the wrapper into their own reply; left in place the tags
+/// render verbatim in the UI and re-enter the next turn's prompt, teaching every
+/// later turn to copy them too. Applied by [`ConvoStore::add_turn`], so every
+/// persist path is covered — call it directly only for text used before the
+/// turn is stored (a stream event, an in-memory transcript).
+pub fn strip_user_data_tags(s: &str) -> String {
+    // ASCII-only case folding: `to_lowercase` can change byte length (e.g. `İ`),
+    // which would desync the match offsets from the original string's bytes.
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find("user_data>") {
+        let end = search + rel + "user_data>".len();
+        // Only the exact tags — `<user_data>` / `</user_data>` — are framing.
+        let start = if lower[..search + rel].ends_with("</") {
+            search + rel - 2
+        } else if lower[..search + rel].ends_with('<') {
+            search + rel - 1
+        } else {
+            search = end;
+            continue;
+        };
+        out.push_str(&s[last..start]);
+        last = end;
+        search = end;
+    }
+    out.push_str(&s[last..]);
+    out.trim().to_string()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentConvo {
     pub id: String,
@@ -153,6 +186,7 @@ impl ConvoStore {
         tool_call_count: u32,
     ) -> Result<(), rusqlite::Error> {
         let now = chrono::Utc::now().to_rfc3339();
+        let content = strip_user_data_tags(content);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.unchecked_transaction()?;
         tx.execute(
@@ -202,5 +236,38 @@ impl ConvoStore {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_user_data_tags;
+
+    #[test]
+    fn strips_mirrored_user_data_framing() {
+        assert_eq!(
+            strip_user_data_tags("<user_data>hello</user_data>"),
+            "hello"
+        );
+        assert_eq!(
+            strip_user_data_tags("a <USER_DATA>b</User_Data> c <user_data>d</user_data>"),
+            "a b c d"
+        );
+        assert_eq!(strip_user_data_tags("  plain reply\n"), "plain reply");
+        // Non-ASCII must not desync the match offsets from the byte indices.
+        assert_eq!(
+            strip_user_data_tags("İstanbul <user_data>hi</user_data> \u{212A}elvin"),
+            "İstanbul hi \u{212A}elvin"
+        );
+        // Only the exact tags are framing; a bare mention survives.
+        assert_eq!(
+            strip_user_data_tags("the user_data> marker and <user_datax> stay"),
+            "the user_data> marker and <user_datax> stay"
+        );
+        // The escaped form the wrapper emits is content, not framing.
+        assert_eq!(
+            strip_user_data_tags("&lt;user_data&gt;x&lt;/user_data&gt;"),
+            "&lt;user_data&gt;x&lt;/user_data&gt;"
+        );
     }
 }

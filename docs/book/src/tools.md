@@ -48,8 +48,10 @@ Offline signing: `agentos tool keygen`, `agentos tool sign`, `agentos tool verif
 
 ## Risk classes & approval
 
-Manifests also declare a `risk_class` (`ReadonlyScoped`, `ReadonlyExternal`, `WriteScoped`,
-`ExecCapable`, `ControlPlane`, `Interactive`). The kernel's approval mode (see
+Manifests also declare a `risk_class` (`ReadonlyScoped`, `ReadonlyExternal`, `WriteAgentState`,
+`WriteScoped`, `ExecCapable`, `ControlPlane`, `Interactive`). `WriteAgentState` covers writes
+confined to the agent's own kernel-owned stores (memory tiers, scratchpad, inbox) and is
+Core-tier only. The kernel's approval mode (see
 [Configuration](./configuration.md) `[approval]`) uses the risk class to decide whether to
 auto-approve a call or escalate it for human review. Unknown tools default to `ExecCapable`
 (fail-closed).

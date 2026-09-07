@@ -26,6 +26,13 @@
     },
     {
       "events": [
+        "ChatMessageAdded"
+      ],
+      "resource": "events.chat",
+      "value": "ChatEvents"
+    },
+    {
+      "events": [
         "PromptInjectionAttempt",
         "CapabilityViolation",
         "UnauthorizedToolAccess",

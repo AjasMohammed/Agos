@@ -6,6 +6,15 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Rows transitioned by one [`ProceduralStore::curate`] sweep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CurateReport {
+    /// Procedures moved `active` -> `stale`.
+    pub stale: usize,
+    /// Procedures moved to `archived` (from any non-archived status).
+    pub archived: usize,
+}
 use uuid::Uuid;
 
 const EXPECTED_EMBEDDING_DIMENSION: usize = 384;
@@ -439,7 +448,8 @@ impl ProceduralStore {
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE c.rowid IN ({placeholders})
-                       AND (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)"
+                       AND (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
+                       AND p.status != 'archived'"
                 );
                 let mut stmt = conn
                     .prepare(&sql)
@@ -467,6 +477,7 @@ impl ProceduralStore {
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
+                       AND p.status != 'archived'
                      ORDER BY p.updated_at DESC
                      LIMIT 200";
                 let mut stmt = conn
@@ -546,6 +557,62 @@ impl ProceduralStore {
         .map_err(|e| AgentOSError::StorageError(format!("Get task panicked: {}", e)))?
     }
 
+    /// Look up a procedure by exact name and **exact ownership**, regardless of
+    /// status.
+    ///
+    /// [`Self::search`] deliberately hides `archived` rows, which makes it the
+    /// wrong tool for a producer's duplicate check: a re-derived procedure whose
+    /// archived twin is invisible gets stored again under a fresh id, and the
+    /// store slowly fills with the same workflow. Callers deciding whether to
+    /// *create* a row should use this instead.
+    ///
+    /// Ownership matching is null-safe (`agent_id IS ?2`), NOT the widened
+    /// `agent_id IS NULL OR agent_id = ?2` that [`Self::search`] uses for
+    /// retrieval. The difference matters because callers use this to decide what
+    /// to **overwrite**: `consolidation` writes global procedures (`agent_id`
+    /// NULL), so a widened match would let one agent's producer claim a shared
+    /// procedure — rewriting its steps and re-scoping it to that agent, which
+    /// silently removes it from every other agent's retrieval. Passing `None`
+    /// here therefore means "the global procedure named X", not "any procedure
+    /// named X".
+    pub async fn find_by_name(
+        &self,
+        name: &str,
+        agent_id: Option<&AgentID>,
+    ) -> Result<Option<Procedure>, AgentOSError> {
+        let db = self.conn.clone();
+        let name_owned = name.to_owned();
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock procedural db for find_by_name".to_string(),
+                )
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, description, preconditions, steps, postconditions,
+                            success_count, failure_count, source_episodes, agent_id, tags,
+                            created_at, updated_at,
+                            last_used_at, use_count, confidence, status
+                     FROM procedures
+                     WHERE name = ?1 AND agent_id IS ?2
+                     LIMIT 1",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let mut rows = stmt
+                .query_map(params![name_owned, agent_id_str], Self::row_to_procedure)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            match rows.next() {
+                Some(Ok(p)) => Ok(Some(p)),
+                Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("find_by_name task panicked: {}", e)))?
+    }
+
     /// Mark procedures as used right now: bump `use_count` and stamp
     /// `last_used_at`. Fire-and-forget reinforcement — callers must never fail
     /// a task on a touch error. Returns the number of rows updated.
@@ -567,9 +634,15 @@ impl ProceduralStore {
                     .map(|i| format!("?{}", i))
                     .collect::<Vec<_>>()
                     .join(",");
+                // Re-use promotes a stale procedure back to active: it just
+                // proved it is still worth retrieving. Without this, `stale` is
+                // a one-way state and a procedure the agent uses weekly stays
+                // marked stale forever.
                 let sql = format!(
                     "UPDATE procedures
-                     SET last_used_at = ?1, use_count = use_count + 1
+                     SET last_used_at = ?1,
+                         use_count = use_count + 1,
+                         status = CASE WHEN status = 'stale' THEN 'active' ELSE status END
                      WHERE id IN ({placeholders})"
                 );
                 let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
@@ -776,13 +849,103 @@ impl ProceduralStore {
     }
 
     /// Delete procedures older than `max_age`. Offloads to blocking thread pool.
-    pub async fn sweep_old_entries(
+    /// Curator lifecycle sweep: procedures unused for `stale_after` are marked
+    /// `stale`, those unused for `archive_after` are `archived`. Recency is
+    /// `last_used_at` when the procedure has ever been retrieved, otherwise
+    /// `created_at` — so a brand-new procedure gets a full grace period before
+    /// it can go stale.
+    ///
+    /// The curator never deletes: archiving is reversible and
+    /// [`Self::sweep_old_entries`] is the only path that removes rows.
+    /// Procedures tagged `pinned` are exempt from every transition.
+    // ponytail: `pinned` is matched with a JSON `LIKE` rather than a real tag
+    // table — a tag containing an escaped quote right before `pinned` would
+    // false-match and spare a row. No writer produces such tags; move to a tags
+    // table if tags ever become user-supplied.
+    pub async fn curate(
+        &self,
+        stale_after: std::time::Duration,
+        archive_after: std::time::Duration,
+    ) -> Result<CurateReport, AgentOSError> {
+        let to_cutoff = |d: std::time::Duration| -> Result<String, AgentOSError> {
+            let chrono_age = chrono::Duration::from_std(d).map_err(|e| {
+                AgentOSError::StorageError(format!("Invalid curate duration: {}", e))
+            })?;
+            Ok((Utc::now() - chrono_age).to_rfc3339())
+        };
+        let stale_cutoff = to_cutoff(stale_after)?;
+        let archive_cutoff = to_cutoff(archive_after)?;
+        let db = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for curate".to_string())
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin curate transaction: {}", e))
+            })?;
+            // Archive first: a row past the archive cutoff is also past the
+            // stale cutoff, and doing it in this order keeps it out of the
+            // stale UPDATE below.
+            let now = Utc::now().to_rfc3339();
+            let archived = tx
+                .execute(
+                    // `updated_at` is bumped so the retention sweep measures the
+                    // archive window from the moment of archiving, not from the
+                    // last edit — otherwise a row archived at day 90 under a
+                    // 90-day retention is deletable on the very next tick.
+                    "UPDATE procedures
+                        SET status = 'archived', updated_at = ?2
+                      WHERE status != 'archived'
+                        AND tags NOT LIKE '%\"pinned\"%'
+                        AND COALESCE(last_used_at, created_at) < ?1",
+                    params![archive_cutoff, now],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to archive procedures: {}", e))
+                })?;
+            let stale = tx
+                .execute(
+                    "UPDATE procedures
+                        SET status = 'stale'
+                      WHERE status = 'active'
+                        AND tags NOT LIKE '%\"pinned\"%'
+                        AND COALESCE(last_used_at, created_at) < ?1",
+                    params![stale_cutoff],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to mark procedures stale: {}", e))
+                })?;
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit curate: {}", e))
+            })?;
+            Ok(CurateReport { stale, archived })
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Curate task panicked: {}", e)))?
+    }
+
+    /// Delete procedures older than `max_age`.
+    ///
+    /// `archived_only` must be true whenever the curator is running: it is what
+    /// keeps an in-use procedure from being age-deleted out from under the
+    /// agent. When the curator is disabled nothing ever reaches `archived`, so
+    /// the caller passes false and this falls back to the original age-only
+    /// sweep — otherwise turning the curator off would silently turn off all
+    /// procedure pruning and re-open unbounded growth.
+    pub async fn sweep_old_entries_scoped(
         &self,
         max_age: std::time::Duration,
+        archived_only: bool,
     ) -> Result<usize, AgentOSError> {
         let chrono_age = chrono::Duration::from_std(max_age)
             .map_err(|e| AgentOSError::StorageError(format!("Invalid max_age duration: {}", e)))?;
         let cutoff = (Utc::now() - chrono_age).to_rfc3339();
+        // Static strings, never user input — no interpolation risk.
+        let status_filter = if archived_only {
+            " AND status = 'archived'"
+        } else {
+            ""
+        };
         let db = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = db.lock().map_err(|_| {
@@ -792,8 +955,13 @@ impl ProceduralStore {
                 AgentOSError::StorageError(format!("Failed to begin sweep transaction: {}", e))
             })?;
             tx.execute(
-                "DELETE FROM procedures_fts_content
-                 WHERE proc_id IN (SELECT id FROM procedures WHERE updated_at < ?1)",
+                &format!(
+                    "DELETE FROM procedures_fts_content
+                      WHERE proc_id IN (
+                          SELECT id FROM procedures
+                           WHERE updated_at < ?1{status_filter}
+                      )"
+                ),
                 params![cutoff],
             )
             .map_err(|e| {
@@ -801,7 +969,7 @@ impl ProceduralStore {
             })?;
             let deleted = tx
                 .execute(
-                    "DELETE FROM procedures WHERE updated_at < ?1",
+                    &format!("DELETE FROM procedures WHERE updated_at < ?1{status_filter}"),
                     params![cutoff],
                 )
                 .map_err(|e| {
@@ -810,10 +978,24 @@ impl ProceduralStore {
             tx.commit().map_err(|e| {
                 AgentOSError::StorageError(format!("Failed to commit sweep transaction: {}", e))
             })?;
+
+            if deleted > 0 {
+                crate::compact_fts_index(&conn, "procedures_fts")?;
+            }
+
             Ok(deleted)
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("Sweep task panicked: {}", e)))?
+    }
+
+    /// Curator-aware sweep: deletes archived procedures only. Equivalent to
+    /// [`Self::sweep_old_entries_scoped`] with `archived_only = true`.
+    pub async fn sweep_old_entries(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<usize, AgentOSError> {
+        self.sweep_old_entries_scoped(max_age, true).await
     }
 
     fn row_to_procedure(row: &rusqlite::Row) -> rusqlite::Result<Procedure> {
@@ -1042,6 +1224,196 @@ mod tests {
         drop(ProceduralStore::open_with_embedder(dir.path(), embedder.clone()).unwrap());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         assert!(store.get("legacy-1").await.unwrap().is_some());
+    }
+
+    fn curator_store(dir: &TempDir) -> ProceduralStore {
+        ProceduralStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn curate_marks_stale_then_archives_and_spares_pinned() {
+        let dir = TempDir::new().unwrap();
+        let store = curator_store(&dir);
+
+        let mut fresh = make_test_procedure("fresh-one", "recent");
+        fresh.created_at = Utc::now();
+        let mut old = make_test_procedure("old-one", "unused a while");
+        old.created_at = Utc::now() - chrono::Duration::days(45);
+        let mut ancient = make_test_procedure("ancient-one", "long forgotten");
+        ancient.created_at = Utc::now() - chrono::Duration::days(200);
+        let mut pinned = make_test_procedure("pinned-one", "kept on purpose");
+        pinned.created_at = Utc::now() - chrono::Duration::days(200);
+        pinned.tags = vec!["pinned".to_string()];
+
+        for p in [&fresh, &old, &ancient, &pinned] {
+            store.store(p).await.unwrap();
+        }
+
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let report = store.curate(day * 30, day * 90).await.unwrap();
+        assert_eq!(
+            report.archived, 1,
+            "only the 200d-old unpinned row archives"
+        );
+        assert_eq!(report.stale, 1, "only the 45d-old row goes stale");
+
+        let all = store.list_by_agent(None, 100).await.unwrap();
+        let status = |name: &str| {
+            all.iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .status
+        };
+        assert_eq!(status("fresh-one"), MemoryStatus::Active);
+        assert_eq!(status("old-one"), MemoryStatus::Stale);
+        assert_eq!(status("ancient-one"), MemoryStatus::Archived);
+        assert_eq!(
+            status("pinned-one"),
+            MemoryStatus::Active,
+            "pinned procedures are exempt from curator transitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_by_name_sees_archived_rows_and_restore_keeps_the_id() {
+        let dir = TempDir::new().unwrap();
+        let store = curator_store(&dir);
+        let mut old = make_test_procedure("deploy-staging", "the old way");
+        old.created_at = Utc::now() - chrono::Duration::days(200);
+        let id = store.store(&old).await.unwrap();
+
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        store.curate(day * 30, day * 90).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().status,
+            MemoryStatus::Archived
+        );
+
+        // `search` hides archived rows — which is exactly why a producer must
+        // not use it to decide whether a procedure already exists.
+        let via_search = store
+            .search("deploy-staging", None, 5, 0.0)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|h| h.procedure.id == id);
+        assert!(!via_search, "archived rows stay out of retrieval");
+        let found = store
+            .find_by_name("deploy-staging", None)
+            .await
+            .unwrap()
+            .expect("find_by_name must see archived rows");
+        assert_eq!(found.id, id);
+
+        // Ownership is matched exactly. The stored row is global (agent_id
+        // NULL, which is what consolidation writes), so an agent-scoped lookup
+        // must NOT return it: callers use this to decide what to overwrite, and
+        // a widened match would let one agent claim a shared procedure.
+        let other = AgentID::new();
+        assert!(
+            store
+                .find_by_name("deploy-staging", Some(&other))
+                .await
+                .unwrap()
+                .is_none(),
+            "a global procedure must not match an agent-scoped lookup"
+        );
+
+        // Re-learning replaces the body but keeps the row: the new steps win,
+        // because a 200-day-unused procedure is usually superseded, not correct.
+        let mut relearned = make_test_procedure("deploy-staging", "the new way");
+        relearned.id = found.id.clone();
+        relearned.created_at = found.created_at;
+        relearned.success_count = found.success_count + 1;
+        relearned.status = MemoryStatus::Active;
+        relearned.steps = vec![ProcedureStep {
+            order: 0,
+            action: "use the new pipeline".to_string(),
+            tool: Some("shell-exec".to_string()),
+            expected_outcome: None,
+        }];
+        store.store(&relearned).await.unwrap();
+
+        let after = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(after.status, MemoryStatus::Active);
+        assert_eq!(after.description, "the new way");
+        assert_eq!(after.steps.len(), 1);
+        assert_eq!(after.steps[0].action, "use the new pipeline");
+        assert_eq!(
+            store.list_by_agent(None, 10).await.unwrap().len(),
+            1,
+            "re-learning must update the row, not add a second copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn touch_promotes_a_reused_stale_procedure_back_to_active() {
+        let dir = TempDir::new().unwrap();
+        let store = curator_store(&dir);
+        let mut p = make_test_procedure("revived", "used again");
+        p.created_at = Utc::now() - chrono::Duration::days(45);
+        let id = store.store(&p).await.unwrap();
+
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        store.curate(day * 30, day * 90).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().status,
+            MemoryStatus::Stale
+        );
+
+        store.touch(std::slice::from_ref(&id)).await.unwrap();
+        let revived = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            revived.status,
+            MemoryStatus::Active,
+            "retrieval proves the procedure is still useful"
+        );
+        assert_eq!(revived.use_count, 1);
+    }
+
+    #[tokio::test]
+    async fn unscoped_sweep_prunes_regardless_of_status() {
+        // What the run loop falls back to when the curator is disabled: with no
+        // curator nothing ever becomes archived, so an archived-only sweep would
+        // prune nothing at all.
+        let dir = TempDir::new().unwrap();
+        let store = curator_store(&dir);
+        store
+            .store(&make_test_procedure("still-active", "in use"))
+            .await
+            .unwrap();
+        let deleted = store
+            .sweep_old_entries_scoped(std::time::Duration::from_secs(0), false)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(store.list_by_agent(None, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_only_deletes_archived_rows() {
+        let dir = TempDir::new().unwrap();
+        let store = curator_store(&dir);
+        let active = make_test_procedure("still-active", "in use");
+        let mut archived = make_test_procedure("already-archived", "retired");
+        archived.status = MemoryStatus::Archived;
+        store.store(&active).await.unwrap();
+        store.store(&archived).await.unwrap();
+
+        // Zero retention: every row is "expired", so only status gates deletion.
+        let deleted = store
+            .sweep_old_entries(std::time::Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let names: Vec<String> = store
+            .list_by_agent(None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, vec!["still-active".to_string()]);
     }
 
     #[tokio::test]

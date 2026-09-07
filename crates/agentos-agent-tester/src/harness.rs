@@ -140,6 +140,12 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             embedder_init_timeout_secs: 120,
             retention_days: 0,
             lifecycle: Default::default(),
+            // The review fork would fire an extra auxiliary inference after
+            // every scenario; the harness asserts on the agent's own calls.
+            background_review: agentos_kernel::config::BackgroundReviewConfig {
+                enabled: false,
+                ..Default::default()
+            },
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),

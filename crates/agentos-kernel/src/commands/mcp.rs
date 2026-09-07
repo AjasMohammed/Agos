@@ -408,9 +408,14 @@ impl Kernel {
         {
             Ok(tools) => tools,
             Err(e) => {
+                // `add_server_with_factory` registers the server before the
+                // handshake, so a failure leaves it behind in `Backoff` — it
+                // shows up in `mcp list` forever and blocks re-attaching the
+                // same name ("already attached"). Roll it back.
+                self.mcp_supervisor.remove_server(&name).await;
                 return KernelResponse::Error {
                     message: format!("MCP handshake failed for '{}': {}", name, e),
-                }
+                };
             }
         };
 
@@ -446,6 +451,8 @@ impl Kernel {
             // Build a ToolManifest so the LLM can discover and describe this tool.
             let manifest = ToolManifest {
                 manifest: ToolInfo {
+                    category: None,
+                    search_hints: vec![],
                     name: tool_def.name.clone(),
                     version: "0.1.0".to_string(),
                     description: tool_def.description.clone(),
@@ -459,9 +466,15 @@ impl Kernel {
                     group: String::new(),
                 },
                 capabilities_required: ToolCapabilities {
+                    // SECURITY/DISCOVERY: must match the resource the adapter
+                    // enforces (`McpToolAdapter::new`) *and* parse as
+                    // `resource:BITS` — an unparseable manifest permission
+                    // fails closed in the discovery filter, which would hide
+                    // every MCP tool from the model while the call itself
+                    // would have been allowed.
                     permissions: vec![format!(
-                        "mcp.{}",
-                        tool_def.name.replace('-', "_").to_lowercase()
+                        "mcp.{}:x",
+                        agentos_mcp::adapter::sanitize_tool_name(&tool_def.name)
                     )],
                 },
                 capabilities_provided: ToolOutputs {

@@ -11,6 +11,7 @@ version = "1.0.0"
 description = "Install a host OS package via system package manager (mandatory user approval, allowlisted, privileged executor)"
 author = "agentos-core"
 trust_tier = "core"
+category    = "system"
 
 [capabilities_required]
 permissions = [

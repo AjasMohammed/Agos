@@ -39,13 +39,22 @@ impl BusClient {
     ) -> Result<KernelResponse, AgentOSError> {
         write_message(&mut self.stream, &BusMessage::Command(cmd)).await?;
 
-        let response: BusMessage = read_message(&mut self.stream).await?;
-        match response {
-            BusMessage::CommandResponse(resp) => Ok(resp),
-            other => Err(AgentOSError::BusError(format!(
-                "Unexpected response type: {:?}",
-                std::mem::discriminant(&other)
-            ))),
+        // The kernel may push StatusUpdate / NotificationPush frames onto a
+        // connection that also carries commands. Skip them instead of erroring:
+        // returning early would leave the real CommandResponse queued in the
+        // stream, so every later command would read the *previous* command's
+        // answer — an undetectable desync (responses carry no request id).
+        // ponytail: dropping pushes is safe because nothing outside this crate
+        // consumes them from a command connection; add a request_id to
+        // Command/CommandResponse if pushes ever need to be surfaced here.
+        loop {
+            match read_message(&mut self.stream).await? {
+                BusMessage::CommandResponse(resp) => return Ok(resp),
+                other => tracing::debug!(
+                    "Discarding server push while awaiting command response: {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
         }
     }
 

@@ -127,7 +127,7 @@ impl Kernel {
     /// Mark a notification as read and audit it.
     pub(crate) async fn cmd_mark_notification_read(&self, id: NotificationID) -> KernelResponse {
         match self.notification_router.inbox().mark_read(&id).await {
-            Ok(()) => {
+            Ok(_) => {
                 self.audit_log(AuditEntry {
                     timestamp: Utc::now(),
                     trace_id: TraceID::new(),

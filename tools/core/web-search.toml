@@ -1,4 +1,5 @@
 tags = ["read", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "web-search"
@@ -6,7 +7,8 @@ version     = "1.0.0"
 description = "Search the web and return results with titles, URLs, and snippets. Tries Brave Search, Tavily, Serper, and DuckDuckGo in order. Configure BRAVE_API_KEY, TAVILY_API_KEY, or SERPER_API_KEY for best results."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_external"
+category    = "web"
+search_hints = ["search the internet", "google", "look up online"]
 
 [capabilities_required]
 permissions = ["network.outbound:x"]

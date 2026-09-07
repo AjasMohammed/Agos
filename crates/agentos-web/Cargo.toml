@@ -49,6 +49,10 @@ urlencoding = "2"
 cron = { workspace = true }
 pulldown-cmark = { workspace = true }
 
+# O_NOFOLLOW when opening artifact blobs — see handlers::artifacts::open_nofollow.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 hyper = { version = "1", features = ["full"] }

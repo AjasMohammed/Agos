@@ -23,7 +23,7 @@ use crate::types::{ApiMemoryItem, MemoryQuery};
     tag = "memory",
     operation_id = "agent_memory_browse",
     params(
-        ("id" = String, Path, description = "Agent ID (UUID)"),
+        ("id" = String, Path, description = "Agent name or ID (UUID)"),
         ("tier" = String, Path, description = "Memory tier: episodic | semantic | procedural"),
         MemoryQuery
     ),

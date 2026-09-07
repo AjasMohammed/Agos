@@ -1,12 +1,13 @@
 tags = ["write", "network"]
+risk_class = "control_plane"
 
 [manifest]
 name = "iot-mqtt-publish"
 version = "1.0.0"
-risk_class  = "write_scoped"
 description = "Publish a message to an MQTT topic for IoT actuator control."
 author = "agentos-core"
 trust_tier = "core"
+category    = "hal"
 tags = ["iot", "mqtt", "hardware"]
 
 [capabilities_required]

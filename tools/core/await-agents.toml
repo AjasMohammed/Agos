@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "await-agents"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Wait for spawned sub-agents to complete and retrieve their current status. Results are also automatically injected into your context window when each child completes."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
 
 [capabilities_required]
 permissions = ["agent.spawn:x"]

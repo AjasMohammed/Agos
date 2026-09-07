@@ -1,4 +1,5 @@
 tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "procedure-search"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Search procedural memory for learned procedures and SOPs using hybrid semantic search"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "memory"
+search_hints = ["how did I do this last time", "find a saved procedure", "known playbook"]
 
 [capabilities_required]
 permissions = ["memory.procedural:r"]

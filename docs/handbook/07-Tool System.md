@@ -715,7 +715,7 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | `agent-call` | `agent.rpc:x` | Invoke another agent via RPC |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
-| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent (non-blocking) |
+| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent and block until it finishes (use `spawn-async` for fire-and-forget) |
 | `spawn-agent` | `agent.spawn:x` | Spawn a child sub-agent task with scoped permissions and context handoff |
 | `await-agents` | `agent.spawn:x` | Wait for one or more sub-agent tasks and collect their results |
 | `verify-output` | `agent.spawn:x` | Spawn a critic agent to validate an output against criteria |
@@ -868,7 +868,7 @@ syscalls      = []                  # Optional syscall allowlist (empty = defaul
 | `trust_tier` | `manifest` | Yes | `core`, `verified`, `community`, or `blocked` |
 | `author_pubkey` | `manifest` | Verified/Community | Hex-encoded Ed25519 public key (64 chars) |
 | `signature` | `manifest` | Verified/Community | Hex-encoded Ed25519 signature (128 chars) |
-| `risk_class` | `manifest` | No | Risk classification driving the approval workflow: `readonly_scoped`, `readonly_external`, `write_scoped`, `exec_capable`, `control_plane`, or `interactive` |
+| `risk_class` | `manifest` | No | Risk classification driving the approval workflow: `readonly_scoped`, `readonly_external`, `write_agent_state`, `write_scoped`, `exec_capable`, `control_plane`, or `interactive` |
 | `tags` | `manifest` | No | Capability/discovery tags, e.g. `["read", "network"]` (used by `search-tools`) |
 | `permissions` | `capabilities_required` | Yes | Permission strings, e.g. `["fs.user_data:r"]` |
 | `outputs` | `capabilities_provided` | Yes | Capability output labels |

@@ -1,4 +1,5 @@
 tags = ["read", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name = "iot-ha-state"
@@ -6,6 +7,7 @@ version = "1.0.0"
 description = "Query Home Assistant entity state (lights, sensors, thermostats, etc.)."
 author = "agentos-core"
 trust_tier = "core"
+category    = "hal"
 tags = ["iot", "homeassistant", "hardware"]
 
 [capabilities_required]

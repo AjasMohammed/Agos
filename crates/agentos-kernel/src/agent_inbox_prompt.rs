@@ -3,11 +3,13 @@ use crate::agent_message_inbox::AgentMessageInbox;
 use agentos_types::AgentID;
 use std::sync::Arc;
 
-/// Renders an O(1)-token inbox-awareness segment for the agent's system prompt.
+/// Renders an O(1)-token inbox-awareness segment.
 ///
-/// The segment is appended at the **tail** of the system prompt so that the
-/// stable preceding content (tool descriptions, persona, etc.) benefits from
-/// Anthropic prompt caching regardless of whether counts have changed.
+/// This is NOT appended to the system prompt any more. Unread counts are
+/// dynamic, and the system prompt sits inside the Anthropic prompt-cache
+/// prefix, so appending them busted the cached prefix whenever a notification
+/// arrived. `render_line` is folded into the per-iteration `<turn_reminder>`
+/// instead, which lives after every cache breakpoint.
 ///
 /// Renders nothing (empty string) when both inboxes are empty — zero overhead
 /// for idle agents.
@@ -21,13 +23,48 @@ impl InboxPromptRenderer {
         Self { inbox, messages }
     }
 
-    /// Returns the prompt segment for `agent_id`, or an empty string when both
-    /// inboxes are idle.  Called once per task turn from
+    /// Returns the markdown segment for `agent_id`, or an empty string when
+    /// both inboxes are idle. Called once per TASK (not per turn) from
     /// `context_injector::setup_task_context`.
     ///
     /// Never renders per-notification titles, subjects, or bodies — counts only.
     /// This keeps the prompt token cost O(1) in inbox depth and prevents
     /// sensitive bodies from leaking into the raw system prompt.
+    /// One-line form for `<turn_reminder>`: counts only, no markdown heading
+    /// and no imperative.
+    ///
+    /// The tool names live in the system prompt, so repeating "use
+    /// `agent-inbox-list`" as the trailing message of every iteration is an
+    /// active nudge to re-poll an inbox the agent may have already drained.
+    /// The count is resolved once per task, so it is labelled as such rather
+    /// than presented as live.
+    pub async fn render_line(&self, agent_id: AgentID) -> String {
+        let notif_count = self.inbox.unread_count(agent_id).await.unwrap_or(0);
+        let msg_by_sender = self
+            .messages
+            .unread_by_sender(agent_id)
+            .await
+            .unwrap_or_default();
+
+        if notif_count == 0 && msg_by_sender.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        if notif_count > 0 {
+            parts.push(format!("{notif_count} unread notification(s)"));
+        }
+        if !msg_by_sender.is_empty() {
+            let list = msg_by_sender
+                .iter()
+                .map(|(_, name, c)| format!("{name}({c})"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            parts.push(format!("msgs from {list}"));
+        }
+        format!("inbox (at task start): {}", parts.join(", "))
+    }
+
     pub async fn render_segment(&self, agent_id: AgentID) -> String {
         let notif_count = self.inbox.unread_count(agent_id).await.unwrap_or(0);
         let msg_by_sender = self

@@ -1,4 +1,4 @@
-use crate::agent_manual::SharedToolSummaries;
+use crate::agent_manual::{SharedToolSummaries, ToolSummary};
 use crate::tool_search_index::ToolSearchIndex;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_memory::Embedder;
@@ -12,14 +12,23 @@ pub struct SearchToolsTool {
     tool_summaries: SharedToolSummaries,
     /// Semantic index over the catalogue. Self-refreshing; fail-open to the
     /// keyword scorer when the embedder is unavailable.
-    index: ToolSearchIndex,
+    index: Arc<ToolSearchIndex>,
 }
 
 impl SearchToolsTool {
     pub fn new(tool_summaries: SharedToolSummaries, embedder: Arc<Embedder>) -> Self {
         Self {
             tool_summaries,
-            index: ToolSearchIndex::new(embedder),
+            index: Arc::new(ToolSearchIndex::new(embedder)),
+        }
+    }
+
+    /// Share an existing index (the kernel's admission ranker owns one) so the
+    /// catalogue is embedded once per process, not once per index.
+    pub fn with_index(tool_summaries: SharedToolSummaries, index: Arc<ToolSearchIndex>) -> Self {
+        Self {
+            tool_summaries,
+            index,
         }
     }
 
@@ -52,35 +61,73 @@ impl SearchToolsTool {
     }
 }
 
-/// Merge semantic and keyword candidate names into a single best-first order:
-/// semantic hits lead (they capture intent/synonyms), then keyword hits fill the
-/// remaining slots, deduped by name and capped at `top_k`. Mirrors the
-/// semantic-first-then-keyword-fill strategy of `suggest_manual_sections_async`.
-/// Returns `(name, source)` where `source` is `"semantic"` or `"keyword"`.
-pub(crate) fn merge_order(
+/// Lexical score over the full index text (hints, category, parameter names
+/// and descriptions), not just name/description/tags. Same evidence the
+/// embedding leg sees. Keeps `score_tool`'s exact-name boosts.
+pub fn score_summary(s: &ToolSummary, query_lower: &str) -> i32 {
+    let mut score = SearchToolsTool::score_tool(&s.name, &s.description, &s.tags, query_lower);
+    let text = crate::tool_search_index::index_text(s).to_lowercase();
+    for token in query_lower.split_whitespace().filter(|t| t.len() >= 3) {
+        if text.contains(token) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// Reciprocal-rank fusion of the semantic and keyword rankings (both
+/// best-first). `k = 60` is the standard RRF constant. Returns
+/// `(name, fused_score, source)` best-first, capped at `top_k`; `source`
+/// names the leg that ranked the tool higher. An empty semantic list (no-op
+/// embedder) degrades to the keyword order unchanged.
+pub fn rrf_merge(
     semantic_names: &[String],
     keyword_names: &[String],
     top_k: usize,
-) -> Vec<(String, &'static str)> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut out: Vec<(String, &'static str)> = Vec::with_capacity(top_k);
-    for name in semantic_names {
-        if out.len() >= top_k {
-            return out;
-        }
-        if seen.insert(name.as_str()) {
-            out.push((name.clone(), "semantic"));
-        }
+) -> Vec<(String, f32, &'static str)> {
+    const K: f32 = 60.0;
+    let mut fused: HashMap<&str, (f32, usize, usize)> = HashMap::new(); // score, sem_rank, kw_rank
+    for (i, n) in semantic_names.iter().enumerate() {
+        let e = fused
+            .entry(n.as_str())
+            .or_insert((0.0, usize::MAX, usize::MAX));
+        e.0 += 1.0 / (K + i as f32 + 1.0);
+        e.1 = i;
     }
-    for name in keyword_names {
-        if out.len() >= top_k {
-            break;
-        }
-        if seen.insert(name.as_str()) {
-            out.push((name.clone(), "keyword"));
-        }
+    for (i, n) in keyword_names.iter().enumerate() {
+        let e = fused
+            .entry(n.as_str())
+            .or_insert((0.0, usize::MAX, usize::MAX));
+        e.0 += 1.0 / (K + i as f32 + 1.0);
+        e.2 = i;
     }
+    let mut out: Vec<(String, f32, &'static str)> = fused
+        .into_iter()
+        .map(|(n, (sc, sr, kr))| {
+            (
+                n.to_string(),
+                sc,
+                if sr <= kr { "semantic" } else { "keyword" },
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out.truncate(top_k);
     out
+}
+
+/// Per-agent usage scores for the ranking prior. Empty when the store is
+/// absent (fresh install) — the prior is then a no-op.
+async fn agentos_tools_usage(context: &ToolExecutionContext) -> HashMap<String, f64> {
+    crate::agent_manual::AgentManualTool::load_usage_scores_async(
+        context.data_dir.clone(),
+        context.agent_id,
+    )
+    .await
 }
 
 #[async_trait]
@@ -107,10 +154,15 @@ impl AgentTool for SearchToolsTool {
         let top_k =
             (payload.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize).clamp(1, 20);
 
-        let summaries = {
-            let guard = self.tool_summaries.read().await;
-            guard.clone()
-        };
+        // Drop tools the agent holds no permission for, before either ranking
+        // leg sees them: a search hit the agent cannot call wastes a turn and
+        // (with `rearm_on_describe`) arms a native schema for nothing.
+        // Visibility only — call-time enforcement is unchanged.
+        // The FULL catalogue goes to the index so its content signature is
+        // stable across agents (a per-permission subset would re-embed the
+        // corpus on every alternating caller); permission + category
+        // visibility is applied as an `allowed` set on both legs instead.
+        let summaries: Vec<ToolSummary> = self.tool_summaries.read().await.clone();
 
         let query_lower = query.to_lowercase();
 
@@ -120,17 +172,23 @@ impl AgentTool for SearchToolsTool {
         let cat_allowed = |category: &str| {
             allowlist.is_none_or(|al| al.iter().any(|c| c.eq_ignore_ascii_case(category)))
         };
+        let permitted: HashSet<String> = summaries
+            .iter()
+            .filter(|s| {
+                cat_allowed(&s.category)
+                    && agentos_capability::any_permission_granted(
+                        &context.permissions,
+                        &s.permissions,
+                    )
+            })
+            .map(|s| s.name.clone())
+            .collect();
 
         // 1. Keyword scoring (substring/token overlap), descending score then name.
         let mut keyword: Vec<(i32, String)> = summaries
             .iter()
-            .filter(|s| cat_allowed(&s.category))
-            .map(|s| {
-                (
-                    Self::score_tool(&s.name, &s.description, &s.tags, &query_lower),
-                    s.name.clone(),
-                )
-            })
+            .filter(|s| permitted.contains(&s.name))
+            .map(|s| (score_summary(s, &query_lower), s.name.clone()))
             .filter(|(score, _)| *score > 0)
             .collect();
         keyword.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -138,23 +196,31 @@ impl AgentTool for SearchToolsTool {
             keyword.iter().map(|(s, n)| (n.clone(), *s)).collect();
         let keyword_names: Vec<String> = keyword.into_iter().map(|(_, n)| n).collect();
 
-        // 2. Semantic ranking (embedding cosine), restricted to the same allowlist.
-        let allowed_names: Option<HashSet<String>> = allowlist.map(|_| {
-            summaries
-                .iter()
-                .filter(|s| cat_allowed(&s.category))
-                .map(|s| s.name.clone())
-                .collect()
-        });
+        // 2. Semantic ranking (embedding cosine), restricted to the same set.
         let semantic = self
             .index
-            .semantic_rank(&summaries, query, allowed_names.as_ref(), top_k)
+            .semantic_rank(&summaries, query, Some(&permitted), top_k * 2)
             .await;
         let semantic_score: HashMap<String, f32> = semantic.iter().cloned().collect();
         let semantic_names: Vec<String> = semantic.into_iter().map(|(n, _)| n).collect();
 
-        // 3. Merge: semantic first, keyword fills the rest, deduped.
-        let order = merge_order(&semantic_names, &keyword_names, top_k);
+        // 3. Fuse both legs with RRF, then add a small per-agent usage prior so
+        // the tool this agent habitually uses outranks a near-duplicate sibling.
+        let mut order = rrf_merge(&semantic_names, &keyword_names, top_k * 2);
+        let usage = agentos_tools_usage(&context).await;
+        if !usage.is_empty() {
+            for (name, score, _) in order.iter_mut() {
+                if let Some(u) = usage.get(name) {
+                    *score += 0.05 * (1.0 + *u as f32).ln();
+                }
+            }
+            order.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        }
+        order.truncate(top_k);
         let desc_by_name: HashMap<&str, &str> = summaries
             .iter()
             .map(|s| (s.name.as_str(), s.description.as_str()))
@@ -162,17 +228,19 @@ impl AgentTool for SearchToolsTool {
 
         let matches: Vec<serde_json::Value> = order
             .iter()
-            .map(|(name, source)| {
+            .map(|(name, fused, source)| {
                 let description = desc_by_name.get(name.as_str()).copied().unwrap_or("");
+                // Always a float so consumers see one type per row.
                 let score = if *source == "semantic" {
                     json!(semantic_score.get(name).copied().unwrap_or(0.0))
                 } else {
-                    json!(keyword_score.get(name).copied().unwrap_or(0))
+                    json!(keyword_score.get(name).copied().unwrap_or(0) as f32)
                 };
                 json!({
                     "name": name,
                     "description": description,
                     "score": score,
+                    "fused": fused,
                     "match": source,
                 })
             })
@@ -191,17 +259,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merge_puts_semantic_first_then_keyword_fill_deduped() {
+    fn rrf_merge_fuses_both_legs_and_dedups() {
         let semantic = vec!["web-fetch".to_string(), "http-client".to_string()];
         let keyword = vec![
-            "http-client".to_string(), // dup of a semantic hit — must not repeat
+            "http-client".to_string(), // in both → highest fused score
             "file-reader".to_string(),
         ];
-        let out = merge_order(&semantic, &keyword, 5);
-        let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["web-fetch", "http-client", "file-reader"]);
-        assert_eq!(out[0].1, "semantic");
-        assert_eq!(out[2].1, "keyword");
+        let out = rrf_merge(&semantic, &keyword, 5);
+        let names: Vec<&str> = out.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["http-client", "web-fetch", "file-reader"]);
+        // http-client is #2 semantic but #1 keyword → the keyword leg ranked it higher.
+        assert_eq!(out[0].2, "keyword");
+        assert_eq!(out[1].2, "semantic");
+        assert!(out.iter().all(|(_, s, _)| *s > 0.0));
+        // Empty semantic leg → keyword order unchanged.
+        let out = rrf_merge(&[], &keyword, 5);
+        let names: Vec<&str> = out.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["http-client", "file-reader"]);
+        assert!(out.iter().all(|(_, _, src)| *src == "keyword"));
     }
 
     #[tokio::test]
@@ -221,6 +296,7 @@ mod tests {
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: category.into(),
+                search_hints: Vec::new(),
                 tags: vec![],
                 risk_class: "readonly_scoped".into(),
                 usage_hints: None,
@@ -280,10 +356,11 @@ mod tests {
     fn merge_respects_top_k() {
         let semantic = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let keyword = vec!["d".to_string()];
-        let out = merge_order(&semantic, &keyword, 2);
+        let out = rrf_merge(&semantic, &keyword, 2);
         assert_eq!(out.len(), 2);
+        // "a" (sem #1) and "d" (kw #1) tie on RRF score → name order breaks it.
         assert_eq!(out[0].0, "a");
-        assert_eq!(out[1].0, "b");
+        assert_eq!(out[1].0, "d");
     }
 
     #[test]

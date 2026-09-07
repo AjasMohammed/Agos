@@ -1,4 +1,5 @@
 tags = ["exec"]
+risk_class = "exec_capable"
 
 [manifest]
 name = "proc-spawn"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Spawn a managed background process with resource limits and output capture. Pass `workspace` to resolve the binary inside a managed environment (venv/bin → node_modules/.bin → bin) with VIRTUAL_ENV activated."
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "exec_capable"
+category    = "process"
 
 [capabilities_required]
 permissions = ["proc.spawn:x"]

@@ -20,7 +20,7 @@ use crate::types::{ApiInboxMessage, InboxQuery};
     tag = "agents",
     operation_id = "agent_inbox",
     params(
-        ("id" = String, Path, description = "Agent ID (UUID)"),
+        ("id" = String, Path, description = "Agent name or ID (UUID)"),
         InboxQuery
     ),
     responses(

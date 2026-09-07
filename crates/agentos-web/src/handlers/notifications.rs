@@ -84,7 +84,8 @@ pub struct NotificationQuery {
     pub partial: Option<String>,
 }
 
-/// GET /notifications/{id} — detail view; also marks the notification as read.
+/// GET /notifications/{id} — detail view. Read-only: use
+/// `POST /api/v1/notifications/{id}/read` to mark it read.
 pub async fn get_notification(
     State(state): State<AppState>,
     jar: CookieJar,

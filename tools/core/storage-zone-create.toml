@@ -1,4 +1,5 @@
 tags = ["write"]
+risk_class = "write_scoped"
 
 [manifest]
 name = "storage-zone-create"
@@ -6,7 +7,7 @@ version = "1.0.0"
 description = "Request access to a filesystem directory as a managed storage zone"
 author = "agentos-core"
 trust_tier = "core"
-risk_class = "write_scoped"
+category    = "capabilities"
 
 [capabilities_required]
 permissions = [

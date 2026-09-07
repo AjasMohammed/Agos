@@ -38,6 +38,11 @@ anyhow = { workspace = true }
 urlencoding = "2"
 zeroize = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Only for `killpg` on converter timeouts — shelling out to `kill` with a
+# negative pid signals the caller's own process group on util-linux.
+libc = "0.2"
+
 [dev-dependencies]
 agentos-audit = { path = "../agentos-audit" }
 tempfile = "3.26.0"

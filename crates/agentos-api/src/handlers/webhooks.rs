@@ -11,6 +11,7 @@ use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::error::ApiError;
 use crate::service::KernelService;
 
 /// `POST /api/v1/webhooks/telegram/{channel_id}`
@@ -170,4 +171,43 @@ pub async fn whatsapp_webhook(
     }
 
     StatusCode::OK
+}
+
+/// `POST /api/v1/webhooks/incoming/{endpoint_id}` — Provider webhook ingress.
+///
+/// Unauthenticated (external services cannot carry a bearer token); the
+/// per-endpoint secret and provider signature are the credential. Returns as
+/// soon as the event is enqueued for debounced delivery to the owning agent.
+#[utoipa::path(
+    post,
+    path = "/api/v1/webhooks/incoming/{endpoint_id}",
+    tag = "webhooks",
+    operation_id = "webhooks_incoming",
+    params(("endpoint_id" = String, Path, description = "Webhook endpoint id (UUID)")),
+    request_body(content = serde_json::Value, description = "Provider payload (any content type; non-JSON bodies are wrapped as `{\"_raw\": ...}`)"),
+    responses(
+        (status = 200, description = "Event accepted"),
+        (status = 401, description = "Invalid signature", body = crate::error::ApiErrorBody),
+        (status = 404, description = "Unknown or inactive endpoint", body = crate::error::ApiErrorBody),
+        (status = 429, description = "Endpoint rate-limited", body = crate::error::ApiErrorBody)
+    )
+)]
+pub async fn incoming_webhook(
+    State(svc): State<Arc<dyn KernelService>>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let header_map: HashMap<String, String> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_lowercase(), v.to_string()))
+        })
+        .collect();
+    svc.receive_webhook(&endpoint_id, header_map, body.to_vec())
+        .await?;
+    Ok(StatusCode::OK)
 }

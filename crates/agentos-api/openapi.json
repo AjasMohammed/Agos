@@ -304,7 +304,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "Agent ID (UUID)",
+            "description": "Agent name or ID (UUID)",
             "required": true,
             "schema": {
               "type": "string"
@@ -372,7 +372,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "Agent ID (UUID)",
+            "description": "Agent name or ID (UUID)",
             "required": true,
             "schema": {
               "type": "string"
@@ -506,8 +506,8 @@
         "tags": [
           "agents"
         ],
-        "summary": "`DELETE /api/v1/agents/{name}` — Disconnect an agent by name.",
-        "description": "We look up the agent ID from the name via `get_agent_detail`, then call\n`disconnect_agent`.",
+        "summary": "`DELETE /api/v1/agents/{name}` — Disconnect an agent by name, or remove it\nentirely with `?purge=true`.",
+        "description": "Disconnect parks the agent: the profile stays on disk marked offline so a\nreconnect reuses the same UUID. Disconnecting an already-offline agent is a\nno-op success (the kernel command itself rejects it; the handler short-circuits).\nPurge deletes the profile, identity, memory tiers, scratchpad, inboxes,\ncheckpoints and schedules — it works whether the agent is online or not, and\ncannot be undone. Vault secrets and the audit log are kept either way.",
         "operationId": "agents_disconnect",
         "parameters": [
           {
@@ -518,11 +518,20 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "purge",
+            "in": "query",
+            "description": "`true` wipes the agent instead of parking it offline. Irreversible.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Agent disconnected",
+            "description": "Agent disconnected or removed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1599,6 +1608,163 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/v1/channels` — Connect a channel (mirrors `agentos channel connect`).",
+        "operationId": "channels_connect",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Channel connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiChannelSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Adapter failed to start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/pairings": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`GET /api/v1/channels/pairings` — DM pairing allowlist (approved + pending).",
+        "operationId": "channels_pairings",
+        "responses": {
+          "200": {
+            "description": "Pairings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiPairings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/pairings/{code}/approve": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/v1/channels/pairings/{code}/approve` — Approve a pairing code.",
+        "operationId": "channels_approve_pairing",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "description": "6-character pairing code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiPairingEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/channels/{id}": {
@@ -1642,6 +1808,158 @@
           },
           "404": {
             "description": "Channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`PUT /api/v1/channels/{id}` — Edit a connected channel and rebuild its adapter.",
+        "operationId": "channels_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Channel updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiChannelSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Adapter failed to start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/{id}/agent": {
+      "put": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`PUT /api/v1/channels/{id}/agent` — Set/clear the default chat agent.",
+        "operationId": "channels_set_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetChannelAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel or agent not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1709,6 +2027,206 @@
           },
           "404": {
             "description": "Channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/{id}/pairings/{sender_id}": {
+      "delete": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`DELETE /api/v1/channels/{id}/pairings/{sender_id}` — Revoke an approved sender.",
+        "operationId": "channels_revoke_pairing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sender_id",
+            "in": "path",
+            "description": "External sender id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/{id}/pairings/{sender_id}/approve": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/v1/channels/{id}/pairings/{sender_id}/approve` — Approve a\npending request by sender, without the code.",
+        "description": "The code is withheld from `GET /channels/pairings` on purpose, which leaves\nthe self-pair case with no panel route (the operator is the sender, and the\ncode only reaches the kernel log). This approves the row the list already\nreturns. `channels:w` gated — it takes no secret, so it is deliberately not\nreachable from the inbound `/pair` path.",
+        "operationId": "channels_approve_pending_pairing",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sender_id",
+            "in": "path",
+            "description": "External sender id of the pending request",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiPairingEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No pending request for this sender, or it expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/{id}/test": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/v1/channels/{id}/test` — Deliver a test notification.",
+        "operationId": "channels_test",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test message delivered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Delivery failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2566,6 +3084,70 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /api/v1/connectors` — Register a connector from a manifest TOML.",
+        "operationId": "connectors_add",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddConnectorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConnectorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/connectors/{id}": {
@@ -2623,6 +3205,203 @@
             "bearer_auth": []
           }
         ]
+      },
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`PUT /api/v1/connectors/{id}` — Replace a connector manifest in place.",
+        "operationId": "connectors_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connector id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddConnectorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConnectorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest or id mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`DELETE /api/v1/connectors/{id}` — Remove manifest + credential.",
+        "operationId": "connectors_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connector id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/connectors/{id}/credential": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /api/v1/connectors/{id}/credential` — Store an OAuth token by hand.",
+        "operationId": "connectors_store_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connector id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/connectors/{id}/disconnect": {
@@ -2656,6 +3435,146 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/connectors/{id}/oauth/callback": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`GET /api/v1/connectors/{id}/oauth/callback` — Provider redirect target (public).",
+        "description": "No bearer: the browser arrives here from the provider. Safety is the\nvault-validated `state`. On completion the browser is sent to the panel\norigin from config — never to a caller-supplied URL.",
+        "operationId": "connectors_oauth_callback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connector / provider id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plain-text result when no panel origin is configured"
+          },
+          "302": {
+            "description": "Redirect to the panel with `?oauth=ok|error`"
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{id}/oauth/start": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /api/v1/connectors/{id}/oauth/start` — Begin OAuth; returns the URL to open.",
+        "operationId": "connectors_oauth_start",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connector / provider id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorize URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_OAuthStartResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No provider configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Provider misconfigured (client id env unset)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4275,6 +5194,340 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "`POST /api/v1/mcp` — Attach an MCP server at runtime (stdio or http).",
+        "operationId": "mcp_attach",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachMcpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Server attached; lists registered tool names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_McpAttachedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Attach failed (duplicate name, handshake, vault)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mcp/catalog": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "`GET /api/v1/mcp/catalog?q=` — Browse the curated MCP catalog.",
+        "operationId": "mcp_catalog_list",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiMcpCatalogEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mcp/catalog/{id}": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "`GET /api/v1/mcp/catalog/{id}` — Full catalog entry.",
+        "operationId": "mcp_catalog_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalog entry id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mcp/catalog/{id}/install": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "`POST /api/v1/mcp/catalog/{id}/install` — Install a catalog entry (attaches under its id).",
+        "operationId": "mcp_catalog_install",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalog entry id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallMcpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Installed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_McpAttachedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Install refused (trust tier, runtime, attach)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mcp/{name}": {
+      "put": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "`PUT /api/v1/mcp/{name}` — Re-attach a server with a new configuration.",
+        "operationId": "mcp_update",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "MCP server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachMcpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Server re-attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_McpAttachedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Server not attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "New configuration failed to attach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/mcp/{name}/detach": {
@@ -4388,6 +5641,40 @@
             "bearer_auth": []
           }
         ]
+      },
+      "delete": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "`DELETE /api/v1/notifications` — Clear every notification (live questions survive).",
+        "operationId": "notifications_clear_all",
+        "responses": {
+          "200": {
+            "description": "Notifications cleared; `deleted` = row count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/notifications/read": {
@@ -4400,6 +5687,42 @@
         "responses": {
           "200": {
             "description": "Read notifications cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notifications/read-all": {
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "`POST /api/v1/notifications/read-all` — Mark every notification as read.",
+        "operationId": "notifications_mark_all_read",
+        "responses": {
+          "200": {
+            "description": "Notifications marked read; `updated` = row count",
             "content": {
               "application/json": {
                 "schema": {
@@ -4574,6 +5897,63 @@
         ]
       }
     },
+    "/api/v1/notifications/{id}/read": {
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "`POST /api/v1/notifications/{id}/read` — Mark a single notification read.",
+        "operationId": "notifications_mark_read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notification ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Idempotent; `updated` = false when no such notification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/notifications/{id}/respond": {
       "post": {
         "tags": [
@@ -4732,6 +6112,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "A pipeline with this name exists (resend with `overwrite`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4781,6 +6171,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A pipeline with the imported name already exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -5134,6 +6534,70 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "`POST /api/v1/plugins` — Install a plugin from a pasted `plugin.toml`.",
+        "operationId": "plugins_install",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPluginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Installed (status may be `blocked` if unsigned)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiPluginSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Plugin id already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/api/v1/plugins/discover": {
@@ -5213,6 +6677,156 @@
           },
           "404": {
             "description": "Plugin not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "`PUT /api/v1/plugins/{id}` — Replace a user plugin's manifest in place.",
+        "operationId": "plugins_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Plugin id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPluginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiPluginSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest or id mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Built-in plugin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "`DELETE /api/v1/plugins/{id}` — Remove a user-installed plugin (core plugins refuse).",
+        "operationId": "plugins_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Plugin id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a user-installed plugin",
             "content": {
               "application/json": {
                 "schema": {
@@ -5559,6 +7173,42 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Envelope_ApiProposalStats"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`GET /api/v1/providers` — List built-in and catalog LLM providers.",
+        "operationId": "providers_list",
+        "responses": {
+          "200": {
+            "description": "Available LLM providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiProvider"
                 }
               }
             }
@@ -6727,7 +8377,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/ApiTaskStatus"
             }
           },
           {
@@ -7422,6 +9072,71 @@
         ]
       }
     },
+    "/api/v1/webhooks/incoming/{endpoint_id}": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "`POST /api/v1/webhooks/incoming/{endpoint_id}` — Provider webhook ingress.",
+        "description": "Unauthenticated (external services cannot carry a bearer token); the\nper-endpoint secret and provider signature are the credential. Returns as\nsoon as the event is enqueued for debounced delivery to the owning agent.",
+        "operationId": "webhooks_incoming",
+        "parameters": [
+          {
+            "name": "endpoint_id",
+            "in": "path",
+            "description": "Webhook endpoint id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Provider payload (any content type; non-JSON bodies are wrapped as `{\"_raw\": ...}`)",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Event accepted"
+          },
+          "401": {
+            "description": "Invalid signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or inactive endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Endpoint rate-limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/webhooks/telegram/{channel_id}": {
       "post": {
         "tags": [
@@ -7863,6 +9578,207 @@
         ]
       }
     },
+    "/api/v1/workspace-grants": {
+      "get": {
+        "tags": [
+          "workspace-grants"
+        ],
+        "summary": "`GET /api/v1/workspace-grants` — List active folder-access grants.",
+        "operationId": "workspace_grants_list",
+        "parameters": [
+          {
+            "name": "agent_name",
+            "in": "query",
+            "description": "Agent display name or UUID; returns that agent's grants plus the global\nones. Omit to list every active grant.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active workspace grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiWorkspaceGrant"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "workspace-grants"
+        ],
+        "summary": "`POST /api/v1/workspace-grants` — Grant a host directory to one agent, or to\nevery agent when `agent_name` is omitted.",
+        "description": "Returns 409 Conflict when an active grant already exists for the same\n(path, agent scope), and 400 for a relative path or a system root.",
+        "operationId": "workspace_grants_add",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Grant created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiWorkspaceGrant"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Grant already exists for this scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "workspace-grants"
+        ],
+        "summary": "`DELETE /api/v1/workspace-grants?path=…&agent_name=…` — Revoke a grant.",
+        "description": "Matches on the (path, agent scope) pair rather than a row id, mirroring\n`agentos workspace revoke`: omit `agent_name` to revoke the global grant.",
+        "operationId": "workspace_grants_revoke",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grant revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active grant for this path and scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/ws/ticket": {
       "post": {
         "tags": [
@@ -7938,6 +9854,18 @@
           }
         }
       },
+      "AddConnectorRequest": {
+        "type": "object",
+        "description": "Register a connector from a pasted manifest TOML.",
+        "required": [
+          "manifest_toml"
+        ],
+        "properties": {
+          "manifest_toml": {
+            "type": "string"
+          }
+        }
+      },
       "ApiAgentDetail": {
         "type": "object",
         "required": [
@@ -7952,11 +9880,22 @@
               "null"
             ]
           },
+          "description": {
+            "type": "string",
+            "description": "Current profile description (empty when unset). Exposed so an editor can\nprefill instead of submitting blanks over the stored values."
+          },
           "permissions": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "provider_healthy": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Result of a live health check against the agent's LLM provider\n(`None` when no adapter is attached or the check timed out)."
           },
           "recent_tasks": {
             "type": "array",
@@ -7966,6 +9905,17 @@
           },
           "summary": {
             "$ref": "#/components/schemas/ApiAgentSummary"
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current custom system prompt, when one is set."
+          },
+          "thinking_level": {
+            "type": "string",
+            "description": "Current default thinking level, lowercase (`off`/`low`/`medium`/`high`/`max`)."
           }
         }
       },
@@ -8125,6 +10075,13 @@
           "last_active"
         ],
         "properties": {
+          "active_agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Default agent for inbound chat on this channel."
+          },
           "connected_at": {
             "type": "string",
             "format": "date-time",
@@ -8386,6 +10343,13 @@
           "id": {
             "type": "string"
           },
+          "manifest_toml": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Raw manifest TOML, when the connector was installed from a file the\nkernel owns — the panel prefills its edit form with this."
+          },
           "name": {
             "type": "string"
           },
@@ -8420,6 +10384,8 @@
           "id",
           "name",
           "connected",
+          "registered",
+          "oauth_available",
           "scopes"
         ],
         "properties": {
@@ -8443,12 +10409,20 @@
             "type": "string",
             "description": "Human-readable name."
           },
+          "oauth_available": {
+            "type": "boolean",
+            "description": "An OAuth provider block exists in `oauth_providers.toml`, so \"Connect\" works."
+          },
           "provider": {
             "type": [
               "string",
               "null"
             ],
             "description": "OAuth provider name (from the stored credential), if connected."
+          },
+          "registered": {
+            "type": "boolean",
+            "description": "A connector manifest is registered (tools are callable once connected)."
           },
           "scopes": {
             "type": "array",
@@ -8467,12 +10441,25 @@
           "topic",
           "participants",
           "status",
+          "max_turns",
+          "created_at",
+          "updated_at",
           "messages"
         ],
         "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC3339 creation timestamp."
+          },
           "id": {
             "type": "string",
             "description": "Conversation id (UUID)."
+          },
+          "max_turns": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Turn ceiling the orchestration loop runs to (clamped 2..=50 at creation).",
+            "minimum": 0
           },
           "messages": {
             "type": "array",
@@ -8495,6 +10482,10 @@
           "topic": {
             "type": "string",
             "description": "Conversation topic / seed prompt."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC3339 last-updated timestamp."
           }
         }
       },
@@ -8856,13 +10847,59 @@
           }
         }
       },
+      "ApiMcpCatalogEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "display_name",
+          "description",
+          "trust_tier",
+          "transport",
+          "installed"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "homepage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean",
+            "description": "A server named after this catalog id is attached (live or persisted)."
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transport": {
+            "type": "string"
+          },
+          "trust_tier": {
+            "type": "string"
+          }
+        }
+      },
       "ApiMcpServer": {
         "type": "object",
         "description": "A running MCP server merged with its persisted attachment record.",
         "required": [
           "name",
           "tool_count",
-          "args"
+          "args",
+          "has_auth_token",
+          "env_keys"
         ],
         "properties": {
           "args": {
@@ -8886,6 +10923,17 @@
             ],
             "format": "date-time",
             "description": "When the attachment was persisted, if persisted."
+          },
+          "env_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of the persisted env vars. Values are withheld: they routinely\nhold secrets. An edit that omits `env` keeps them."
+          },
+          "has_auth_token": {
+            "type": "boolean",
+            "description": "A static bearer token is stored for this server. The token itself is\nnever returned — an edit that omits `auth_token` keeps it."
           },
           "name": {
             "type": "string",
@@ -9060,6 +11108,71 @@
           }
         }
       },
+      "ApiPairingEntry": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "sender_id",
+          "approved_at"
+        ],
+        "properties": {
+          "approved_at": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiPairings": {
+        "type": "object",
+        "required": [
+          "approved",
+          "pending"
+        ],
+        "properties": {
+          "approved": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiPairingEntry"
+            }
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiPendingPairing"
+            }
+          }
+        }
+      },
+      "ApiPendingPairing": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "sender_id",
+          "expires_at"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "sender_id": {
+            "type": "string"
+          }
+        }
+      },
       "ApiPipelineSummary": {
         "type": "object",
         "required": [
@@ -9095,7 +11208,8 @@
           "channels",
           "tools",
           "permissions",
-          "memory_backend"
+          "memory_backend",
+          "user_installed"
         ],
         "properties": {
           "author": {
@@ -9125,6 +11239,13 @@
           "id": {
             "type": "string"
           },
+          "manifest_toml": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Raw `plugin.toml`, for prefilling an edit form."
+          },
           "memory_backend": {
             "type": "boolean"
           },
@@ -9146,6 +11267,9 @@
           "trust_tier": {
             "type": "string"
           },
+          "user_installed": {
+            "type": "boolean"
+          },
           "version": {
             "type": "string"
           }
@@ -9162,7 +11286,8 @@
           "trust_tier",
           "status",
           "channels",
-          "tools"
+          "tools",
+          "user_installed"
         ],
         "properties": {
           "blocked_reason": {
@@ -9205,6 +11330,10 @@
           "trust_tier": {
             "type": "string",
             "description": "Trust tier: `core` | `verified` | `community` | `blocked`."
+          },
+          "user_installed": {
+            "type": "boolean",
+            "description": "Manifest lives under `plugins/user/` (installed by an operator; removable)."
           },
           "version": {
             "type": "string",
@@ -9309,6 +11438,50 @@
           }
         }
       },
+      "ApiProvider": {
+        "type": "object",
+        "description": "One LLM provider available to `POST /api/v1/agents` — either a built-in\nadapter (`source = \"built-in\"`) or an entry from `config/providers.toml`\n(`source = \"catalog\"`).",
+        "required": [
+          "name",
+          "display_name",
+          "source",
+          "api_key_set"
+        ],
+        "properties": {
+          "api_key_env": {
+            "type": "string",
+            "description": "Environment variable the API key is read from (empty for local providers)."
+          },
+          "api_key_set": {
+            "type": "boolean",
+            "description": "Whether a key is present for `api_key_env` (never the key itself)."
+          },
+          "compatible_with": {
+            "type": "string",
+            "description": "Wire protocol a catalog provider speaks (e.g. `\"openai\"`); empty for built-ins."
+          },
+          "default_model": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Models the catalog lists for this provider; empty for built-ins."
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "`\"built-in\"` or `\"catalog\"`."
+          }
+        }
+      },
       "ApiRole": {
         "type": "object",
         "description": "A reusable role that groups a set of permissions.",
@@ -9367,6 +11540,18 @@
             ]
           }
         }
+      },
+      "ApiScheduleState": {
+        "type": "string",
+        "description": "The wire vocabulary for a schedule's state (same rationale as\n[`crate::types::ApiTaskStatus`] — a closed set the panel can be typed against).",
+        "enum": [
+          "active",
+          "paused",
+          "disabled",
+          "pending",
+          "fired",
+          "cancelled"
+        ]
       },
       "ApiScheduleSummary": {
         "type": "object",
@@ -9429,7 +11614,7 @@
             "minimum": 0
           },
           "state": {
-            "type": "string",
+            "$ref": "#/components/schemas/ApiScheduleState",
             "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
           }
         }
@@ -9629,14 +11814,28 @@
             "type": "string",
             "format": "date-time"
           },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure reason when `status == \"failed\"`."
+          },
           "id": {
             "type": "string"
           },
           "prompt": {
             "type": "string"
           },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's final answer when `status == \"complete\"`."
+          },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/ApiTaskStatus"
           },
           "trigger_event_type": {
             "type": [
@@ -9646,6 +11845,19 @@
             "description": "Event type that triggered this task, if it was created by an event\nsubscription (e.g. `DiskSpaceLow`). Absent for user/scheduled tasks."
           }
         }
+      },
+      "ApiTaskStatus": {
+        "type": "string",
+        "description": "The wire vocabulary for a task's lifecycle state.\n\nA typed enum, not a bare `String`: the panel's filter chips used to send\n`completed` while the API says `complete`, which silently returned zero rows\nfor months. As an enum it lands in `openapi.json` as a closed set, the\ngenerated TypeScript is a union, and that class of drift becomes a compile\nerror on both sides.",
+        "enum": [
+          "queued",
+          "running",
+          "waiting",
+          "suspended",
+          "complete",
+          "failed",
+          "cancelled"
+        ]
       },
       "ApiTaskSummary": {
         "type": "object",
@@ -9673,6 +11885,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure reason when `status == \"failed\"`."
+          },
           "id": {
             "type": "string"
           },
@@ -9680,7 +11899,7 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/ApiTaskStatus"
           }
         }
       },
@@ -9707,6 +11926,20 @@
           },
           "name": {
             "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permissions the tool requires (from `[capabilities_required]`)."
+          },
+          "risk_class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Approval risk class (`readonly_scoped`, `readonly_external`,\n`write_agent_state`, `write_scoped`, `exec_capable`, `control_plane`,\n`interactive`)."
           },
           "status": {
             "type": "string"
@@ -9805,6 +12038,114 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "ApiWorkspaceGrant": {
+        "type": "object",
+        "description": "An active grant authorising filesystem access to one or all agents.",
+        "required": [
+          "id",
+          "path",
+          "mode",
+          "granted_at",
+          "source",
+          "granted_by"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent UUID this grant is scoped to; `null` means every agent."
+          },
+          "granted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "granted_by": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Permission bits as a short string: any of `r`, `w`, `x` (e.g. `\"rw\"`)."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute, lexically-normalized host directory. Subpaths are covered."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the grant came from (`config`, `bus`, `api`)."
+          }
+        }
+      },
+      "AttachMcpRequest": {
+        "type": "object",
+        "description": "Attach a new MCP server at runtime (mirrors `agentos mcp attach`).\nExactly one of `command` (stdio) or `url` (http) must be set.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "auth_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Static Bearer token for http transport; stored in the vault by the kernel."
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Subprocess env; `vault:KEY` values are resolved from the vault at attach\ntime. On an edit, omit it to keep the stored env untouched.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "oauth_connector_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -10035,6 +12376,68 @@
           }
         }
       },
+      "ConnectChannelRequest": {
+        "type": "object",
+        "description": "Register a bidirectional channel (mirrors `agentos channel connect`).",
+        "required": [
+          "kind",
+          "display_name"
+        ],
+        "properties": {
+          "active_agent_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credential": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inline credential; stored in the vault under `credential_key`\n(or `channel.<kind>.<display-name-slug>` when that is empty) before connecting."
+          },
+          "credential_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Vault key holding the bot token / password."
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Telegram chat_id, ntfy topic, email address. Optional for Telegram."
+          },
+          "kind": {
+            "type": "string",
+            "description": "telegram | ntfy | email | discord | slack | whatsapp | webhook"
+          },
+          "reply_topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "webhook_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CostBudget": {
         "type": "object",
         "description": "A per-agent daily budget snapshot.",
@@ -10138,7 +12541,7 @@
       },
       "CreateChatSessionRequest": {
         "type": "object",
-        "description": "Request body for `POST /api/v1/chat/sessions`.\n\n`first_message` is optional in the API contract, but the backing store only\nexposes `create_session_with_first_message`. When omitted, the session is\ncreated with an empty placeholder first message (see handler/kernel impl).",
+        "description": "Request body for `POST /api/v1/chat/sessions`.\n\n`first_message` is optional: omit it (or send blank) to open an empty\nsession, which is what a client that creates the session on the first send\nwants — the send/stream endpoints persist the user turn themselves.",
         "required": [
           "agent_name"
         ],
@@ -10152,7 +12555,7 @@
               "string",
               "null"
             ],
-            "description": "Optional first user message. If omitted, an empty placeholder is stored."
+            "description": "Optional first user message. Missing or blank means an empty session."
           },
           "title": {
             "type": [
@@ -10550,11 +12953,22 @@
                   "null"
                 ]
               },
+              "description": {
+                "type": "string",
+                "description": "Current profile description (empty when unset). Exposed so an editor can\nprefill instead of submitting blanks over the stored values."
+              },
               "permissions": {
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
+              },
+              "provider_healthy": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Result of a live health check against the agent's LLM provider\n(`None` when no adapter is attached or the check timed out)."
               },
               "recent_tasks": {
                 "type": "array",
@@ -10564,6 +12978,17 @@
               },
               "summary": {
                 "$ref": "#/components/schemas/ApiAgentSummary"
+              },
+              "system_prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Current custom system prompt, when one is set."
+              },
+              "thinking_level": {
+                "type": "string",
+                "description": "Current default thinking level, lowercase (`off`/`low`/`medium`/`high`/`max`)."
               }
             }
           }
@@ -10759,6 +13184,13 @@
               "last_active"
             ],
             "properties": {
+              "active_agent_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Default agent for inbound chat on this channel."
+              },
               "connected_at": {
                 "type": "string",
                 "format": "date-time",
@@ -10975,6 +13407,13 @@
               "id": {
                 "type": "string"
               },
+              "manifest_toml": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Raw manifest TOML, when the connector was installed from a file the\nkernel owns — the panel prefills its edit form with this."
+              },
               "name": {
                 "type": "string"
               },
@@ -11019,12 +13458,25 @@
               "topic",
               "participants",
               "status",
+              "max_turns",
+              "created_at",
+              "updated_at",
               "messages"
             ],
             "properties": {
+              "created_at": {
+                "type": "string",
+                "description": "RFC3339 creation timestamp."
+              },
               "id": {
                 "type": "string",
                 "description": "Conversation id (UUID)."
+              },
+              "max_turns": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Turn ceiling the orchestration loop runs to (clamped 2..=50 at creation).",
+                "minimum": 0
               },
               "messages": {
                 "type": "array",
@@ -11047,6 +13499,10 @@
               "topic": {
                 "type": "string",
                 "description": "Conversation topic / seed prompt."
+              },
+              "updated_at": {
+                "type": "string",
+                "description": "RFC3339 last-updated timestamp."
               }
             }
           }
@@ -11299,6 +13755,70 @@
           }
         }
       },
+      "Envelope_ApiPairingEntry": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "channel_id",
+              "sender_id",
+              "approved_at"
+            ],
+            "properties": {
+              "approved_at": {
+                "type": "string"
+              },
+              "channel_id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiPairings": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "approved",
+              "pending"
+            ],
+            "properties": {
+              "approved": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiPairingEntry"
+                }
+              },
+              "pending": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiPendingPairing"
+                }
+              }
+            }
+          }
+        }
+      },
       "Envelope_ApiPluginDetail": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -11319,7 +13839,8 @@
               "channels",
               "tools",
               "permissions",
-              "memory_backend"
+              "memory_backend",
+              "user_installed"
             ],
             "properties": {
               "author": {
@@ -11349,6 +13870,13 @@
               "id": {
                 "type": "string"
               },
+              "manifest_toml": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Raw `plugin.toml`, for prefilling an edit form."
+              },
               "memory_backend": {
                 "type": "boolean"
               },
@@ -11370,8 +13898,86 @@
               "trust_tier": {
                 "type": "string"
               },
+              "user_installed": {
+                "type": "boolean"
+              },
               "version": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiPluginSummary": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Summary row for a discovered/active plugin.",
+            "required": [
+              "id",
+              "display_name",
+              "version",
+              "description",
+              "trust_tier",
+              "status",
+              "channels",
+              "tools",
+              "user_installed"
+            ],
+            "properties": {
+              "blocked_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Populated only when `status == \"blocked\"`."
+              },
+              "channels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Channel ids declared by this plugin."
+              },
+              "description": {
+                "type": "string",
+                "description": "One-line description."
+              },
+              "display_name": {
+                "type": "string",
+                "description": "Human-readable display name."
+              },
+              "id": {
+                "type": "string",
+                "description": "Unique plugin id (kebab-case)."
+              },
+              "status": {
+                "type": "string",
+                "description": "Lifecycle status: `discovered` | `active` | `disabled` | `blocked`."
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tool manifest paths declared by this plugin."
+              },
+              "trust_tier": {
+                "type": "string",
+                "description": "Trust tier: `core` | `verified` | `community` | `blocked`."
+              },
+              "user_installed": {
+                "type": "boolean",
+                "description": "Manifest lives under `plugins/user/` (installed by an operator; removable)."
+              },
+              "version": {
+                "type": "string",
+                "description": "Semver version string."
               }
             }
           }
@@ -11531,7 +14137,7 @@
                 "minimum": 0
               },
               "state": {
-                "type": "string",
+                "$ref": "#/components/schemas/ApiScheduleState",
                 "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
               }
             }
@@ -11710,14 +14316,28 @@
                 "type": "string",
                 "format": "date-time"
               },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Failure reason when `status == \"failed\"`."
+              },
               "id": {
                 "type": "string"
               },
               "prompt": {
                 "type": "string"
               },
+              "result": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The agent's final answer when `status == \"complete\"`."
+              },
               "status": {
-                "type": "string"
+                "$ref": "#/components/schemas/ApiTaskStatus"
               },
               "trigger_event_type": {
                 "type": [
@@ -11761,6 +14381,20 @@
               "name": {
                 "type": "string"
               },
+              "permissions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Permissions the tool requires (from `[capabilities_required]`)."
+              },
+              "risk_class": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Approval risk class (`readonly_scoped`, `readonly_external`,\n`write_agent_state`, `write_scoped`, `exec_capable`, `control_plane`,\n`interactive`)."
+              },
               "status": {
                 "type": "string"
               },
@@ -11769,6 +14403,59 @@
               },
               "version": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiWorkspaceGrant": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An active grant authorising filesystem access to one or all agents.",
+            "required": [
+              "id",
+              "path",
+              "mode",
+              "granted_at",
+              "source",
+              "granted_by"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Agent UUID this grant is scoped to; `null` means every agent."
+              },
+              "granted_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "granted_by": {
+                "type": "string"
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "mode": {
+                "type": "string",
+                "description": "Permission bits as a short string: any of `r`, `w`, `x` (e.g. `\"rw\"`)."
+              },
+              "path": {
+                "type": "string",
+                "description": "Absolute, lexically-normalized host directory. Subpaths are covered."
+              },
+              "source": {
+                "type": "string",
+                "description": "Where the grant came from (`config`, `bus`, `api`)."
               }
             }
           }
@@ -12231,6 +14918,54 @@
           }
         }
       },
+      "Envelope_McpAttachedResponse": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "name",
+              "tools"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_OAuthStartResponse": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response of `POST /connectors/{id}/oauth/start`.",
+            "required": [
+              "authorize_url"
+            ],
+            "properties": {
+              "authorize_url": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "Envelope_PipelineExport": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -12276,6 +15011,21 @@
                 "type": "integer",
                 "format": "int64",
                 "minimum": 0
+              },
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Id of the standing grant minted by `remember: true`, when one was."
+              },
+              "remember_note": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Human-readable outcome of `remember: true` — what was remembered, or\nwhy nothing was (already remembered, exec tool with no path, …)."
               },
               "status": {
                 "type": "string"
@@ -12565,6 +15315,13 @@
                 "last_active"
               ],
               "properties": {
+                "active_agent_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Default agent for inbound chat on this channel."
+                },
                 "connected_at": {
                   "type": "string",
                   "format": "date-time",
@@ -12680,6 +15437,8 @@
                 "id",
                 "name",
                 "connected",
+                "registered",
+                "oauth_available",
                 "scopes"
               ],
               "properties": {
@@ -12703,12 +15462,20 @@
                   "type": "string",
                   "description": "Human-readable name."
                 },
+                "oauth_available": {
+                  "type": "boolean",
+                  "description": "An OAuth provider block exists in `oauth_providers.toml`, so \"Connect\" works."
+                },
                 "provider": {
                   "type": [
                     "string",
                     "null"
                   ],
                   "description": "OAuth provider name (from the stored credential), if connected."
+                },
+                "registered": {
+                  "type": "boolean",
+                  "description": "A connector manifest is registered (tools are callable once connected)."
                 },
                 "scopes": {
                   "type": "array",
@@ -12988,6 +15755,62 @@
           }
         }
       },
+      "Envelope_Vec_ApiMcpCatalogEntry": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "display_name",
+                "description",
+                "trust_tier",
+                "transport",
+                "installed"
+              ],
+              "properties": {
+                "description": {
+                  "type": "string"
+                },
+                "display_name": {
+                  "type": "string"
+                },
+                "homepage": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "installed": {
+                  "type": "boolean",
+                  "description": "A server named after this catalog id is attached (live or persisted)."
+                },
+                "runtime": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "transport": {
+                  "type": "string"
+                },
+                "trust_tier": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
       "Envelope_Vec_ApiMcpServer": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -13003,7 +15826,9 @@
               "required": [
                 "name",
                 "tool_count",
-                "args"
+                "args",
+                "has_auth_token",
+                "env_keys"
               ],
               "properties": {
                 "args": {
@@ -13027,6 +15852,17 @@
                   ],
                   "format": "date-time",
                   "description": "When the attachment was persisted, if persisted."
+                },
+                "env_keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Names of the persisted env vars. Values are withheld: they routinely\nhold secrets. An edit that omits `env` keeps them."
+                },
+                "has_auth_token": {
+                  "type": "boolean",
+                  "description": "A static bearer token is stored for this server. The token itself is\nnever returned — an edit that omits `auth_token` keeps it."
                 },
                 "name": {
                   "type": "string",
@@ -13214,7 +16050,8 @@
                 "trust_tier",
                 "status",
                 "channels",
-                "tools"
+                "tools",
+                "user_installed"
               ],
               "properties": {
                 "blocked_reason": {
@@ -13257,6 +16094,10 @@
                 "trust_tier": {
                   "type": "string",
                   "description": "Trust tier: `core` | `verified` | `community` | `blocked`."
+                },
+                "user_installed": {
+                  "type": "boolean",
+                  "description": "Manifest lives under `plugins/user/` (installed by an operator; removable)."
                 },
                 "version": {
                   "type": "string",
@@ -13331,6 +16172,62 @@
                 },
                 "task_id": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_Vec_ApiProvider": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One LLM provider available to `POST /api/v1/agents` — either a built-in\nadapter (`source = \"built-in\"`) or an entry from `config/providers.toml`\n(`source = \"catalog\"`).",
+              "required": [
+                "name",
+                "display_name",
+                "source",
+                "api_key_set"
+              ],
+              "properties": {
+                "api_key_env": {
+                  "type": "string",
+                  "description": "Environment variable the API key is read from (empty for local providers)."
+                },
+                "api_key_set": {
+                  "type": "boolean",
+                  "description": "Whether a key is present for `api_key_env` (never the key itself)."
+                },
+                "compatible_with": {
+                  "type": "string",
+                  "description": "Wire protocol a catalog provider speaks (e.g. `\"openai\"`); empty for built-ins."
+                },
+                "default_model": {
+                  "type": "string"
+                },
+                "display_name": {
+                  "type": "string"
+                },
+                "models": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Models the catalog lists for this provider; empty for built-ins."
+                },
+                "name": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string",
+                  "description": "`\"built-in\"` or `\"catalog\"`."
                 }
               }
             }
@@ -13490,7 +16387,7 @@
                   "minimum": 0
                 },
                 "state": {
-                  "type": "string",
+                  "$ref": "#/components/schemas/ApiScheduleState",
                   "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
                 }
               }
@@ -13590,6 +16487,20 @@
                 },
                 "name": {
                   "type": "string"
+                },
+                "permissions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Permissions the tool requires (from `[capabilities_required]`)."
+                },
+                "risk_class": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Approval risk class (`readonly_scoped`, `readonly_external`,\n`write_agent_state`, `write_scoped`, `exec_capable`, `control_plane`,\n`interactive`)."
                 },
                 "status": {
                   "type": "string"
@@ -13712,6 +16623,62 @@
                 },
                 "version": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_Vec_ApiWorkspaceGrant": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An active grant authorising filesystem access to one or all agents.",
+              "required": [
+                "id",
+                "path",
+                "mode",
+                "granted_at",
+                "source",
+                "granted_by"
+              ],
+              "properties": {
+                "agent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Agent UUID this grant is scoped to; `null` means every agent."
+                },
+                "granted_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "granted_by": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "mode": {
+                  "type": "string",
+                  "description": "Permission bits as a short string: any of `r`, `w`, `x` (e.g. `\"rw\"`)."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Absolute, lexically-normalized host directory. Subpaths are covered."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Where the grant came from (`config`, `bus`, `api`)."
                 }
               }
             }
@@ -13899,12 +16866,25 @@
                   "type": "string",
                   "description": "Truncated body text for list views."
                 },
+                "escalation_id": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "Numeric escalation id when this notification is an approval prompt\nraised by the escalation sink. Lets a client link the bell entry to the\nescalation queue entry it must act on — without it the row carries no\nmachine-readable pointer back to the thing that is blocking the task.",
+                  "minimum": 0
+                },
                 "from": {
                   "type": "string",
                   "description": "Source label (e.g. \"Kernel\", agent name)."
                 },
                 "id": {
                   "type": "string"
+                },
+                "needs_response": {
+                  "type": "boolean",
+                  "description": "True for an unanswered `Question` — the agent is blocked on a reply."
                 },
                 "priority": {
                   "type": "string"
@@ -13914,6 +16894,13 @@
                 },
                 "subject": {
                   "type": "string"
+                },
+                "task_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Task that raised this message (e.g. the per-turn chat task for a\nblocking `ask-user`), if any."
                 },
                 "timestamp": {
                   "type": "string"
@@ -14044,6 +17031,33 @@
           }
         }
       },
+      "GrantWorkspaceRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/workspace-grants`.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent display name or `AgentID` UUID. Omit for a global grant."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Permission bits: any combination of `r`, `w`, `x`. Defaults to `rw`."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute host path. `~` is NOT expanded — the caller is a browser, not\na shell, so it has no home directory to expand against."
+          }
+        }
+      },
       "HalDevice": {
         "type": "object",
         "description": "A registered HAL device and its per-agent access policy.",
@@ -14106,6 +17120,35 @@
         ],
         "properties": {
           "yaml": {
+            "type": "string"
+          }
+        }
+      },
+      "InstallMcpRequest": {
+        "type": "object",
+        "properties": {
+          "allow_community": {
+            "type": "boolean"
+          },
+          "no_auth": {
+            "type": "boolean"
+          },
+          "runtime_binary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "InstallPluginRequest": {
+        "type": "object",
+        "description": "Install a plugin from a pasted `plugin.toml`.",
+        "required": [
+          "manifest_toml"
+        ],
+        "properties": {
+          "manifest_toml": {
             "type": "string"
           }
         }
@@ -14468,6 +17511,13 @@
                   "type": "string",
                   "format": "date-time"
                 },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Failure reason when `status == \"failed\"`."
+                },
                 "id": {
                   "type": "string"
                 },
@@ -14475,7 +17525,7 @@
                   "type": "string"
                 },
                 "status": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ApiTaskStatus"
                 }
               }
             },
@@ -14522,6 +17572,24 @@
           "credential": {
             "type": "string",
             "description": "The operator credential (deployment auth token)."
+          }
+        }
+      },
+      "McpAttachedResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "tools"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -14584,12 +17652,25 @@
             "type": "string",
             "description": "Truncated body text for list views."
           },
+          "escalation_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Numeric escalation id when this notification is an approval prompt\nraised by the escalation sink. Lets a client link the bell entry to the\nescalation queue entry it must act on — without it the row carries no\nmachine-readable pointer back to the thing that is blocking the task.",
+            "minimum": 0
+          },
           "from": {
             "type": "string",
             "description": "Source label (e.g. \"Kernel\", agent name)."
           },
           "id": {
             "type": "string"
+          },
+          "needs_response": {
+            "type": "boolean",
+            "description": "True for an unanswered `Question` — the agent is blocked on a reply."
           },
           "priority": {
             "type": "string"
@@ -14600,7 +17681,26 @@
           "subject": {
             "type": "string"
           },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Task that raised this message (e.g. the per-turn chat task for a\nblocking `ask-user`), if any."
+          },
           "timestamp": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthStartResponse": {
+        "type": "object",
+        "description": "Response of `POST /connectors/{id}/oauth/start`.",
+        "required": [
+          "authorize_url"
+        ],
+        "properties": {
+          "authorize_url": {
             "type": "string"
           }
         }
@@ -14889,6 +17989,10 @@
               "null"
             ],
             "description": "Optional free-form note recorded alongside the decision."
+          },
+          "remember": {
+            "type": "boolean",
+            "description": "On approve, also mint a standing grant for the escalated tool\n(agent-scoped, 7 days; parent-directory glob when the call had a\n`path`) so it stops re-prompting. Ignored on deny. Requires the\n`approvals:w` scope in addition to `escalations:w`. Refused for\nexec-capable tools with no path to scope by. Revocable via\n`DELETE /api/v1/approval-policies/{id}`."
           }
         }
       },
@@ -14906,6 +18010,21 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "policy_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Id of the standing grant minted by `remember: true`, when one was."
+          },
+          "remember_note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable outcome of `remember: true` — what was remembered, or\nwhy nothing was (already remembered, exec tool with no path, …)."
           },
           "status": {
             "type": "string"
@@ -15078,6 +18197,10 @@
           "definition": {},
           "name": {
             "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing pipeline of the same name. Without it a name that is\nalready taken is rejected with `409 Conflict` — the store writes\n`INSERT OR REPLACE`, so a \"new\" pipeline would otherwise silently\noverwrite a production definition and report success."
           }
         }
       },
@@ -15125,6 +18248,18 @@
           }
         }
       },
+      "SetChannelAgentRequest": {
+        "type": "object",
+        "properties": {
+          "agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent name; omit or empty to clear the default."
+          }
+        }
+      },
       "SetConfigRequest": {
         "type": "object",
         "description": "Request body for `PUT /api/v1/config/{key}`.",
@@ -15140,19 +18275,78 @@
       },
       "SetSecretRequest": {
         "type": "object",
+        "description": "No `Debug`/`Clone`/`Serialize`: `Zeroizing` has no `Clone`, a derived `Debug`\nwould print the plaintext secret into any log line that formats the request,\nand `Serialize` would let `serde_json::to_string` re-emit it just as easily.",
         "required": [
           "name",
-          "value"
+          "value",
+          "scope"
         ],
         "properties": {
           "name": {
             "type": "string"
           },
           "scope": {
-            "type": "string"
+            "type": "string",
+            "description": "`global` | `kernel` | `agent:<name>` | `tool:<name>`. REQUIRED — there is\ndeliberately no default, because `global` makes the secret readable by\nevery agent and tool on the host (same rule as the CLI's `--scope`)."
           },
           "value": {
+            "type": "string",
+            "description": "Zeroized on drop; wire type is a plain JSON string."
+          }
+        }
+      },
+      "StoreCredentialRequest": {
+        "type": "object",
+        "description": "Store an OAuth credential by hand (mirrors `agentos mcp oauth-store`).",
+        "required": [
+          "access_token"
+        ],
+        "properties": {
+          "access_token": {
             "type": "string"
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_in_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refresh_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -15265,6 +18459,41 @@
             "minimum": 0
           },
           "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiTaskStatus"
+              }
+            ]
+          }
+        }
+      },
+      "UpdateAgentSettingsRequest": {
+        "type": "object",
+        "description": "Partial update of an agent's mutable profile settings.\n\nEvery field is optional and **absent means \"leave unchanged\"** — a client that\nonly wants to edit the description must not have to resend the system prompt it\nnever displayed. To *clear* the system prompt, send it as an empty string.",
+        "required": [
+          "agent_name"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` leaves the prompt untouched; `Some(\"\")` clears it."
+          },
+          "thinking_level": {
             "type": [
               "string",
               "null"
@@ -15272,28 +18501,59 @@
           }
         }
       },
-      "UpdateAgentSettingsRequest": {
+      "UpdateChannelRequest": {
         "type": "object",
-        "required": [
-          "agent_name",
-          "description",
-          "thinking_level"
-        ],
+        "description": "Edit a connected channel in place (`PUT /channels/{id}`).\n\nThree-state per field: omitted leaves it unchanged, `\"\"` clears it, a value\nsets it. `kind` is not editable — a different kind is a different adapter,\nso that is a disconnect + connect.",
         "properties": {
-          "agent_name": {
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "system_prompt": {
+          "active_agent_name": {
             "type": [
               "string",
               "null"
             ]
           },
-          "thinking_level": {
-            "type": "string"
+          "credential": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New inline credential, stored under the channel's existing vault key.\nOmit to keep the stored secret untouched."
+          },
+          "credential_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Vault key holding the credential. Omit to keep the current one."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reply_topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "webhook_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

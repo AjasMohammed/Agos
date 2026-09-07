@@ -28,7 +28,8 @@ pub struct OpenAICore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
-    /// Per-instance in-flight cap for outbound requests.
+    /// In-flight cap for outbound requests, shared process-wide by every
+    /// adapter pointed at the same `base_url`.
     concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
@@ -57,10 +58,14 @@ impl OpenAICore {
                 input_per_1k: 0.0,
                 output_per_1k: 0.0,
             });
+        // Hoisted: `base_url` is moved into the struct literal below.
+        let concurrency = crate::retry::concurrency_limiter_for(&base_url);
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    crate::traits::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             api_key,
@@ -81,7 +86,7 @@ impl OpenAICore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
-            concurrency: crate::retry::default_concurrency_limiter(),
+            concurrency,
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -561,7 +566,9 @@ impl LLMCore for OpenAICore {
             body["seed"] = json!(seed);
         }
 
-        let res = crate::retry::send_with_retry(
+        // `_permit` holds the endpoint's concurrency slot until this scope
+        // ends, i.e. until the (non-streamed) body has been read.
+        let (res, _permit) = crate::retry::send_with_retry(
             "openai",
             &self.retry_policy,
             &self.circuit_breaker,
@@ -682,7 +689,11 @@ impl LLMCore for OpenAICore {
         // forwarded) so a transient upstream 5xx / network blip doesn't fail
         // the whole chat turn — matching the resilience of the non-streaming
         // path. `send_with_retry` returns the live `Response` with its body
-        // stream intact on 2xx.
+        // stream intact on 2xx, along with the endpoint concurrency permit.
+        // `_permit` is kept alive for the whole of this function so the slot
+        // covers token generation: on a streamed request the headers arrive
+        // at the *first* token, so releasing it here would leave chat — the
+        // busiest caller — outside the cap entirely.
         let res = crate::retry::send_with_retry(
             "openai",
             &self.retry_policy,
@@ -700,7 +711,7 @@ impl LLMCore for OpenAICore {
             },
         )
         .await;
-        let res = match res {
+        let (res, _permit) = match res {
             Ok(r) => r,
             Err(e) => {
                 let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
@@ -720,6 +731,11 @@ impl LLMCore for OpenAICore {
         let mut cached_tokens: u64 = 0;
         let mut stop_reason = StopReason::EndTurn;
         let mut line_buffer = String::new();
+        // Diagnostics for a stream that yields nothing usable (see the
+        // empty-stream guard after the loop).
+        let mut non_sse_lines: u32 = 0;
+        let mut unparsed_lines: u32 = 0;
+        let mut first_offending_line = String::new();
 
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
 
@@ -749,17 +765,46 @@ impl LLMCore for OpenAICore {
                 if line.is_empty() || line.starts_with(':') {
                     continue;
                 }
-                let data = if let Some(d) = line.strip_prefix("data: ") {
+                // The SSE spec makes the space after `data:` optional; some
+                // OpenAI-compatible servers omit it.
+                let data = if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     d.trim()
                 } else {
+                    non_sse_lines += 1;
+                    if first_offending_line.is_empty() {
+                        first_offending_line = line.chars().take(300).collect();
+                    }
                     continue;
                 };
                 if data == "[DONE]" {
                     break 'outer;
                 }
                 let Ok(chunk_json) = serde_json::from_str::<Value>(data) else {
+                    unparsed_lines += 1;
+                    if first_offending_line.is_empty() {
+                        first_offending_line = data.chars().take(300).collect();
+                    }
                     continue;
                 };
+
+                // Mid-stream provider failure reported as an `error` payload on
+                // a 200 response. Without this the stream just ends and the
+                // caller gets a blank answer.
+                if let Some(err) = chunk_json.get("error").filter(|e| !e.is_null()) {
+                    let reason = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| err.to_string());
+                    let _ = tx.send(InferenceEvent::Error(reason.clone())).await;
+                    return Err(AgentOSError::LLMError {
+                        provider: "openai".to_string(),
+                        reason,
+                    });
+                }
 
                 // Extract finish_reason if present.
                 if let Some(reason) = chunk_json["choices"][0]["finish_reason"].as_str() {
@@ -896,6 +941,29 @@ impl LLMCore for OpenAICore {
             full_text = reasoning_text;
         }
 
+        // A 200 whose stream carried no text, no tool call and no usage is not
+        // a completion — it is a truncated or silently rejected request.
+        if full_text.trim().is_empty() && tool_calls.is_empty() && usage.total_tokens == 0 {
+            let reason = format!(
+                "provider stream ended with no content (stop_reason={:?}, non_sse_lines={}, \
+                 unparsed_lines={}, first_offending_line={})",
+                stop_reason,
+                non_sse_lines,
+                unparsed_lines,
+                if first_offending_line.is_empty() {
+                    "<none>"
+                } else {
+                    first_offending_line.as_str()
+                }
+            );
+            tracing::warn!(model = %self.model, %reason, "OpenAI stream produced no content");
+            let _ = tx.send(InferenceEvent::Error(reason.clone())).await;
+            return Err(AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason,
+            });
+        }
+
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let cost = calculate_inference_cost(&usage, &self.pricing);
 
@@ -997,6 +1065,8 @@ mod tests {
     ) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 description: description.to_string(),
@@ -1546,6 +1616,8 @@ mod tests {
         };
         let manifest = ToolManifest {
             manifest: ToolInfo {
+                category: None,
+                search_hints: vec![],
                 name: "file-reader".to_string(),
                 version: "1.0.0".to_string(),
                 description: "Read a file".to_string(),

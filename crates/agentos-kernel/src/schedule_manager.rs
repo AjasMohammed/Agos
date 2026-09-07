@@ -324,6 +324,7 @@ impl ScheduleManager {
         let action = OnceJobAction::RunTask {
             prompt: task_prompt.clone(),
         };
+        let next_run_at = Self::next_fire(&cron_expression);
         let job = ScheduledJob {
             id: ScheduleID::new(),
             name,
@@ -335,7 +336,7 @@ impl ScheduleManager {
             state: ScheduleState::Active,
             created_at: chrono::Utc::now(),
             last_run_at: None,
-            next_run_at: None,
+            next_run_at,
             run_count: 0,
             max_retries: 3,
             retry_count: 0,
@@ -411,6 +412,7 @@ impl ScheduleManager {
             }
         }
         let task_prompt = ScheduledJob::shadow_task_prompt(&action);
+        let next_run_at = Self::next_fire(&cron_expression);
         let job = ScheduledJob {
             id: ScheduleID::new(),
             name,
@@ -422,7 +424,7 @@ impl ScheduleManager {
             state: ScheduleState::Active,
             created_at: chrono::Utc::now(),
             last_run_at: None,
-            next_run_at: None,
+            next_run_at,
             run_count: 0,
             max_retries: 3,
             retry_count: 0,
@@ -438,10 +440,20 @@ impl ScheduleManager {
         Ok(id)
     }
 
+    /// Next fire time for a cron expression, so a fresh or resumed schedule
+    /// shows its next run immediately instead of after the first tick.
+    fn next_fire(cron_expression: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        Schedule::from_str(cron_expression)
+            .ok()
+            .and_then(|s| s.upcoming(chrono::Utc).next())
+    }
+
     pub async fn pause(&self, id: &ScheduleID) -> Result<(), AgentOSError> {
         let mut jobs = self.jobs.write().await;
         let mutated = if let Some(job) = jobs.get_mut(id) {
             job.state = ScheduleState::Paused;
+            // A paused job has no next run; `resume` recomputes it.
+            job.next_run_at = None;
             true
         } else {
             false
@@ -461,6 +473,8 @@ impl ScheduleManager {
         let mut jobs = self.jobs.write().await;
         let mutated = if let Some(job) = jobs.get_mut(id) {
             job.state = ScheduleState::Active;
+            // Recompute so a slot missed while paused is not fired on resume.
+            job.next_run_at = Self::next_fire(&job.cron_expression);
             true
         } else {
             false
@@ -556,6 +570,11 @@ impl ScheduleManager {
 
         // Emit CronJobFired for each due job (outside the write lock)
         drop(jobs);
+        if !due.is_empty() {
+            // Persist the bumped run_count / last_run_at / next_run_at so a
+            // kernel restart doesn't reset the counters shown in the panel.
+            self.flush().await;
+        }
         for job in &due {
             self.notify(
                 EventType::CronJobFired,

@@ -87,6 +87,15 @@ pub async fn resolve(
     Json(req): Json<ResolveEscalationRequest>,
 ) -> Result<Json<Envelope<ResolveEscalationResponse>>, ApiError> {
     require_permission(&key, "escalations:w")?;
-    let resp = svc.resolve_escalation(id, req.decision, req.note).await?;
+    // `remember` mints a standing approval-policy row — the same thing
+    // `POST /approval-policies` does — so it needs that endpoint's scope too,
+    // or an `escalations:w`-only key could create grants it cannot revoke.
+    if req.remember {
+        require_permission(&key, "approvals:w")?;
+    }
+    let actor = format!("api-key:{}", key.0.name);
+    let resp = svc
+        .resolve_escalation(id, req.decision, req.note, req.remember, actor)
+        .await?;
     Ok(Json(Envelope::new(resp)))
 }

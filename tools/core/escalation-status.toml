@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "escalation-status"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Query pending escalation/approval status for the calling agent"
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "task"
+search_hints = ["is my approval request still pending", "check approval status"]
 
 [capabilities_required]
 permissions = ["escalation.query:q"]

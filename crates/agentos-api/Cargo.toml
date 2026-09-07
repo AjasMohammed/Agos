@@ -49,6 +49,8 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+url = { workspace = true }
+toml = { workspace = true }
 subtle = "2"
 zeroize = { workspace = true }
 rusqlite = { workspace = true }

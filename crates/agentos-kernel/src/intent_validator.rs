@@ -423,6 +423,7 @@ mod tests {
             spawner_agent_id: None,
             tool_categories: None,
             disable_tool_scoping: false,
+            chain_depth: 0,
         }
     }
 

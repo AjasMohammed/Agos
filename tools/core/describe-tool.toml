@@ -1,4 +1,5 @@
 tags = ["meta", "read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "describe-tool"
@@ -6,7 +7,7 @@ version     = "1.0.0"
 description = "Return structured tool metadata including payload_schema and examples."
 author      = "agentos-core"
 trust_tier  = "core"
-risk_class  = "readonly_scoped"
+search_hints = ["show me the full schema of a tool", "what arguments does this tool take"]
 tags        = ["meta", "read"]
 
 [capabilities_required]

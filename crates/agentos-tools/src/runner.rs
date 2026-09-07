@@ -10,11 +10,13 @@ use crate::agent_messages_list::AgentMessagesListTool;
 use crate::agent_messages_read::AgentMessagesReadTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
+use crate::artifact_write::ArtifactWriteTool;
 use crate::ask_user::AskUserTool;
 use crate::audio::AudioTool;
 use crate::bluetooth::BluetoothTool;
 use crate::cancel_agent::CancelAgentTool;
 use crate::channel_send::ChannelSendTool;
+use crate::chat_search::ChatSearchTool;
 use crate::context_memory_read::ContextMemoryReadTool;
 use crate::context_memory_update::ContextMemoryUpdateTool;
 use crate::coordination::{AwaitAgentsTool, SpawnAgentTool, VerifyOutputTool};
@@ -208,6 +210,7 @@ impl ToolRunner {
         self.register(Box::new(MemoryBlockReadTool::new()));
         self.register(Box::new(MemoryBlockListTool::new()));
         self.register(Box::new(MemoryBlockDeleteTool::new()));
+        self.register(Box::new(ChatSearchTool::new()));
         self.register(Box::new(ContextMemoryReadTool::new()));
         self.register(Box::new(ContextMemoryUpdateTool::new()));
         self.register(Box::new(DataParser::new()));
@@ -256,6 +259,7 @@ impl ToolRunner {
         }
         self.register(Box::new(WebSearchTool::new()));
         self.register(Box::new(UserFileReader::new()));
+        self.register(Box::new(ArtifactWriteTool::new()));
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
@@ -472,11 +476,11 @@ impl ToolRunner {
     pub fn register_search_tools(
         &mut self,
         tool_summaries: crate::agent_manual::SharedToolSummaries,
-        embedder: Arc<Embedder>,
+        index: Arc<crate::tool_search_index::ToolSearchIndex>,
     ) {
-        self.register(Box::new(crate::search_tools::SearchToolsTool::new(
+        self.register(Box::new(crate::search_tools::SearchToolsTool::with_index(
             tool_summaries,
-            embedder,
+            index,
         )));
     }
 
@@ -561,33 +565,13 @@ impl ToolRunner {
         // exclusive access across concurrent agents.
         context.file_lock_registry = Some(self.file_lock_registry.clone());
 
-        // Auto-correct `_` ↔ `-` typos before lookup. Small models often emit
-        // `describe_tool` for `describe-tool` (Python-naming bias). Re-resolve
-        // against the actual registry; only takes effect if the alternate
-        // spelling exists. Saves a wasted iteration for every typo.
-        let resolved_name: String = if !self.tools.contains_key(tool_name)
-            && !self
-                .dynamic_tools
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(tool_name)
-        {
-            let alternates = [tool_name.replace('_', "-"), tool_name.replace('-', "_")];
-            alternates
-                .into_iter()
-                .find(|alt| {
-                    alt != tool_name
-                        && (self.tools.contains_key(alt.as_str())
-                            || self
-                                .dynamic_tools
-                                .read()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .contains_key(alt.as_str()))
-                })
-                .unwrap_or_else(|| tool_name.to_string())
-        } else {
-            tool_name.to_string()
-        };
+        // Auto-correct `_` ↔ `-` typos before lookup — see `resolve_tool_name`.
+        // Callers that gate a call (capability validation, approval hooks,
+        // audit) MUST resolve the name themselves first, or they gate a
+        // different name than the one that runs here.
+        let resolved_name = self
+            .resolve_tool_name(tool_name)
+            .unwrap_or_else(|| tool_name.to_string());
         if resolved_name != tool_name {
             tracing::info!(
                 requested = tool_name,
@@ -677,6 +661,36 @@ impl ToolRunner {
                 .cloned(),
         );
         names
+    }
+
+    /// True when `name` is registered verbatim (static or dynamic).
+    fn is_registered(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+            || self
+                .dynamic_tools
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(name)
+    }
+
+    /// Resolve a caller-supplied tool name to the name [`Self::execute`] will
+    /// actually dispatch, applying the `_` ↔ `-` auto-correction (small models
+    /// emit `describe_tool` for `describe-tool` out of Python-naming bias).
+    /// Returns `None` when nothing matches either spelling.
+    ///
+    /// **Security:** any path that validates a capability token, fires
+    /// `ToolPre`, or writes an audit row for a tool call must resolve the name
+    /// through this first and carry the resolved name all the way to
+    /// `execute`. Gating the raw name means gating `shell_exec` — which no
+    /// registry lookup matches, so it has no required permissions, no manifest
+    /// and no risk class — while `execute` silently runs `shell-exec`.
+    pub fn resolve_tool_name(&self, name: &str) -> Option<String> {
+        if self.is_registered(name) {
+            return Some(name.to_string());
+        }
+        [name.replace('_', "-"), name.replace('-', "_")]
+            .into_iter()
+            .find(|alt| alt.as_str() != name && self.is_registered(alt.as_str()))
     }
 
     /// Get the required permissions for a given tool.
@@ -812,6 +826,54 @@ mod tests {
         for perm in list_perms.iter().chain(capture_perms.iter()) {
             assert!(union.contains(perm), "union missing {perm:?}");
         }
+    }
+
+    /// The `_`/`-` auto-correction must be reachable *before* dispatch, so a
+    /// gating caller validates the same name `execute` runs. Without this,
+    /// `shell_exec` resolves to nothing for `get_required_permissions_for`
+    /// (→ empty required set → capability validation passes vacuously) yet
+    /// still executes `shell-exec`.
+    #[test]
+    fn underscore_variant_resolves_to_the_name_that_will_execute() {
+        let runner = ToolRunner {
+            tools: std::collections::HashMap::new(),
+            file_lock_registry: Arc::new(crate::file_lock::FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
+        };
+        runner.register_dynamic(Box::new(ActionScopedTool));
+
+        // The registered spelling is `action-scoped`; the underscore variant
+        // resolves to it, and the resolved name is the one that carries
+        // required permissions into the capability gate.
+        assert_eq!(
+            runner.resolve_tool_name("action_scoped").as_deref(),
+            Some("action-scoped")
+        );
+        assert!(runner
+            .get_required_permissions_for(
+                "action_scoped",
+                &serde_json::json!({"action": "capture"})
+            )
+            .is_none());
+        let resolved = runner.resolve_tool_name("action_scoped").unwrap();
+        assert_eq!(
+            runner
+                .get_required_permissions_for(&resolved, &serde_json::json!({"action": "capture"}))
+                .unwrap(),
+            vec![(
+                "scoped.capture".to_string(),
+                agentos_types::PermissionOp::Execute
+            )],
+            "the gate must see the resolved name's permissions, not an empty set"
+        );
+
+        // Exact names round-trip; genuinely unknown names stay unknown.
+        assert_eq!(
+            runner.resolve_tool_name("action-scoped").as_deref(),
+            Some("action-scoped")
+        );
+        assert_eq!(runner.resolve_tool_name("no-such-tool"), None);
     }
 
     #[test]

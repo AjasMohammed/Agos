@@ -1,4 +1,5 @@
 tags = ["read", "network"]
+risk_class = "readonly_external"
 
 [manifest]
 name = "iot-mqtt-subscribe"
@@ -6,6 +7,7 @@ version = "1.0.0"
 description = "Subscribe to an MQTT topic to receive sensor data from IoT devices."
 author = "agentos-core"
 trust_tier = "core"
+category    = "hal"
 tags = ["iot", "mqtt", "hardware"]
 
 [capabilities_required]

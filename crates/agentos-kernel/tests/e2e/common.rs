@@ -36,7 +36,13 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             health_port: 0,
             health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
-            events: Default::default(),
+            // Batching off by default so a test that emits one event sees one
+            // task immediately. Batching itself is covered by the tests that
+            // opt in via `setup_kernel_with` (see event_trigger_e2e).
+            events: agentos_kernel::config::EventChannelConfig {
+                reaction_batch_window_secs: 0,
+                ..Default::default()
+            },
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
             context_compaction: Default::default(),
@@ -107,6 +113,13 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
+            // The review fork would fire an auxiliary inference on every
+            // successful task in the harness; e2e tests assert on exact mock
+            // call sequences, so keep it off unless a test opts in.
+            background_review: agentos_kernel::config::BackgroundReviewConfig {
+                enabled: false,
+                ..Default::default()
+            },
         },
         context_budget: Default::default(),
         context: Default::default(),

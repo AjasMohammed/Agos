@@ -65,6 +65,8 @@ pub async fn login(
             Err(ApiError::Unauthorized)
         }
         CredentialCheck::Valid => {
+            // Other tabs/devices keep their live login keys; only dead ones go.
+            store.purge_dead_keys("operator-login").await;
             let expires_at = Some(Utc::now() + Duration::seconds(LOGIN_KEY_TTL_SECS));
             let scopes = operator_scopes();
             let issued = store

@@ -11,6 +11,11 @@ struct ConfigAssets;
 #[prefix = "skills/core/"]
 struct SkillAssets;
 
+#[derive(Embed)]
+#[folder = "../../plugins/core/"]
+#[prefix = "plugins/core/"]
+struct PluginAssets;
+
 /// Extract embedded assets to a data directory if they don't already exist.
 /// This is called on first run to seed the working directory.
 pub fn extract_assets_if_needed(data_dir: &Path) -> std::io::Result<()> {
@@ -33,6 +38,22 @@ pub fn extract_assets_if_needed(data_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(&skills_dir)?;
         for file in SkillAssets::iter() {
             if let Some(content) = SkillAssets::get(&file) {
+                let path = data_dir.join(file.as_ref());
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, content.data.as_ref())?;
+            }
+        }
+    }
+
+    // Core plugin manifests — the kernel discovers `<data_dir>/plugins/{core,user}`,
+    // so without this seed a real install shows an empty Plugins page.
+    let plugins_dir = data_dir.join("plugins/core");
+    if !plugins_dir.exists() {
+        std::fs::create_dir_all(&plugins_dir)?;
+        for file in PluginAssets::iter() {
+            if let Some(content) = PluginAssets::get(&file) {
                 let path = data_dir.join(file.as_ref());
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;

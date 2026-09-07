@@ -5,6 +5,27 @@ use async_trait::async_trait;
 /// Maximum file size that file-reader will load into memory (10 MiB).
 const MAX_FILE_READ_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Identify container formats by magic bytes, returning a MIME for the
+/// extractor.
+///
+/// Extension and MIME are both unavailable here — `file-reader` reads workspace
+/// paths, which frequently have neither — and "does it parse as UTF-8" does not
+/// separate a text file from a PDF: an uncompressed PDF is pure ASCII.
+async fn sniff_container(path: &std::path::Path) -> Option<&'static str> {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 8];
+    let mut f = tokio::fs::File::open(path).await.ok()?;
+    let n = f.read(&mut head).await.ok()?;
+    let head = &head[..n];
+    if head.starts_with(b"%PDF-") {
+        return Some("application/pdf");
+    }
+    // ZIP magic covers docx/xlsx/pptx/odt/ods/odp. Left to the extractor's
+    // extension check to pick a filter, so a plain `.zip` is not routed to
+    // LibreOffice by its magic alone.
+    None
+}
+
 pub struct FileReader;
 
 impl FileReader {
@@ -48,12 +69,12 @@ impl AgentTool for FileReader {
 
         tracing::debug!(path = path_str, mode, "file-reader: starting");
 
+        // SECURITY: relative paths resolve under the agent's own home, never the
+        // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
+        let agent_root = context.agent_files_dir()?;
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
-        let resolved = crate::traits::resolve_tool_path(
-            path_str,
-            &context.data_dir,
-            &context.workspace_paths,
-        )?;
+        let resolved =
+            crate::traits::resolve_tool_path(path_str, &agent_root, &context.workspace_paths)?;
 
         // Canonicalize to verify containment. For directories that don't exist yet
         // we fall through to a clear error; for existing paths this enforces the boundary.
@@ -66,9 +87,8 @@ impl AgentTool for FileReader {
 
         // Canonicalize data_dir too so the starts_with comparison is apples-to-apples
         // even when data_dir itself contains symlinks (e.g. /tmp on macOS).
-        let canonical_data_dir =
-            context
-                .data_dir
+        let canonical_agent_root =
+            agent_root
                 .canonicalize()
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "file-reader".into(),
@@ -85,7 +105,7 @@ impl AgentTool for FileReader {
             .as_ref()
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical))
             .unwrap_or(false);
-        if !canonical.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
+        if !canonical.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-reader: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
@@ -134,12 +154,49 @@ impl AgentTool for FileReader {
             });
         }
 
-        let content = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
-            AgentOSError::ToolExecutionFailed {
-                tool_name: "file-reader".into(),
-                reason: format!("Cannot read {}: {}", path_str, e),
-            }
-        })?;
+        // Non-UTF-8 on disk is not necessarily unreadable: a workspace PDF or
+        // Office document converts to text just like an uploaded one.
+        //
+        // Sniffed first, because "is it valid UTF-8" is the wrong question for a
+        // container format. A PDF with uncompressed content streams is entirely
+        // ASCII, so `read_to_string` succeeds and hands the agent
+        // `%PDF-1.4 1 0 obj << /Type /Catalog …` — the exact dead end this
+        // module exists to remove.
+        let sniffed = match sniff_container(&canonical).await {
+            Some(mime) => crate::extract::read_as_text(&canonical, mime).await,
+            None => None,
+        };
+        let (content, extracted) = match sniffed {
+            Some(text) => (text, true),
+            // Falls through rather than erroring: the sniff is a five-byte magic
+            // check, so a text file that merely *starts* with `%PDF-` would
+            // otherwise become a hard error on a file that reads fine. A real
+            // PDF with no text layer lands here too and yields its raw bytes,
+            // which is what this path did before the sniff existed.
+            None => match tokio::fs::read_to_string(&canonical).await {
+                Ok(text) => (text, false),
+                // Only non-UTF-8 is worth a conversion attempt; a permissions
+                // error fails again inside the extractor after burning a
+                // converter timeout.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    match crate::extract::read_as_text(&canonical, "").await {
+                        Some(text) => (text, true),
+                        None => {
+                            return Err(AgentOSError::ToolExecutionFailed {
+                                tool_name: "file-reader".into(),
+                                reason: format!("Cannot read {}: {}", path_str, e),
+                            })
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(AgentOSError::ToolExecutionFailed {
+                        tool_name: "file-reader".into(),
+                        reason: format!("Cannot read {}: {}", path_str, e),
+                    })
+                }
+            },
+        };
 
         // Line-based pagination.
         let offset = payload.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -181,6 +238,7 @@ impl AgentTool for FileReader {
             "offset": offset,
             "has_more": has_more,
             "content_type": "text",
+            "extracted": extracted,
         }))
     }
 }

@@ -1,5 +1,5 @@
 use crate::kernel::ChatToolCallRecord;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -20,6 +20,29 @@ pub struct ChatSession {
     /// Number of messages in the session (populated by `list_sessions`; `0` from
     /// `get_session`, whose detail view carries the full message list instead).
     pub message_count: i64,
+}
+
+/// One full-text search hit from [`ChatStore::search`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatSearchHit {
+    pub session_id: String,
+    pub message_id: i64,
+    /// "user" or "assistant".
+    pub role: String,
+    /// Message body, truncated to 400 chars.
+    pub content: String,
+    pub created_at: String,
+    pub agent_name: String,
+}
+
+/// Truncate to at most `max` chars on a char boundary.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -313,9 +336,135 @@ impl ChatStore {
             conn.execute_batch("UPDATE chat_store_version SET version = 8 WHERE id = 1;")?;
         }
 
+        // Migration v9: full-text index over message bodies so agents can
+        // search their own past sessions (`chat-search` tool). External-content
+        // FTS5 table — the triggers keep it in sync, and `rebuild` backfills
+        // everything already stored.
+        let version: i64 = conn.query_row(
+            "SELECT version FROM chat_store_version WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < 9 {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts
+                     USING fts5(content, content='chat_messages', content_rowid='id');
+
+                 CREATE TRIGGER IF NOT EXISTS chat_messages_ai AFTER INSERT ON chat_messages BEGIN
+                     INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS chat_messages_ad AFTER DELETE ON chat_messages BEGIN
+                     INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content)
+                     VALUES ('delete', old.id, old.content);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS chat_messages_au AFTER UPDATE ON chat_messages BEGIN
+                     INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content)
+                     VALUES ('delete', old.id, old.content);
+                     INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+                 END;
+
+                 INSERT INTO chat_messages_fts(chat_messages_fts) VALUES ('rebuild');
+                 UPDATE chat_store_version SET version = 9 WHERE id = 1;",
+            )?;
+        }
+
+        // Migration v10: bind a session to an external channel conversation.
+        // Channel chat (Telegram/Discord/…) used to keep its transcript in a
+        // process-local map, so every kernel restart wiped the conversation and
+        // none of it was searchable. Channel turns now land in a normal session
+        // keyed by this column, which makes them visible to the panel, to
+        // `chat-search`, and to session-scoped tool state.
+        let version: i64 = conn.query_row(
+            "SELECT version FROM chat_store_version WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < 10 {
+            let has_channel_key: bool = conn
+                .prepare("PRAGMA table_info(chat_sessions)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .any(|col| col.as_deref() == Ok("channel_key"));
+            if !has_channel_key {
+                conn.execute_batch("ALTER TABLE chat_sessions ADD COLUMN channel_key TEXT;")?;
+            }
+            // Partial unique index: at most one *live* session per channel key,
+            // while rotated sessions (channel_key NULL) accumulate freely.
+            conn.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sess_channel_key
+                     ON chat_sessions(channel_key) WHERE channel_key IS NOT NULL;
+                 UPDATE chat_store_version SET version = 10 WHERE id = 1;",
+            )?;
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Full-text search across stored chat messages, newest first.
+    ///
+    /// Only `user` and `assistant` turns are searchable — tool rows are
+    /// machine payloads and would drown the results. `agent_name` scopes the
+    /// search to one agent's sessions (an agent should not read another's
+    /// conversations); `None` searches everything and is used only by
+    /// operator-facing callers.
+    pub fn search(
+        &self,
+        query: &str,
+        agent_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChatSearchHit>, rusqlite::Error> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Quote the whole query as one FTS5 phrase so user punctuation can't
+        // be parsed as MATCH syntax (and can't error the statement).
+        let phrase = format!("\"{}\"", trimmed.replace('"', "\"\""));
+        let limit = limit.clamp(1, 100) as i64;
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT m.session_id, m.id, m.role, m.content, m.created_at, s.agent_name
+               FROM chat_messages_fts f
+               JOIN chat_messages m ON m.id = f.rowid
+               JOIN chat_sessions s ON s.id = m.session_id
+              WHERE chat_messages_fts MATCH ?1
+                AND m.role IN ('user', 'assistant')
+                AND (?2 IS NULL OR s.agent_name = ?2)
+              ORDER BY m.id DESC
+              LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![phrase, agent_name, limit], |row| {
+            let content: String = row.get(3)?;
+            Ok(ChatSearchHit {
+                session_id: row.get(0)?,
+                message_id: row.get(1)?,
+                role: row.get(2)?,
+                content: truncate_chars(&content, 400),
+                created_at: row.get(4)?,
+                agent_name: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Create an empty session — no messages.
+    ///
+    /// The panel opens a chat lazily: the session row is written when the user
+    /// actually sends, and the send path persists the user turn itself. Creating
+    /// a session with a blank placeholder message instead (what the API used to
+    /// do for a missing `first_message`) put an empty user row at the head of the
+    /// transcript, which then got replayed to the LLM as history.
+    pub fn create_session(&self, agent_name: &str) -> Result<String, rusqlite::Error> {
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO chat_sessions (id, agent_name, title, created_at, updated_at)
+             VALUES (?1, ?2, NULL, ?3, ?3)",
+            params![id, agent_name, now],
+        )?;
+        Ok(id)
     }
 
     /// Create a session and persist the first user message in a single transaction.
@@ -341,6 +490,55 @@ impl ChatStore {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Resolve the persistent session backing an external channel conversation,
+    /// creating it on first use.
+    ///
+    /// `channel_key` is the stable identity of the conversation (channel
+    /// instance + bound agent). Because it is a real session, the channel
+    /// transcript survives kernel restarts and shows up everywhere web chat
+    /// does — the panel, `chat-search`, and session-scoped tool state.
+    pub fn get_or_create_channel_session(
+        &self,
+        channel_key: &str,
+        agent_name: &str,
+        title: &str,
+    ) -> Result<String, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE channel_key = ?1",
+                params![channel_key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO chat_sessions (id, agent_name, title, channel_key, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, agent_name, title, channel_key, now],
+        )?;
+        Ok(id)
+    }
+
+    /// Detach `channel_key` from its session so the next channel message starts
+    /// a fresh one.
+    ///
+    /// Deliberately *not* a delete: rebinding a channel to another agent should
+    /// end the thread, not destroy what the user and the agent already said.
+    /// The orphaned session stays browsable and searchable.
+    pub fn rotate_channel_session(&self, channel_key: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE chat_sessions SET channel_key = NULL WHERE channel_key = ?1",
+            params![channel_key],
+        )?;
+        Ok(())
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<ChatSession>, rusqlite::Error> {
@@ -712,7 +910,62 @@ impl ChatStore {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn search_finds_messages_scoped_to_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(&dir.path().join("chat.db")).expect("open");
+        let a = store
+            .create_session_with_first_message("alpha", "where is the staging database?", None)
+            .unwrap();
+        store
+            .add_assistant_message(&a, "The staging database lives at 10.0.0.42", None, None)
+            .unwrap();
+        let b = store
+            .create_session_with_first_message("beta", "staging database question", None)
+            .unwrap();
+        assert!(!b.is_empty());
+
+        let hits = store.search("staging database", Some("alpha"), 10).unwrap();
+        assert_eq!(hits.len(), 2, "both alpha turns match");
+        assert!(hits.iter().all(|h| h.session_id == a));
+        assert!(hits.iter().all(|h| h.agent_name == "alpha"));
+
+        // Newest first.
+        assert_eq!(hits[0].role, "assistant");
+
+        // Cross-agent isolation.
+        let beta = store.search("staging database", Some("beta"), 10).unwrap();
+        assert_eq!(beta.len(), 1);
+
+        // Punctuation is treated as a literal phrase, never as MATCH syntax.
+        assert!(store.search("what? (staging)", Some("alpha"), 5).is_ok());
+        assert!(store.search("   ", Some("alpha"), 5).unwrap().is_empty());
+    }
     use super::*;
+
+    /// A lazily-opened chat: session row, zero messages, and the first send is
+    /// the first row — no blank placeholder turn at the head of the transcript.
+    #[test]
+    fn create_session_starts_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ChatStore::open(&dir.path().join("chat.db")).expect("open");
+        let sid = store.create_session("alpha").expect("create");
+
+        assert!(store.get_messages(&sid).expect("get").is_empty());
+        let session = store
+            .get_session(&sid)
+            .expect("get session")
+            .expect("exists");
+        assert_eq!(session.agent_name, "alpha");
+
+        store
+            .add_message(&sid, "user", "hello", None)
+            .expect("send");
+        let msgs = store.get_messages(&sid).expect("get");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "hello");
+    }
 
     #[test]
     fn persists_and_reads_file_ids_on_user_messages() {

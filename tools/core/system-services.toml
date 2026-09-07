@@ -1,12 +1,14 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "system-services"
 version     = "1.0.0"
-risk_class  = "readonly_external"
 description = "List and inspect systemd services/units and their logs via D-Bus and journalctl on the host."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
+search_hints = ["is nginx running", "list systemd services", "service status"]
 
 [manifest.usage_hints]
 use_for = ["Checking status of systemd services", "Listing failed units", "Reading service-specific logs"]

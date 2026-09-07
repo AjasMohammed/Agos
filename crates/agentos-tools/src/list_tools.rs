@@ -58,7 +58,15 @@ impl AgentTool for ListToolsTool {
                 let cat_ok = category.is_none_or(|c| s.category.eq_ignore_ascii_case(c));
                 let tag_ok =
                     tag.is_none_or(|t| s.tags.iter().any(|tag| tag.eq_ignore_ascii_case(t)));
-                allow_ok && cat_ok && tag_ok
+                // Same visibility rule as the native tool array: a tool the
+                // agent holds no permission for is not listed. Enforcement at
+                // call time is unchanged; this only stops the catalogue from
+                // advertising what the agent cannot call.
+                let perm_ok = agentos_capability::any_permission_granted(
+                    &context.permissions,
+                    &s.permissions,
+                );
+                allow_ok && cat_ok && tag_ok && perm_ok
             })
             .collect();
 

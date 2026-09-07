@@ -1,4 +1,5 @@
-tags = ["meta", "write"]
+tags = ["write"]
+risk_class = "write_agent_state"
 
 [manifest]
 name        = "notify-user"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Send a fire-and-forget notification to the user inbox"
 author      = "agentos-core"
 trust_tier  = "core"
+search_hints = ["tell the user something", "send a notification", "report progress to the human"]
 
 [capabilities_required]
 permissions = ["user.notify:w"]

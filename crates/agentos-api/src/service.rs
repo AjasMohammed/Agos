@@ -32,6 +32,15 @@ pub trait KernelService: Send + Sync {
 
     async fn disconnect_agent(&self, agent_id: agentos_types::AgentID) -> Result<(), ApiError>;
 
+    /// Permanently remove an agent: profile, identity, memory tiers, scratchpad,
+    /// inboxes, checkpoints and schedules. Unlike `disconnect_agent` (which only
+    /// marks the profile offline) this works on an offline agent and cannot be
+    /// undone. Returns the kernel's wipe summary.
+    async fn remove_agent(
+        &self,
+        agent_id: agentos_types::AgentID,
+    ) -> Result<Option<serde_json::Value>, ApiError>;
+
     async fn get_agent_detail(&self, name: &str) -> Result<ApiAgentDetail, ApiError>;
 
     async fn update_agent_settings(&self, req: UpdateAgentSettingsRequest) -> Result<(), ApiError>;
@@ -126,9 +135,17 @@ pub trait KernelService: Send + Sync {
         text: String,
     ) -> Result<(), ApiError>;
 
+    /// Mark a single notification read. Idempotent: `false` = no such id.
+    async fn mark_notification_read(&self, id: NotificationID) -> Result<bool, ApiError>;
+
     async fn dismiss_notification(&self, id: NotificationID) -> Result<bool, ApiError>;
 
     async fn clear_read_notifications(&self) -> Result<usize, ApiError>;
+
+    /// Delete every notification except live (unanswered, unexpired) questions.
+    async fn clear_all_notifications(&self) -> Result<usize, ApiError>;
+
+    async fn mark_all_notifications_read(&self) -> Result<usize, ApiError>;
 
     async fn get_unread_count(&self) -> Result<u64, ApiError>;
 
@@ -173,6 +190,17 @@ pub trait KernelService: Send + Sync {
         signature: &str,
     ) -> Result<bool, ApiError>;
 
+    /// Ingest an external provider webhook (`/webhooks/incoming/{id}`): resolve
+    /// the endpoint, throttle, verify the provider signature against the stored
+    /// secret, and enqueue the event for the owning agent. Errors map to the
+    /// status the caller should see (404 unknown/inactive, 429, 401 bad signature).
+    async fn receive_webhook(
+        &self,
+        endpoint_id: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Result<(), ApiError>;
+
     /// The WhatsApp webhook GET verify-token for a channel, if configured.
     async fn whatsapp_verify_token(&self, channel_id: &str) -> Result<Option<String>, ApiError>;
 
@@ -199,6 +227,10 @@ pub trait KernelService: Send + Sync {
         id: u64,
         decision: String,
         note: Option<String>,
+        remember: bool,
+        // `actor`: who resolved it (e.g. `api-key:<name>`); recorded as
+        // `granted_by` on a remembered grant.
+        actor: String,
     ) -> Result<ResolveEscalationResponse, ApiError>;
 
     // ── Approval policies (standing grants) ──────────────────────────────────
@@ -212,6 +244,34 @@ pub trait KernelService: Send + Sync {
 
     async fn revoke_approval_policy(&self, id: i64) -> Result<(), ApiError>;
 
+    // ── Workspace grants (folder access) ─────────────────────────────────────
+
+    /// List active workspace grants. With `agent_name`, list the grants that
+    /// apply to that agent (its own plus the global ones).
+    async fn list_workspace_grants(
+        &self,
+        agent_name: Option<String>,
+    ) -> Result<Vec<ApiWorkspaceGrant>, ApiError>;
+
+    /// Grant a host directory to one agent, or to every agent when
+    /// `req.agent_name` is `None`. `actor` is the calling API key's name and is
+    /// recorded on the grant and in the audit entry.
+    async fn grant_workspace(
+        &self,
+        req: GrantWorkspaceRequest,
+        actor: &str,
+    ) -> Result<ApiWorkspaceGrant, ApiError>;
+
+    /// Revoke an active grant matching `(path, agent scope)`. Returns the
+    /// number of rows revoked — the unique index makes that 0 or 1, never more:
+    /// this revokes one exact path, not a subtree.
+    async fn revoke_workspace(
+        &self,
+        path: String,
+        agent_name: Option<String>,
+        actor: &str,
+    ) -> Result<u64, ApiError>;
+
     /// Browse or search one memory tier for an agent (read-only). Empty `q`
     /// returns most-recent items; a non-empty `q` searches the tier.
     async fn browse_agent_memory(
@@ -221,6 +281,10 @@ pub trait KernelService: Send + Sync {
         q: Option<String>,
         limit: Option<usize>,
     ) -> Result<Vec<ApiMemoryItem>, ApiError>;
+
+    /// Built-in + catalog LLM providers (read-only). Drives the provider and
+    /// model pickers when connecting an agent.
+    async fn list_providers(&self) -> Result<Vec<ApiProvider>, ApiError>;
 
     /// List installed skills (read-only).
     async fn list_skills(&self) -> Result<Vec<ApiSkillSummary>, ApiError>;
@@ -337,10 +401,193 @@ pub trait KernelService: Send + Sync {
 
     async fn list_mcp_servers(&self) -> Result<Vec<ApiMcpServer>, ApiError>;
     async fn detach_mcp_server(&self, name: &str) -> Result<(), ApiError>;
+    /// Re-attach a server under the same name with a new configuration.
+    async fn update_mcp_server(
+        &self,
+        _name: &str,
+        _req: AttachMcpRequest,
+    ) -> Result<McpAttachedResponse, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    // NOTE(2026-08-30): the methods below were declared by the in-progress
+    // MCP/channel/plugin/connector REST work (kernel side landed:
+    // `oauth_flow.rs`, `commands/connector.rs`) but their `Kernel` impls and
+    // handlers were not written before that session was interrupted. Default
+    // bodies keep the crate compiling; replace them with real impls in
+    // `kernel_impl.rs` when that work resumes.
+    async fn attach_mcp_server(
+        &self,
+        _req: AttachMcpRequest,
+    ) -> Result<McpAttachedResponse, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn list_mcp_catalog(
+        &self,
+        _q: Option<&str>,
+    ) -> Result<Vec<ApiMcpCatalogEntry>, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn get_mcp_catalog_entry(&self, _id: &str) -> Result<serde_json::Value, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn install_mcp_server(
+        &self,
+        _id: &str,
+        _req: InstallMcpRequest,
+    ) -> Result<McpAttachedResponse, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
 
-    async fn list_connectors(&self) -> Result<Vec<ApiConnectorSummary>, ApiError>;
-    async fn get_connector(&self, id: &str) -> Result<ApiConnectorDetail, ApiError>;
-    async fn disconnect_connector(&self, id: &str) -> Result<(), ApiError>;
+    async fn connect_channel(
+        &self,
+        _req: ConnectChannelRequest,
+    ) -> Result<ApiChannelSummary, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn update_channel(
+        &self,
+        _id: &str,
+        _req: UpdateChannelRequest,
+    ) -> Result<ApiChannelSummary, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn test_channel(&self, _id: &str) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn set_channel_agent(
+        &self,
+        _id: &str,
+        _agent_name: Option<String>,
+    ) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn list_pairings(&self) -> Result<ApiPairings, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn approve_pairing(&self, _code: &str) -> Result<ApiPairingEntry, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn approve_pending_pairing(
+        &self,
+        _channel_id: &str,
+        _sender_id: &str,
+    ) -> Result<ApiPairingEntry, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn revoke_pairing(&self, _channel_id: &str, _sender_id: &str) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+
+    async fn install_plugin(&self, _manifest_toml: &str) -> Result<ApiPluginSummary, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn update_plugin(
+        &self,
+        _id: &str,
+        _manifest_toml: &str,
+    ) -> Result<ApiPluginSummary, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn remove_plugin(&self, _id: &str) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+
+    async fn list_connectors(&self) -> Result<Vec<ApiConnectorSummary>, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn get_connector(&self, _id: &str) -> Result<ApiConnectorDetail, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn disconnect_connector(&self, _id: &str) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn add_connector(&self, _manifest_toml: &str) -> Result<ApiConnectorDetail, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn update_connector(
+        &self,
+        _id: &str,
+        _manifest_toml: &str,
+    ) -> Result<ApiConnectorDetail, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn remove_connector(&self, _id: &str) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    /// Begin the OAuth2 PKCE flow; returns the provider authorize URL.
+    async fn start_connector_oauth(
+        &self,
+        _id: &str,
+        _redirect_uri: &str,
+    ) -> Result<String, ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    /// Complete the flow from the provider callback (state validated by the vault).
+    async fn complete_connector_oauth(
+        &self,
+        _id: &str,
+        _code: &str,
+        _state: &str,
+    ) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
+    async fn store_connector_credential(
+        &self,
+        _id: &str,
+        _req: StoreCredentialRequest,
+    ) -> Result<(), ApiError> {
+        Err(ApiError::NotImplemented(
+            "not wired to the kernel yet".into(),
+        ))
+    }
 
     async fn list_event_subscriptions(&self) -> Result<Vec<ApiEventSubscription>, ApiError>;
     async fn create_event_subscription(

@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use agentos_api::types::ApiTaskStatus;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
@@ -31,7 +32,13 @@ pub async fn list(
     use agentos_api::types::TaskFilter;
 
     let filter = TaskFilter {
-        status: query.status.clone().filter(|s| !s.is_empty()),
+        // Unknown values are dropped rather than passed through: the filter
+        // vocabulary is a closed set (`ApiTaskStatus`).
+        status: query
+            .status
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(ApiTaskStatus::parse),
         agent_name: None,
         offset: None,
         limit: Some(500),
@@ -62,7 +69,7 @@ pub async fn list(
                 let mut failed = 0u32;
                 let mut cancelled = 0u32;
                 for t in &all_tasks {
-                    match t.status.to_ascii_lowercase().as_str() {
+                    match t.status.as_str() {
                         "queued" => queued += 1,
                         "running" => running += 1,
                         "waiting" | "suspended" => waiting += 1,
@@ -584,6 +591,11 @@ pub async fn resume(
         }
     };
 
+    // Resuming restores the SAME task, so its causal depth must survive. This
+    // path drops `trigger_source`, so collapse both sources into the plain
+    // counter before the literal partially moves `payload.task`.
+    let resumed_chain_depth = payload.task.event_chain_depth();
+
     let resumed_task = agentos_types::AgentTask {
         id: task_id,
         state: agentos_types::TaskState::Queued,
@@ -609,6 +621,7 @@ pub async fn resume(
         thinking_level: payload.task.thinking_level,
         tool_categories: payload.task.tool_categories,
         disable_tool_scoping: false,
+        chain_depth: resumed_chain_depth,
     };
 
     state

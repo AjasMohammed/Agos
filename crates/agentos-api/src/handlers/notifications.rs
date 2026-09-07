@@ -115,6 +115,35 @@ pub async fn respond(
     Ok(Json(Envelope::new(serde_json::json!({ "ok": true }))))
 }
 
+/// `POST /api/v1/notifications/{id}/read` — Mark a single notification read.
+#[utoipa::path(
+    post,
+    path = "/api/v1/notifications/{id}/read",
+    tag = "notifications",
+    operation_id = "notifications_mark_read",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Notification ID")),
+    responses(
+        (status = 200, description = "Idempotent; `updated` = false when no such notification", body = crate::response::Envelope<serde_json::Value>),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorBody),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    )
+)]
+pub async fn mark_read(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    let nid = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("Invalid notification ID: {id}")))?;
+    let updated = svc.mark_notification_read(nid).await?;
+    Ok(Json(Envelope::new(
+        serde_json::json!({ "updated": updated }),
+    )))
+}
+
 /// `DELETE /api/v1/notifications/read` — Clear all read notifications.
 #[utoipa::path(
     delete,
@@ -164,5 +193,51 @@ pub async fn dismiss(
     let deleted = svc.dismiss_notification(nid).await?;
     Ok(Json(Envelope::new(
         serde_json::json!({ "deleted": deleted }),
+    )))
+}
+
+/// `DELETE /api/v1/notifications` — Clear every notification (live questions survive).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/notifications",
+    tag = "notifications",
+    operation_id = "notifications_clear_all",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Notifications cleared; `deleted` = row count", body = crate::response::Envelope<serde_json::Value>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    )
+)]
+pub async fn clear_all(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    let deleted = svc.clear_all_notifications().await?;
+    Ok(Json(Envelope::new(
+        serde_json::json!({ "deleted": deleted }),
+    )))
+}
+
+/// `POST /api/v1/notifications/read-all` — Mark every notification as read.
+#[utoipa::path(
+    post,
+    path = "/api/v1/notifications/read-all",
+    tag = "notifications",
+    operation_id = "notifications_mark_all_read",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Notifications marked read; `updated` = row count", body = crate::response::Envelope<serde_json::Value>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    )
+)]
+pub async fn mark_all_read(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    let updated = svc.mark_all_notifications_read().await?;
+    Ok(Json(Envelope::new(
+        serde_json::json!({ "updated": updated }),
     )))
 }

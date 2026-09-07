@@ -198,19 +198,51 @@ impl CheckpointStore {
         .context("Checkpoint list task failed")?
     }
 
-    pub async fn prune_older_than(&self, max_age: chrono::Duration) -> anyhow::Result<usize> {
+    /// Delete checkpoints older than `max_age`, except those belonging to a task
+    /// in `keep_alive` (the scheduler's non-terminal task set).
+    ///
+    /// A checkpoint IS the recovery point: pruning one for a task that is merely
+    /// parked (an unanswered `ask-user` outlives 72h easily) makes that task
+    /// permanently unresumable — `cmd_resume_task` then reports "no checkpoint
+    /// found". Only checkpoints of tasks the scheduler no longer considers live
+    /// are collectable.
+    pub async fn prune_older_than(
+        &self,
+        max_age: chrono::Duration,
+        keep_alive: &std::collections::HashSet<TaskID>,
+    ) -> anyhow::Result<usize> {
         let conn = self.conn.clone();
         let cutoff = (chrono::Utc::now() - max_age).to_rfc3339();
+        // Filtering in Rust rather than a `NOT IN (…)` list keeps the statement
+        // free of SQLite's bound-variable limit; only expired rows are visited.
+        let keep: std::collections::HashSet<String> =
+            keep_alive.iter().map(|id| id.to_string()).collect();
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let guard = conn
                 .lock()
                 .map_err(|_| anyhow!("Checkpoint DB mutex poisoned"))?;
-            let deleted = guard
-                .execute(
-                    "DELETE FROM checkpoints WHERE updated_at < ?1",
-                    params![cutoff],
-                )
-                .context("Failed to prune expired checkpoints")?;
+            let expired: Vec<String> = {
+                let mut stmt = guard
+                    .prepare("SELECT task_id FROM checkpoints WHERE updated_at < ?1")
+                    .context("Failed to prepare checkpoint prune scan")?;
+                let rows = stmt
+                    .query_map(params![cutoff], |row| row.get::<_, String>(0))
+                    .context("Failed to scan expired checkpoints")?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .context("Failed to decode expired checkpoint row")?
+            };
+            let mut deleted = 0usize;
+            for task_id in expired {
+                if keep.contains(&task_id) {
+                    continue;
+                }
+                deleted += guard
+                    .execute(
+                        "DELETE FROM checkpoints WHERE task_id = ?1",
+                        params![task_id],
+                    )
+                    .context("Failed to prune expired checkpoints")?;
+            }
             Ok(deleted)
         })
         .await
@@ -480,6 +512,45 @@ mod tests {
         // No row → 0, never an error.
         let other = AgentTask::default();
         assert_eq!(store.increment_resume_count(&other.id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_spares_live_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::open(dir.path().join("checkpoints.db"))
+            .await
+            .unwrap();
+        let stale = chrono::Utc::now() - chrono::Duration::hours(100);
+        let mk = |task: &AgentTask, id: &str| CheckpointRecord {
+            checkpoint_id: id.to_string(),
+            task_id: task.id,
+            agent_id: task.agent_id,
+            step_num: 1,
+            created_at: stale,
+            updated_at: stale,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            key_version: CHECKPOINT_KEY_VERSION,
+            state_blob: vec![7],
+        };
+        // Parked for days on an unanswered question — still resumable.
+        let live = AgentTask::default();
+        // Terminal — nothing will ever resume it.
+        let dead = AgentTask::default();
+        store.write(mk(&live, "cp-live")).await.unwrap();
+        store.write(mk(&dead, "cp-dead")).await.unwrap();
+
+        let keep: std::collections::HashSet<TaskID> = [live.id].into_iter().collect();
+        let pruned = store
+            .prune_older_than(chrono::Duration::hours(72), &keep)
+            .await
+            .unwrap();
+
+        assert_eq!(pruned, 1);
+        assert!(
+            store.get_latest(&live.id).await.unwrap().is_some(),
+            "a non-terminal task must keep its recovery point"
+        );
+        assert!(store.get_latest(&dead.id).await.unwrap().is_none());
     }
 
     #[test]

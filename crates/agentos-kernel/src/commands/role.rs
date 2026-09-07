@@ -191,6 +191,37 @@ impl Kernel {
 
         match registry.assign_role(&agent_id, role_name.clone()) {
             Ok(_) => {
+                let (roles, perms) = match registry.get_by_id(&agent_id) {
+                    Some(a) => (a.roles.clone(), Some(a.permissions.clone())),
+                    None => (Vec::new(), None),
+                };
+
+                // Mirror the connect path's per-role observe grants, so a role
+                // assigned to a running agent is not half-applied (subscribed by
+                // the kernel, but unable to refine its own subscriptions) until
+                // the agent happens to reconnect.
+                if let Some(mut perms) = perms {
+                    for resource in crate::event_bus::event_observe_permissions_for_role(&role_name)
+                    {
+                        perms.grant_op(resource.to_string(), PermissionOp::Observe, None);
+                    }
+                    if let Err(e) = registry.update_agent_permissions(&agent_id, perms) {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            role = %role_name,
+                            error = %e,
+                            "Failed to apply role event-observe permissions"
+                        );
+                    }
+                }
+                drop(registry);
+
+                // Role-default event subscriptions are otherwise only seeded on
+                // connect, so a role assigned to an already-running agent would
+                // do nothing until it reconnected. Idempotent, so the reseed at
+                // the next connect is a no-op.
+                self.seed_role_subscriptions(agent_id, &roles).await;
+
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: TraceID::new(),

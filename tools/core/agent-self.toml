@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "agent-self"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Return a snapshot of the calling agent's own state: current permissions, budget, tool count, active event subscriptions, and running tasks. Use agent-manual to browse available tools. No special permissions required — every agent can always inspect its own context."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "agent"
+search_hints = ["who am I", "my own profile and permissions", "what can I do"]
 
 [capabilities_required]
 # No permissions required — reads own context data only.

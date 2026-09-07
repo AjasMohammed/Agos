@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// Mode-vs-risk-class decision matrix:
 ///
-/// | Mode        | ReadonlyScoped | ReadonlyExternal | WriteScoped | ExecCapable | ControlPlane | Interactive |
-/// |-------------|:--------------:|:----------------:|:-----------:|:-----------:|:------------:|:-----------:|
-/// | `Auto`      | allow          | allow            | allow       | allow       | **prompt**   | allow       |
-/// | `AskEdit`   | allow          | allow            | prompt      | prompt      | prompt       | prompt      |
-/// | `AskAlways` | allow          | prompt           | prompt      | prompt      | prompt       | prompt      |
-/// | `Deny`      | allow          | deny             | deny        | deny        | deny         | deny        |
+/// | Mode        | ReadonlyScoped | ReadonlyExternal | WriteAgentState | WriteScoped | ExecCapable | ControlPlane | Interactive |
+/// |-------------|:--------------:|:----------------:|:---------------:|:-----------:|:-----------:|:------------:|:-----------:|
+/// | `Auto`      | allow          | allow            | allow           | allow       | allow       | **prompt**   | allow       |
+/// | `AskEdit`   | allow          | allow            | allow           | prompt      | prompt      | prompt       | prompt      |
+/// | `AskAlways` | allow          | prompt           | prompt          | prompt      | prompt      | prompt       | prompt      |
+/// | `Deny`      | allow          | deny             | deny            | deny        | deny        | deny         | deny        |
 ///
 /// `ControlPlane` always prompts under non-`Deny` modes — kernel admin actions
 /// must surface even when the operator has opted into auto-approval.
@@ -98,11 +98,24 @@ impl ApprovalMode {
         if matches!(risk, ReadonlyScoped) {
             return ApprovalDecision::Allow;
         }
+        // Interactive is always allowed: the tool's whole job is to put a human
+        // in the loop. Prompting to approve a request for human input is
+        // circular, and under `Deny` it left the agent unable to reach its
+        // operator at all. Approval adds no safety here — the human answers
+        // either way, and the call blocks on a 300s auto-deny. `ask-user` is
+        // the only Interactive tool and is already denylisted from schedules.
+        if matches!(risk, Interactive) {
+            return ApprovalDecision::Allow;
+        }
         match self {
             Self::Auto => ApprovalDecision::Allow,
             Self::Deny => ApprovalDecision::Deny,
             Self::AskEdit => match risk {
-                ReadonlyScoped | ReadonlyExternal => ApprovalDecision::Allow,
+                // WriteAgentState writes only the agent's own kernel-owned
+                // stores (memory, scratchpad, inbox, notifications). Prompting
+                // per remembered fact trains the operator to rubber-stamp, and
+                // there is nothing to escape: no user file, no network.
+                ReadonlyScoped | ReadonlyExternal | WriteAgentState => ApprovalDecision::Allow,
                 _ => ApprovalDecision::Prompt,
             },
             Self::AskAlways => match risk {
@@ -117,6 +130,25 @@ impl ApprovalMode {
 mod tests {
     use super::*;
     use crate::RiskClass::*;
+
+    #[test]
+    fn interactive_is_allowed_in_every_mode() {
+        // `ask-user` is the only Interactive tool. Prompting to approve a request
+        // for human input is circular, and under Deny it left the agent with no
+        // way to reach its operator at all.
+        for mode in [
+            ApprovalMode::Auto,
+            ApprovalMode::AskEdit,
+            ApprovalMode::AskAlways,
+            ApprovalMode::Deny,
+        ] {
+            assert_eq!(
+                mode.decide(Interactive),
+                ApprovalDecision::Allow,
+                "Interactive must be allowed under {mode:?}"
+            );
+        }
+    }
 
     #[test]
     fn auto_allows_writes_but_prompts_control_plane() {
@@ -159,6 +191,24 @@ mod tests {
         assert_eq!(
             ApprovalMode::AskEdit.decide(ControlPlane),
             ApprovalDecision::Prompt
+        );
+    }
+
+    #[test]
+    fn write_agent_state_allowed_under_ask_edit_but_not_ask_always() {
+        // Agent-owned stores (memory, scratchpad, notifications) must not
+        // prompt under the default mode, but `ask_always` still gates them.
+        assert_eq!(
+            ApprovalMode::AskEdit.decide(WriteAgentState),
+            ApprovalDecision::Allow
+        );
+        assert_eq!(
+            ApprovalMode::AskAlways.decide(WriteAgentState),
+            ApprovalDecision::Prompt
+        );
+        assert_eq!(
+            ApprovalMode::Deny.decide(WriteAgentState),
+            ApprovalDecision::Deny
         );
     }
 

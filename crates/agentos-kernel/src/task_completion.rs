@@ -27,9 +27,14 @@ pub(crate) struct FailureDetails {
 /// Apply one terminal failure to the runaway-breaker streak map.
 ///
 /// Returns `Some(streak)` when the breaker should fire — i.e. the agent has now
-/// failed `limit` times in a row, each faster than `fast_ms`. Firing removes the
-/// entry so the pause happens once, not again for every failure that lands
-/// before the queue stops draining.
+/// failed `limit` times in a row, each faster than `fast_ms` (or each a provider
+/// failure). Firing removes the entry so the pause happens once, not again for
+/// every failure that lands before the queue stops draining.
+///
+/// `provider_failure` marks an `llm_error` — the backend is unreachable, out of
+/// quota, or the key is rejected. Those count no matter how long they took: a
+/// 60 s connect timeout is not an "ordinary slow failure", it means the agent
+/// has no working LLM and every task it is handed will fail the same way.
 ///
 /// Split out from [`Kernel::record_failure_streak`] because this is where all
 /// the branching lives; the caller is just lock acquisition and side effects.
@@ -39,11 +44,12 @@ fn apply_failure_streak(
     duration_ms: u64,
     fast_ms: u64,
     limit: u32,
+    provider_failure: bool,
 ) -> Option<u32> {
     if limit == 0 {
         return None; // breaker disabled
     }
-    if duration_ms >= fast_ms {
+    if !provider_failure && duration_ms >= fast_ms {
         // An ordinary slow failure — not a runaway. Reset.
         streaks.remove(&agent_id);
         return None;
@@ -91,9 +97,9 @@ impl Kernel {
         self.failure_streaks.write().await.remove(&task.agent_id);
 
         // Release the atomic checkout — task is terminal, so the claim must not
-        // linger. Covers the background `execute_task` and sub-agent paths; the
-        // synchronous `cmd_run_task` path releases in its own terminal arms.
-        self.release_task_checkout(&task.id).await;
+        // linger. This is the ONLY release site for every terminal path:
+        // background `execute_task`, sub-agent, and the synchronous `cmd_run_task`.
+        self.release_task_checkout(&task.id, &task.agent_id).await;
 
         // Close the autonomous work-loop: if this task was driving a claimed work
         // item, mark it Done and unblock dependents. No-op for ordinary tasks.
@@ -148,6 +154,11 @@ impl Kernel {
                 tracing::warn!(task_id = %task.id, error = %e, "Failed to record task completion");
             }
         }
+
+        // Bounded: the full answer already lives in the chat/episodic stores;
+        // this copy exists for the task detail page.
+        let stored_answer: String = result.answer.chars().take(64 * 1024).collect();
+        self.scheduler.set_result(&task.id, &stored_answer).await;
 
         // Only transition to Complete and emit events if the task hasn't
         // been marked terminal by the timeout checker while we were running.
@@ -403,6 +414,11 @@ impl Kernel {
             .await;
 
         self.cleanup_task_subscriptions(&task.id).await;
+
+        // Release the agent's reaction-batch slot and flush anything that
+        // queued up behind this task. No-op unless this was a reaction task.
+        self.drain_reactions_after_task(task.agent_id, task.id)
+            .await;
     }
 
     /// Count a fast terminal failure toward the agent's runaway streak and
@@ -417,7 +433,13 @@ impl Kernel {
     /// the agent's queue (see `dequeue_runnable`) and stops it being
     /// auto-reactivated on the next boot. Recovery is one
     /// `agentos agent connect <name>`.
-    async fn record_failure_streak(&self, agent_id: AgentID, duration_ms: u64, trace_id: TraceID) {
+    async fn record_failure_streak(
+        &self,
+        agent_id: AgentID,
+        duration_ms: u64,
+        provider_failure: bool,
+        trace_id: TraceID,
+    ) {
         let limit = self.config.kernel.failure_streak_limit;
 
         let Some(streak) = apply_failure_streak(
@@ -426,6 +448,7 @@ impl Kernel {
             duration_ms,
             self.config.kernel.failure_streak_fast_ms,
             limit,
+            provider_failure,
         ) else {
             return;
         };
@@ -444,7 +467,7 @@ impl Kernel {
             agent_name = %agent_name,
             streak,
             limit,
-            "Agent auto-paused — {} consecutive fast task failures. Drain with \
+            "Agent auto-paused — {} consecutive failing tasks. Drain with \
              `agentos task purge --agent {}`, then `agentos agent connect {}`",
             streak,
             agent_name,
@@ -476,10 +499,11 @@ impl Kernel {
             trace_id,
             kind: UserMessageKind::Notification,
             priority: NotificationPriority::Critical,
-            subject: format!("Agent '{agent_name}' auto-paused after {streak} fast failures"),
+            subject: format!("Agent '{agent_name}' auto-paused after {streak} failures"),
             body: format!(
-                "Agent **{agent_name}** failed {streak} tasks in a row, each in under \
-                 {fast_ms} ms, and has been paused to stop a runaway loop.\n\n\
+                "Agent **{agent_name}** failed {streak} tasks in a row — each either in \
+                 under {fast_ms} ms or with an LLM/provider error — and has been paused \
+                 to stop a runaway loop.\n\n\
                  Its queued tasks are held, not running. To recover:\n\n\
                  ```\nagentos task purge --agent {agent_name}\nagentos agent connect {agent_name}\n```\n\n\
                  Check the provider is reachable first — a tripped LLM circuit breaker \
@@ -629,18 +653,37 @@ impl Kernel {
         }
         crate::metrics::record_task_completed(duration_ms, false);
 
-        // Runaway breaker: a genuine terminal failure that happened *fast*.
-        self.record_failure_streak(task.agent_id, duration_ms, task_trace_id)
-            .await;
+        // Runaway breaker: a genuine terminal failure that happened *fast*, or an
+        // `llm_error` at any speed (a dead/unauthorized backend fails every task).
+        self.record_failure_streak(
+            task.agent_id,
+            duration_ms,
+            reason == "llm_error",
+            task_trace_id,
+        )
+        .await;
 
         // Terminal failure (suspended/paused/waiting returned above) — release the
         // atomic checkout so the claim doesn't linger.
-        self.release_task_checkout(&task.id).await;
+        self.release_task_checkout(&task.id, &task.agent_id).await;
 
         // Mark any work item this task was driving as Failed. Suspended/waiting
         // tasks returned above, so reaching here means a genuine terminal failure
         // (the item is released, not re-queued — dependents stay blocked).
         self.complete_work_item_for_task(&task.id, false).await;
+
+        // Still pending here means no inference ever succeeded (the executor
+        // resolves the announcement on the first answer), so this new agent never
+        // proved its backend works — drop it rather than wake every peer.
+        self.announce_agent_added(&task.id, false).await;
+
+        // Release the agent's reaction-batch slot and flush anything queued
+        // behind this task. Before the terminal-state check on purpose: a task
+        // the timeout checker already marked Failed bails out below, and the
+        // batch would then wait a whole window for the scheduler liveness check
+        // in `flush_reactions` to notice. No-op unless this was a reaction task.
+        self.drain_reactions_after_task(task.agent_id, task.id)
+            .await;
 
         // Only transition to Failed and emit events if the task hasn't
         // been marked terminal by the timeout checker while we were running.
@@ -666,6 +709,9 @@ impl Kernel {
             return;
         }
 
+        self.scheduler
+            .set_failure_reason(&task.id, error_message.clone())
+            .await;
         self.push_status_update(task.id, TaskState::Failed, error_message.clone());
 
         // Inject the failure result into the parent context so the parent LLM
@@ -1701,13 +1747,13 @@ mod tests {
 
         for i in 1..LIMIT {
             assert_eq!(
-                apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+                apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT, false),
                 None,
                 "failure {i} is below the limit"
             );
         }
         assert_eq!(
-            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT, false),
             Some(LIMIT),
             "the {LIMIT}th consecutive fast failure fires the breaker"
         );
@@ -1717,7 +1763,7 @@ mod tests {
              every failure still in flight"
         );
         assert_eq!(
-            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT, false),
             None,
             "the next failure starts a fresh streak"
         );
@@ -1729,11 +1775,11 @@ mod tests {
         let agent = AgentID::new();
 
         for _ in 0..(LIMIT - 1) {
-            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT);
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT, false);
         }
         // One ordinary slow failure — an agent hitting real errors, not a loop.
         assert_eq!(
-            apply_failure_streak(&mut streaks, agent, FAST_MS, FAST_MS, LIMIT),
+            apply_failure_streak(&mut streaks, agent, FAST_MS, FAST_MS, LIMIT, false),
             None
         );
         assert!(
@@ -1743,9 +1789,31 @@ mod tests {
 
         // So the next fast failure must be counted as #1, not #LIMIT.
         assert_eq!(
-            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT, false),
             None,
             "a slow failure in the middle must prevent a false positive"
+        );
+    }
+
+    /// An agent whose backend is down/unauthorized fails slowly (connect and read
+    /// timeouts), so the fast-only rule never paused it and event triggers kept
+    /// spawning doomed tasks. Provider failures must count at any duration.
+    #[test]
+    fn slow_provider_failures_still_trip_the_breaker() {
+        let mut streaks = HashMap::new();
+        let agent = AgentID::new();
+
+        // 60 s LLM timeouts — far above fast_ms.
+        for _ in 1..LIMIT {
+            assert_eq!(
+                apply_failure_streak(&mut streaks, agent, 60_000, FAST_MS, LIMIT, true),
+                None
+            );
+        }
+        assert_eq!(
+            apply_failure_streak(&mut streaks, agent, 60_000, FAST_MS, LIMIT, true),
+            Some(LIMIT),
+            "a dead backend must pause the agent even though every failure is slow"
         );
     }
 
@@ -1755,13 +1823,13 @@ mod tests {
         let (a, b) = (AgentID::new(), AgentID::new());
 
         for _ in 0..(LIMIT - 1) {
-            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT);
-            apply_failure_streak(&mut streaks, b, 10, FAST_MS, LIMIT);
+            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT, false);
+            apply_failure_streak(&mut streaks, b, 10, FAST_MS, LIMIT, false);
         }
         assert_eq!(streaks.get(&a), Some(&(LIMIT - 1)));
         assert_eq!(streaks.get(&b), Some(&(LIMIT - 1)));
         assert_eq!(
-            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT),
+            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT, false),
             Some(LIMIT)
         );
         assert_eq!(
@@ -1777,7 +1845,7 @@ mod tests {
         let agent = AgentID::new();
         for _ in 0..1_000 {
             assert_eq!(
-                apply_failure_streak(&mut streaks, agent, 0, FAST_MS, 0),
+                apply_failure_streak(&mut streaks, agent, 0, FAST_MS, 0, false),
                 None
             );
         }

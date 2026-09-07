@@ -1,161 +1,20 @@
-//! Task-time tool scoping.
+//! Task-time tool scoping: working-set admission for the native tool array
+//! (`admit`) plus the legacy explicit `task.tool_categories` filter.
 //!
-//! Frontier models otherwise receive all ~132 tool schemas on every turn, which
-//! hurts both cost and tool-selection accuracy. This module classifies a task
-//! prompt into the tool *categories* whose native schemas should be pre-loaded,
-//! and filters the native tool array to that scope.
-//!
-//! Scoping is a **soft pre-load filter, never a hard wall**: anything scoped out
-//! stays discoverable through the semantic `search-tools` escape hatch (Phase 1),
-//! which searches the full registry irrespective of scope, and becomes natively
-//! callable after a successful `describe-tool` on it — the task executor re-arms
-//! the described tool's schema into the native array for the rest of the task
-//! (`tools.discovery.rearm_on_describe`, default on). The scope itself is
-//! computed **once per task** (DD4, revised): the native array only changes
-//! through that explicit re-arm path, costing one tools-block cache bust per
-//! armed tool; otherwise it stays behind the Anthropic tools cache breakpoint.
-//!
-//! `category` is the *inferred* dimension (`AgentManualTool::infer_tool_category`)
-//! — it is NOT a stored field on `ToolManifest`. The `read/write/exec/network/
-//! fs/meta` taxonomy is a separate *tag* dimension; in particular `fs` is a tag,
-//! not a category (file tools infer to `core`).
+//! The native tool array is a **working set**, not the catalogue: `admit` keeps
+//! T0 (the `meta`-tagged escape hatch, config `pinned_tools`, the agent's most
+//! used tools) plus T1 (top-K hybrid-retrieval hits over the task prompt) and
+//! parks everything else in a deferred pool. Anything deferred stays reachable
+//! through `search-tools`/`describe-tool`: the executor arms the schema on a
+//! hit (appended after the cache breakpoint), or — on providers with native
+//! deferral — the API expands a `tool_reference`. An explicit
+//! `task.tool_categories` keeps the legacy whole-category filter
+//! (`manifest_in_scope`). Category comes from `AgentManualTool::category_of`:
+//! the manifest's `[manifest].category` when declared, else name inference.
 
 use agentos_tools::agent_manual::AgentManualTool;
 use agentos_types::ToolManifest;
-use async_trait::async_trait;
-
-/// Classifies a task prompt into the tool categories to pre-load.
-#[async_trait]
-pub trait TaskToolClassifier: Send + Sync {
-    /// Returns the categories whose tools should be pre-loaded for this task.
-    /// `known_categories` is advisory — the authoritative set of values
-    /// `infer_tool_category` can emit, supplied so impls that want it can fail
-    /// open. It MAY be empty: the default heuristic ignores it, and callers pass
-    /// `&[]` to skip an unnecessary registry scan.
-    async fn classify(&self, prompt: &str, known_categories: &[String]) -> Vec<String>;
-}
-
-/// Zero-cost keyword classifier — the default. Targets the real categories
-/// emitted by `infer_tool_category`, never the `fs`/`read`/`write` *tags*.
-/// Always seeds `core` so generic tasks are never tool-starved. Deterministic,
-/// no I/O, no inference — returns immediately despite the async trait.
-#[derive(Debug, Default)]
-pub struct HeuristicClassifier;
-
-#[async_trait]
-impl TaskToolClassifier for HeuristicClassifier {
-    async fn classify(&self, prompt: &str, _known: &[String]) -> Vec<String> {
-        let p = prompt.to_ascii_lowercase();
-        let mut cats: std::collections::BTreeSet<&'static str> = Default::default();
-        let any = |keys: &[&str]| keys.iter().any(|k| p.contains(k));
-
-        // File/read/write/shell tasks live in category `core` (NOT a non-existent
-        // `fs` category — `fs` is a tag and file tools infer to `core`).
-        if any(&[
-            "file",
-            "read",
-            "write",
-            "edit",
-            "grep",
-            "glob",
-            "delete",
-            "directory",
-            "folder",
-            "path",
-            "shell",
-            "command",
-            "execute",
-        ]) {
-            cats.insert("core");
-        }
-        if any(&[
-            "remember",
-            "recall",
-            "last time",
-            "previously",
-            "memory",
-            "forget",
-        ]) {
-            cats.insert("memory");
-        }
-        if any(&[
-            "message",
-            "slack",
-            "discord",
-            "telegram",
-            "send",
-            "channel",
-            "whatsapp",
-            "matrix",
-            "mattermost",
-        ]) {
-            cats.insert("channel");
-        }
-        if any(&[
-            "schedule",
-            "cron",
-            "timer",
-            "remind",
-            "every day",
-            "recurring",
-            "periodically",
-        ]) {
-            cats.insert("scheduling");
-        }
-        if any(&["container", "docker", "image", "pod"]) {
-            cats.insert("containers");
-        }
-        if any(&["webhook"]) {
-            cats.insert("webhooks");
-        }
-        if any(&[
-            "device",
-            "gpu",
-            "sensor",
-            "hardware",
-            "camera",
-            "microphone",
-        ]) {
-            cats.insert("hal");
-        }
-        if any(&["event", "subscribe", "publish", "notify event"]) {
-            cats.insert("events");
-        }
-        if any(&["skill"]) {
-            cats.insert("skills");
-        }
-        if any(&["plugin"]) {
-            cats.insert("plugins");
-        }
-        if any(&["scratch", "scratchpad", "wikilink"]) {
-            cats.insert("scratchpad");
-        }
-        if any(&[
-            "environment",
-            "virtualenv",
-            "venv",
-            "process",
-            "build",
-            "compile",
-            "storage zone",
-            "capability",
-        ]) {
-            cats.insert("capabilities");
-        }
-        if any(&["approval", "ask the user", "ask user", "notify the user"]) {
-            cats.insert("notifications");
-        }
-
-        // `core` is always present so the common tools are never scoped away.
-        // `mcp` too: installed MCP-server tools infer to category `mcp`, which no
-        // keyword emits, so without this they'd be silently dropped from the
-        // native array (still reachable via search-tools, but that's a regression
-        // for the integrations users explicitly install).
-        cats.insert("core");
-        cats.insert("mcp");
-        cats.into_iter().map(str::to_string).collect()
-    }
-}
+use std::collections::HashMap;
 
 /// Whether a category survives the (soft) scope. `None` = no scope (legacy "all
 /// tools"). Meta-tagged tools always survive — the discovery/coordination escape
@@ -175,44 +34,13 @@ pub(crate) fn manifest_in_scope(manifest: &ToolManifest, scope: Option<&[String]
         return true;
     }
     let is_meta = manifest.tags.iter().any(|t| t.eq_ignore_ascii_case("meta"));
-    let category = AgentManualTool::infer_tool_category(
-        &manifest.manifest.name,
-        &manifest.manifest.capability_tags,
-        manifest.manifest.tags.as_deref(),
-    );
+    let category = AgentManualTool::category_of(manifest);
     category_in_scope(&category, is_meta, scope)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn heuristic_routes_file_task_to_core_not_fs() {
-        let cats = HeuristicClassifier
-            .classify("read the config file at /etc/app.toml", &[])
-            .await;
-        assert!(cats.iter().any(|c| c == "core"));
-        // `fs` is a tag, not a category — it must never appear here.
-        assert!(!cats.iter().any(|c| c == "fs"));
-    }
-
-    #[tokio::test]
-    async fn heuristic_routes_memory_and_always_seeds_core() {
-        let cats = HeuristicClassifier
-            .classify("remember that I prefer metric units", &[])
-            .await;
-        assert!(cats.iter().any(|c| c == "memory"));
-        assert!(cats.iter().any(|c| c == "core"));
-    }
-
-    #[tokio::test]
-    async fn heuristic_unknown_prompt_still_seeds_core_and_mcp() {
-        let cats = HeuristicClassifier.classify("xyzzy", &[]).await;
-        // BTreeSet order: always-seeded floor is core + mcp so generic tasks keep
-        // the common tools and installed MCP servers.
-        assert_eq!(cats, vec!["core".to_string(), "mcp".to_string()]);
-    }
 
     #[test]
     fn category_in_scope_none_allows_all() {
@@ -234,5 +62,205 @@ mod tests {
         // A `channel`-category tool that is meta-tagged still survives a
         // memory-only scope (escape hatch / coordination).
         assert!(category_in_scope("channel", true, Some(&scope)));
+    }
+}
+
+/// Working-set admission policy for the native tool array (deferred tool
+/// loading). See `obsidian-vault/plans/deferred-tool-loading/`.
+pub struct WorkingSetPolicy<'a> {
+    /// Always-loaded tool names (config `tools.discovery.pinned_tools`).
+    pub pinned_tools: &'a [String],
+    /// Per-agent most-used tools pinned into T0.
+    pub pinned_usage_top_n: usize,
+    /// T1 size: how many retrieval hits over the task prompt to pre-arm.
+    pub working_set_size: usize,
+}
+
+fn take(by_name: &mut HashMap<String, ToolManifest>, native: &mut Vec<ToolManifest>, name: &str) {
+    if let Some(m) = by_name.remove(name) {
+        native.push(m);
+    }
+}
+
+/// Split `all` into the native array and the deferred pool.
+///
+/// Native order is deterministic and stable across iterations (it is the
+/// cached prefix): T0 = `meta`-tagged escape hatch (sorted by name) + pinned
+/// tools (config order) + the agent's top-N by usage; then T1 = `t1_ranked`
+/// (best-first, already ranked by the caller) up to `working_set_size`.
+/// Every input manifest lands in exactly one side.
+pub fn admit(
+    all: Vec<ToolManifest>,
+    usage: &HashMap<String, f64>,
+    t1_ranked: &[String],
+    policy: &WorkingSetPolicy<'_>,
+) -> (Vec<ToolManifest>, HashMap<String, ToolManifest>) {
+    let all_len = all.len();
+    let mut by_name: HashMap<String, ToolManifest> = all
+        .into_iter()
+        .map(|m| (m.manifest.name.clone(), m))
+        .collect();
+    // ToolRegistry enforces unique names; a duplicate here would vanish from
+    // both sides and break the "exactly one side" invariant.
+    debug_assert_eq!(
+        by_name.len(),
+        all_len,
+        "duplicate tool names passed to admit"
+    );
+    let mut native = Vec::with_capacity(policy.working_set_size + 16);
+
+    let mut meta: Vec<String> = by_name
+        .values()
+        .filter(|m| m.tags.iter().any(|t| t.eq_ignore_ascii_case("meta")))
+        .map(|m| m.manifest.name.clone())
+        .collect();
+    meta.sort();
+    for n in &meta {
+        take(&mut by_name, &mut native, n);
+    }
+    for n in policy.pinned_tools {
+        take(&mut by_name, &mut native, n);
+    }
+    let mut ranked: Vec<(&String, f64)> = usage
+        .iter()
+        .filter(|(n, _)| by_name.contains_key(*n))
+        .map(|(n, s)| (n, *s))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let top: Vec<String> = ranked
+        .into_iter()
+        .take(policy.pinned_usage_top_n)
+        .map(|(n, _)| n.clone())
+        .collect();
+    for n in &top {
+        take(&mut by_name, &mut native, n);
+    }
+    let mut admitted = 0usize;
+    for n in t1_ranked {
+        if admitted >= policy.working_set_size {
+            break;
+        }
+        if by_name.contains_key(n) {
+            take(&mut by_name, &mut native, n);
+            admitted += 1;
+        }
+    }
+    (native, by_name)
+}
+
+#[cfg(test)]
+mod admit_tests {
+    use super::*;
+
+    fn manifest(name: &str, tags: &[&str]) -> ToolManifest {
+        let mut m = crate::tool_registry::tests::make_core_manifest(name);
+        m.tags = tags.iter().map(|t| t.to_string()).collect();
+        m
+    }
+
+    #[test]
+    fn admit_orders_t0_then_t1_and_pools_the_rest() {
+        let all = vec![
+            manifest("zeta", &["read"]),
+            manifest("search-tools", &["meta"]),
+            manifest("think", &["read"]),
+            manifest("file-reader", &["read"]),
+            manifest("web-fetch", &["network"]),
+            manifest("audio", &["exec"]),
+        ];
+        let pinned = vec!["think".to_string(), "missing".to_string()];
+        let mut usage = HashMap::new();
+        usage.insert("web-fetch".to_string(), 9.0);
+        usage.insert("zeta".to_string(), 1.0);
+        let policy = WorkingSetPolicy {
+            pinned_tools: &pinned,
+            pinned_usage_top_n: 1,
+            working_set_size: 1,
+        };
+        let t1 = vec![
+            "web-fetch".to_string(),
+            "file-reader".to_string(),
+            "audio".to_string(),
+        ];
+        let (native, pool) = admit(all, &usage, &t1, &policy);
+        let names: Vec<&str> = native.iter().map(|m| m.manifest.name.as_str()).collect();
+        // meta, pinned, usage top-1, then T1 (web-fetch already taken → file-reader)
+        assert_eq!(
+            names,
+            vec!["search-tools", "think", "web-fetch", "file-reader"]
+        );
+        let mut pooled: Vec<&String> = pool.keys().collect();
+        pooled.sort();
+        assert_eq!(pooled, vec!["audio", "zeta"]);
+    }
+
+    #[test]
+    fn admit_over_core_catalogue_stays_small() {
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+        let none = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/__none__");
+        let registry = crate::tool_registry::ToolRegistry::load_from_dirs(&core, &none)
+            .expect("core manifests load");
+        let all: Vec<ToolManifest> = registry
+            .list_all()
+            .into_iter()
+            .map(|t| t.manifest.clone())
+            .collect();
+        let total = all.len();
+        let meta_count = all
+            .iter()
+            .filter(|m| m.tags.iter().any(|t| t == "meta"))
+            .count();
+        let cfg = crate::config::DiscoverySettings::default();
+        let policy = WorkingSetPolicy {
+            pinned_tools: &cfg.pinned_tools,
+            pinned_usage_top_n: cfg.pinned_usage_top_n,
+            working_set_size: cfg.working_set_size,
+        };
+        // Realistic worst case: a full T1 of K distinct hits and a populated
+        // usage map (defaults: 6 meta + 5 pinned (1 overlaps meta) + 3 usage + 8).
+        let t1: Vec<String> = [
+            "file-reader",
+            "file-writer",
+            "shell-exec",
+            "web-fetch",
+            "file-glob",
+            "file-grep",
+            "http-client",
+            "web-search",
+            "sys-monitor",
+            "process-manager",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut usage = HashMap::new();
+        usage.insert("memory-write".to_string(), 9.0);
+        usage.insert("agent-message".to_string(), 5.0);
+        usage.insert("notify-user".to_string(), 50.0); // pinned already → no extra slot
+        usage.insert("hardware-info".to_string(), 3.0);
+        let (native, pool) = admit(all, &usage, &t1, &policy);
+        let ceiling =
+            meta_count + cfg.pinned_tools.len() + cfg.pinned_usage_top_n + cfg.working_set_size;
+        assert!(
+            native.len() <= ceiling,
+            "native={} ceiling={ceiling} meta={meta_count}",
+            native.len()
+        );
+        assert!(
+            native.len() <= 21,
+            "worst-case native array must stay ≤21, got {}",
+            native.len()
+        );
+        assert_eq!(native.len() + pool.len(), total);
+        for n in ["search-tools", "describe-tool", "list-tools"] {
+            assert!(
+                native.iter().any(|m| m.manifest.name == n),
+                "{n} missing from T0"
+            );
+        }
     }
 }

@@ -34,6 +34,47 @@ struct IndexCache {
     entries: Vec<(String, Vec<f32>)>,
 }
 
+/// The text a tool is indexed by — for both the embedding and the lexical
+/// scorer, so the two legs of the hybrid search see the same evidence.
+/// Includes what the model actually reasons in: the name (hyphens spaced),
+/// description, category, author-written `search_hints` (user-phrased
+/// intents), and the top-level `payload_schema` property names + their
+/// descriptions ("path", "cron", "channel_id" are how tasks are phrased).
+pub fn index_text(s: &ToolSummary) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str(&s.name);
+    out.push_str(". ");
+    out.push_str(&s.name.replace('-', " "));
+    out.push_str(". ");
+    out.push_str(&s.description);
+    out.push_str(". ");
+    out.push_str(&s.category);
+    for t in &s.capability_tags {
+        out.push(' ');
+        out.push_str(t);
+    }
+    for h in &s.search_hints {
+        out.push_str(". ");
+        out.push_str(h);
+    }
+    if let Some(props) = s
+        .payload_schema
+        .as_ref()
+        .and_then(|v| v.get("properties"))
+        .and_then(|v| v.as_object())
+    {
+        for (k, v) in props {
+            out.push_str(". ");
+            out.push_str(&k.replace('_', " "));
+            if let Some(d) = v.get("description").and_then(|d| d.as_str()) {
+                out.push_str(": ");
+                out.push_str(d);
+            }
+        }
+    }
+    out
+}
+
 /// Lazily-refreshing semantic index over the tool catalogue.
 pub struct ToolSearchIndex {
     embedder: Arc<Embedder>,
@@ -62,9 +103,7 @@ impl ToolSearchIndex {
         // diverge, a field-only edit would leave the signature unchanged and the
         // index would serve embeddings built from the stale text.
         for s in summaries {
-            s.name.hash(&mut h);
-            s.description.hash(&mut h);
-            s.capability_tags.hash(&mut h);
+            index_text(s).hash(&mut h);
         }
         // Avoid colliding with the `0` "never built" sentinel.
         h.finish() | 1
@@ -88,17 +127,7 @@ impl ToolSearchIndex {
             };
             return;
         }
-        let texts: Vec<String> = summaries
-            .iter()
-            .map(|s| {
-                format!(
-                    "{}. {}. {}",
-                    s.name,
-                    s.description,
-                    s.capability_tags.join(" ")
-                )
-            })
-            .collect();
+        let texts: Vec<String> = summaries.iter().map(index_text).collect();
         let names: Vec<String> = summaries.iter().map(|s| s.name.clone()).collect();
         let embedder = Arc::clone(&self.embedder);
         // The MiniLM forward pass is synchronous + CPU-bound — never run it on
@@ -263,6 +292,7 @@ mod tests {
             trust_tier: "core".into(),
             capability_tags: caps.iter().map(|s| s.to_string()).collect(),
             category: "core".into(),
+            search_hints: Vec::new(),
             tags: vec![],
             risk_class: "readonly_scoped".into(),
             usage_hints: None,

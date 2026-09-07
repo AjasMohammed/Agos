@@ -1,12 +1,13 @@
-tags = ["meta", "read", "fs"]
+tags = ["read", "fs"]
+risk_class = "readonly_external"
 
 [manifest]
 name        = "system-mounts"
 version     = "1.0.0"
-risk_class  = "readonly_external"
 description = "List host filesystem mounts, storage devices, and disk usage via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "system"
 
 [manifest.usage_hints]
 use_for = ["Checking disk space usage", "Listing mounted filesystems", "Checking if a mount is read-only"]

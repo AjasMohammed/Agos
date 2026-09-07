@@ -1,4 +1,5 @@
-tags = ["meta", "read"]
+tags = ["read"]
+risk_class = "control_plane"
 
 [manifest]
 name        = "display-config"
@@ -6,6 +7,7 @@ version     = "1.0.0"
 description = "Inspect and modify display topology (mode, position, scale, enable/disable) via the HAL display driver."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "hal"
 
 [capabilities_required]
 permissions = [

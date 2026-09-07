@@ -65,31 +65,33 @@ impl Default for ToolExecutor {
 #[serde(rename_all = "snake_case")]
 pub enum RiskClass {
     /// Read-only access to local data (file read, memory search). Auto-approved.
-    #[default]
     ReadonlyScoped,
     /// Read-only external access (web fetch, web search). Auto-approved.
     ReadonlyExternal,
     /// Write operations in the working directory (file write, create). Approval required.
     WriteScoped,
+    /// Writes confined to the agent's own kernel-owned state: memory tiers,
+    /// scratchpad, its inbox, and operator notifications. Nothing leaves the
+    /// kernel's own stores, no user file is touched, and no external side
+    /// effect is produced — so `ask_edit` allows these the way it allows
+    /// reads. `ask_always` still prompts.
+    WriteAgentState,
     /// Arbitrary shell command execution. Always requires approval.
+    ///
+    /// This is the `Default` — a manifest that omits `risk_class` fails CLOSED
+    /// (approval required) rather than silently auto-approving. Core manifests
+    /// must still declare it explicitly; see `core_manifests.rs`.
+    #[default]
     ExecCapable,
     /// Control plane operations (spawn agent, modify config). Always requires approval.
     ControlPlane,
     /// Interactive: the tool itself requires human input to proceed.
+    ///
+    /// `ApprovalMode::decide` allows this under EVERY mode, `deny` included —
+    /// prompting a human to approve a request *for* human input is circular.
+    /// That makes it the strongest auto-allow in the matrix, so `verify_manifest`
+    /// rejects any non-`Core` manifest declaring it. `ask-user` is the only one.
     Interactive,
-}
-
-impl RiskClass {
-    /// Returns `true` when this risk class requires human approval before execution.
-    pub fn requires_approval(&self) -> bool {
-        matches!(
-            self,
-            RiskClass::WriteScoped
-                | RiskClass::ExecCapable
-                | RiskClass::ControlPlane
-                | RiskClass::Interactive
-        )
-    }
 }
 
 /// A tool's manifest, parsed from tool.toml at install time.
@@ -237,6 +239,20 @@ pub struct ToolInfo {
     /// Tool-selector partition (e.g. fs, network). Empty when uncategorized.
     #[serde(default)]
     pub group: String,
+    /// Explicit browsing/scoping category. Wins over the name-prefix inference in
+    /// `AgentManualTool::infer_tool_category`. Fixed v1 vocabulary: `fs`, `shell`,
+    /// `web`, `process`, `system`, `agent`, `task`, `artifact`, `hal`, `memory`,
+    /// `mcp`, `scratchpad`, `channel`, `events`, `skills`, `plugins`,
+    /// `containers`, `webhooks`, `capabilities`, `scheduling`, `notifications`,
+    /// `core`. `None` = fall back to inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Short user-phrased intents ("read a file", "open config", "cat a path")
+    /// folded into both the semantic and the keyword `search-tools` corpus.
+    /// Distinct from [`ToolInfo::capability_tags`] (nouns/capabilities) — these
+    /// are the phrasings a human would actually type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

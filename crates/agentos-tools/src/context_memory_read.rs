@@ -36,11 +36,12 @@ impl AgentTool for ContextMemoryReadTool {
             });
         }
 
-        // Return a kernel action for the dispatch loop to handle.
-        // Write-own-only: agent_id is taken from the execution context, not the payload.
+        // Return a kernel action for the dispatch loop to handle. The
+        // target agent is resolved kernel-side from the executing task, so no
+        // agent id is sent: an id in the envelope would be attacker-reachable
+        // through any tool that can be made to echo JSON.
         Ok(serde_json::json!({
             "_kernel_action": "context_memory_read",
-            "agent_id": context.agent_id.to_string(),
         }))
     }
 }

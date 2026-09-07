@@ -1,6 +1,6 @@
 //! Agent endpoints: list, connect, disconnect, detail, permissions.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::Json;
 use std::sync::Arc;
@@ -11,6 +11,14 @@ use crate::error::ApiError;
 use crate::response::Envelope;
 use crate::service::KernelService;
 use crate::types::{ConnectAgentRequest, PermissionRequest, UpdateAgentSettingsRequest};
+
+/// Query for `DELETE /api/v1/agents/{name}`.
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct DeleteAgentQuery {
+    /// `true` wipes the agent instead of parking it offline. Irreversible.
+    #[serde(default)]
+    pub purge: bool,
+}
 
 /// `GET /api/v1/agents` — List all connected agents.
 #[utoipa::path(
@@ -109,18 +117,26 @@ pub async fn update_settings(
     Ok(Json(Envelope::new(serde_json::json!({ "ok": true }))))
 }
 
-/// `DELETE /api/v1/agents/{name}` — Disconnect an agent by name.
+/// `DELETE /api/v1/agents/{name}` — Disconnect an agent by name, or remove it
+/// entirely with `?purge=true`.
 ///
-/// We look up the agent ID from the name via `get_agent_detail`, then call
-/// `disconnect_agent`.
+/// Disconnect parks the agent: the profile stays on disk marked offline so a
+/// reconnect reuses the same UUID. Disconnecting an already-offline agent is a
+/// no-op success (the kernel command itself rejects it; the handler short-circuits).
+/// Purge deletes the profile, identity, memory tiers, scratchpad, inboxes,
+/// checkpoints and schedules — it works whether the agent is online or not, and
+/// cannot be undone. Vault secrets and the audit log are kept either way.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{name}",
     tag = "agents",
     operation_id = "agents_disconnect",
-    params(("name" = String, Path, description = "Agent name")),
+    params(
+        ("name" = String, Path, description = "Agent name"),
+        DeleteAgentQuery,
+    ),
     responses(
-        (status = 200, description = "Agent disconnected", body = crate::response::Envelope<serde_json::Value>),
+        (status = 200, description = "Agent disconnected or removed", body = crate::response::Envelope<serde_json::Value>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
         (status = 404, description = "Agent not found", body = crate::error::ApiErrorBody)
     ),
@@ -130,9 +146,25 @@ pub async fn disconnect(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
     Path(name): Path<String>,
+    Query(q): Query<DeleteAgentQuery>,
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
     require_permission(&key, "agents:w")?;
     let detail = svc.get_agent_detail(&name).await?;
+    if q.purge {
+        let wiped = svc.remove_agent(detail.summary.id).await?;
+        return Ok(Json(Envelope::new(
+            serde_json::json!({ "removed": name, "wiped": wiped }),
+        )));
+    }
+    // The kernel rejects a disconnect on an already-offline agent, which reached
+    // the panel as a 500 `Internal error: Agent '<uuid>' is already offline`.
+    // DELETE is idempotent by contract and the caller's goal ("this agent is
+    // parked") already holds, so report success instead of failing.
+    if detail.summary.status == "offline" {
+        return Ok(Json(Envelope::new(
+            serde_json::json!({ "disconnected": name, "already_offline": true }),
+        )));
+    }
     svc.disconnect_agent(detail.summary.id).await?;
     Ok(Json(Envelope::new(
         serde_json::json!({ "disconnected": name }),

@@ -1,4 +1,4 @@
-tags = ["meta", "write", "control"]
+tags = ["write", "control"]
 # `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
 # Placing it inside [manifest] silently defaults the outer field to
 # `readonly_scoped`, which would let skill authoring bypass the approval hook.

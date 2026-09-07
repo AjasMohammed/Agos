@@ -1,4 +1,5 @@
 tags = ["read", "fs"]
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "file-grep"
@@ -6,6 +7,8 @@ version     = "1.0.0"
 description = "Recursively searches files within data_dir for a regex pattern. Supports optional filename glob filter, context lines, three output modes (content, files_with_matches, count), max_results cap, and case-insensitive matching."
 author      = "agentos-core"
 trust_tier  = "core"
+category    = "fs"
+search_hints = ["search text inside files", "grep for a string", "find where something is defined"]
 
 [capabilities_required]
 permissions = ["fs.user_data:r"]

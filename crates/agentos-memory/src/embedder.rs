@@ -5,6 +5,14 @@ use std::path::Path;
 /// so downstream consumers always see a fixed-size vector).
 pub const EMBED_DIMS: usize = 384;
 
+/// Token cap per text. all-MiniLM-L6-v2 is trained at 256; fastembed defaults to
+/// 512, and attention memory is quadratic in this.
+pub const EMBED_MAX_LENGTH: usize = 256;
+/// Texts per ONNX run. fastembed defaults to 256; onnxruntime's arena keeps the
+/// peak of the largest run forever (one 130-text run at 453 tokens held ~3 GB,
+/// see roadmap/Issues and Fixes 2026-09-07). Memory scales linearly with this.
+pub const EMBED_BATCH_SIZE: usize = 16;
+
 enum Backend {
     // Boxed so the enum's discriminant size isn't dominated by the
     // `TextEmbedding` variant (clippy::large_enum_variant).
@@ -24,7 +32,9 @@ impl Embedder {
     /// Downloads and initializes the embedding model during construction (~23MB for MiniLM).
     pub fn new() -> Result<Self, anyhow::Error> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_max_length(EMBED_MAX_LENGTH)
+                .with_show_download_progress(true),
         )?;
         Ok(Self {
             backend: Backend::Onnx(Box::new(model)),
@@ -36,6 +46,7 @@ impl Embedder {
         std::fs::create_dir_all(cache_dir)?;
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_max_length(EMBED_MAX_LENGTH)
                 .with_show_download_progress(true)
                 .with_cache_dir(cache_dir.to_path_buf()),
         )?;
@@ -60,7 +71,7 @@ impl Embedder {
     /// Embed one or many texts — batched for efficiency.
     pub fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anyhow::Error> {
         match &self.backend {
-            Backend::Onnx(model) => model.embed(texts.to_vec(), None),
+            Backend::Onnx(model) => model.embed(texts.to_vec(), Some(EMBED_BATCH_SIZE)),
             Backend::Noop => Ok(vec![vec![0.0_f32; EMBED_DIMS]; texts.len()]),
         }
     }

@@ -1,6 +1,6 @@
-use agentos_memory::types::{Procedure, ProcedureSearchResult, ProcedureStep};
+use agentos_memory::types::{EpisodeType, Procedure, ProcedureSearchResult, ProcedureStep};
 use agentos_memory::{EpisodicEntry, EpisodicStore, ProceduralStore};
-use agentos_types::AgentOSError;
+use agentos_types::{AgentID, AgentOSError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -136,13 +136,21 @@ impl ConsolidationEngine {
         };
 
         for group in patterns {
-            let Some(procedure) = distill_group_to_procedure(&group) else {
+            // Steps come from the ordered `tool_call` rows of the tasks in
+            // this cluster. The clustered rows themselves are task-summary
+            // `SystemEvent`s that carry no tool metadata, so the old
+            // metadata-only distillation never produced a single procedure.
+            let mut tools = self.tool_sequence_for_group(&group).await;
+            if tools.is_empty() {
+                tools = tools_from_group_metadata(&group);
+            }
+            let Some(procedure) = distill_with_steps(&group, tools) else {
                 report.skipped_low_information += 1;
                 continue;
             };
             match self
                 .procedural_store
-                .search(&procedure.name, None, 1, 0.0)
+                .search(&procedure.name, procedure.agent_id.as_ref(), 1, 0.0)
                 .await
             {
                 Ok(existing)
@@ -169,8 +177,86 @@ impl ConsolidationEngine {
 
         *self.last_run.write().await = Utc::now();
         self.task_completions_since_last.store(0, Ordering::Relaxed);
+        if report.patterns_found > 0 {
+            tracing::info!(
+                patterns = report.patterns_found,
+                created = report.created,
+                skipped_existing = report.skipped_existing,
+                skipped_low_information = report.skipped_low_information,
+                failed = report.failed,
+                "Consolidation cycle complete"
+            );
+        }
         Ok(report)
     }
+
+    /// Longest ordered tool sequence among the tasks in `group`, read from
+    /// their `tool_call` episodic rows. Consecutive repeats are collapsed;
+    /// capped at 8 steps.
+    async fn tool_sequence_for_group(&self, group: &[EpisodicEntry]) -> Vec<String> {
+        let mut best: Vec<String> = Vec::new();
+        let mut seen_tasks = HashSet::new();
+        for ep in group {
+            if !seen_tasks.insert(ep.task_id) {
+                continue;
+            }
+            let Ok(timeline) = self.episodic_store.timeline_by_task(&ep.task_id, 200).await else {
+                continue;
+            };
+            let seq = tool_sequence(&timeline);
+            if seq.len() > best.len() {
+                best = seq;
+            }
+        }
+        best
+    }
+}
+
+/// Ordered tool names from a task timeline's `tool_call` rows, consecutive
+/// duplicates collapsed, capped at 8.
+fn tool_sequence(timeline: &[EpisodicEntry]) -> Vec<String> {
+    let mut seq: Vec<String> = Vec::new();
+    for ep in timeline {
+        if ep.entry_type != EpisodeType::ToolCall {
+            continue;
+        }
+        let Some(tool) = ep
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("tool"))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if seq.last().is_some_and(|last| last == tool) {
+            continue;
+        }
+        seq.push(tool.to_string());
+        if seq.len() >= 8 {
+            break;
+        }
+    }
+    seq
+}
+
+/// Fallback: distinct tools named directly in the group's own metadata.
+fn tools_from_group_metadata(group: &[EpisodicEntry]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut tools = Vec::new();
+    for ep in group {
+        if let Some(tool) = ep
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("tool"))
+            .and_then(|v| v.as_str())
+        {
+            if seen.insert(tool.to_string()) {
+                tools.push(tool.to_string());
+            }
+        }
+    }
+    tools.truncate(5);
+    tools
 }
 
 /// True when the closest existing procedure should suppress storing a new one
@@ -195,11 +281,15 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Clusters are keyed by `(agent_id, keywords)`: episodes are pulled across all
+/// agents, and the distilled description quotes the first episode's task prompt,
+/// so mixing two agents into one cluster would publish one agent's prompt text
+/// to the other.
 fn cluster_by_keywords(
     episodes: Vec<EpisodicEntry>,
     min_occurrences: usize,
 ) -> Vec<Vec<EpisodicEntry>> {
-    let mut groups: HashMap<String, Vec<EpisodicEntry>> = HashMap::new();
+    let mut groups: HashMap<(AgentID, String), Vec<EpisodicEntry>> = HashMap::new();
     for ep in episodes {
         let text = ep.summary.clone().unwrap_or(ep.content.clone());
         let key = tokenize(&text)
@@ -207,7 +297,7 @@ fn cluster_by_keywords(
             .take(4)
             .collect::<Vec<_>>()
             .join("|");
-        groups.entry(key).or_default().push(ep);
+        groups.entry((ep.agent_id, key)).or_default().push(ep);
     }
 
     groups
@@ -219,7 +309,9 @@ fn cluster_by_keywords(
 /// Returns `None` when the group carries too little information to be a useful
 /// procedure (no tool metadata to derive steps from) — storing a generic
 /// one-step "follow the prior approach" SOP only pollutes retrieval.
-fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Option<Procedure> {
+/// Build a procedure whose steps are `tools` in order. `None` when `tools`
+/// is empty — a step-less SOP only pollutes retrieval.
+fn distill_with_steps(group: &[EpisodicEntry], tools: Vec<String>) -> Option<Procedure> {
     let first = &group[0];
     let text = first.summary.clone().unwrap_or(first.content.clone());
     let title_tokens = tokenize(&text).into_iter().take(3).collect::<Vec<_>>();
@@ -229,39 +321,53 @@ fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Option<Procedure> {
         title_tokens.join("-")
     };
 
-    let mut tools = HashSet::new();
-    for ep in group {
-        if let Some(meta) = &ep.metadata {
-            if let Some(tool) = meta.get("tool").and_then(|v| v.as_str()) {
-                tools.insert(tool.to_string());
-            }
-        }
-    }
-
-    let mut steps = Vec::new();
-    for (idx, tool) in tools.into_iter().take(5).enumerate() {
-        steps.push(ProcedureStep {
+    let steps: Vec<ProcedureStep> = tools
+        .into_iter()
+        .enumerate()
+        .map(|(idx, tool)| ProcedureStep {
             order: idx,
-            action: format!("Use '{}' as part of the workflow", tool),
+            action: format!("Call '{}'", tool),
             tool: Some(tool),
             expected_outcome: Some("Step completed".to_string()),
-        });
-    }
+        })
+        .collect();
     if steps.is_empty() {
         return None;
     }
 
+    // Task-summary rows start with `task:<prompt>`; use it as the description
+    // so retrieval matches on what the procedure is *for*, not on tool names.
+    let task_line = first
+        .content
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("task:"))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| l.chars().take(120).collect::<String>());
+    let description = match task_line {
+        Some(t) => format!(
+            "{} (auto-consolidated from {} successful episodes)",
+            t,
+            group.len()
+        ),
+        None => format!("Auto-consolidated from {} successful episodes", group.len()),
+    };
+
     Some(Procedure {
         id: String::new(),
         name,
-        description: format!("Auto-consolidated from {} successful episodes", group.len()),
+        description,
         preconditions: Vec::new(),
         steps,
         postconditions: vec!["Successful task completion".to_string()],
         success_count: group.len() as u32,
         failure_count: 0,
         source_episodes: group.iter().map(|e| e.id.to_string()).collect(),
-        agent_id: None,
+        // Owned by the agent whose episodes produced it — the description
+        // embeds that agent's task prompt, so a global (`None`) procedure
+        // would be readable by every other agent.
+        agent_id: Some(first.agent_id),
         tags: vec!["auto-consolidated".to_string()],
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -275,7 +381,6 @@ fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Option<Procedure> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_memory::types::EpisodeType;
     use agentos_types::{AgentID, TaskID, TraceID};
 
     fn episode(summary: &str, metadata: Option<serde_json::Value>) -> EpisodicEntry {
@@ -292,12 +397,18 @@ mod tests {
         }
     }
 
+    /// Metadata-only distillation — the fallback path `run_cycle` uses when a
+    /// cluster's tasks have no `tool_call` rows (pre-parity episodes).
+    fn distill_from_metadata(group: &[EpisodicEntry]) -> Option<Procedure> {
+        distill_with_steps(group, tools_from_group_metadata(group))
+    }
+
     fn search_result(name: &str, semantic_score: f32, rrf_score: f32) -> ProcedureSearchResult {
         let group = vec![episode(
             name,
             Some(serde_json::json!({"tool": "file-read"})),
         )];
-        let mut procedure = distill_group_to_procedure(&group).unwrap();
+        let mut procedure = distill_from_metadata(&group).unwrap();
         procedure.name = name.to_string();
         ProcedureSearchResult {
             procedure,
@@ -318,32 +429,75 @@ mod tests {
     #[test]
     fn word_order_permutations_produce_identical_names() {
         let meta = Some(serde_json::json!({"tool": "file-read"}));
-        let a = distill_group_to_procedure(&[episode("task completed successfully", meta.clone())])
-            .unwrap();
-        let b = distill_group_to_procedure(&[episode("completed task successfully", meta.clone())])
-            .unwrap();
-        let c =
-            distill_group_to_procedure(&[episode("successfully completed task", meta)]).unwrap();
+        let a =
+            distill_from_metadata(&[episode("task completed successfully", meta.clone())]).unwrap();
+        let b =
+            distill_from_metadata(&[episode("completed task successfully", meta.clone())]).unwrap();
+        let c = distill_from_metadata(&[episode("successfully completed task", meta)]).unwrap();
         assert_eq!(a.name, b.name);
         assert_eq!(b.name, c.name);
     }
 
     #[test]
     fn permuted_summaries_cluster_together() {
+        // Clustering is keyed by (agent, keywords), so these must share an
+        // agent to land in one group — `episode()` mints a fresh AgentID.
+        let agent = AgentID::new();
         let eps = vec![
             episode("task completed successfully", None),
             episode("completed task successfully", None),
             episode("successfully completed task", None),
-        ];
+        ]
+        .into_iter()
+        .map(|mut e| {
+            e.agent_id = agent;
+            e
+        })
+        .collect();
         let groups = cluster_by_keywords(eps, 3);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 3);
     }
 
     #[test]
+    fn two_agents_with_identical_summaries_do_not_share_a_cluster() {
+        let (alice, bob) = (AgentID::new(), AgentID::new());
+        let eps: Vec<EpisodicEntry> = [alice, alice, alice, bob, bob, bob]
+            .into_iter()
+            .map(|agent| {
+                let mut e = episode("task:deploy the ingest service", None);
+                e.agent_id = agent;
+                e
+            })
+            .collect();
+        let groups = cluster_by_keywords(eps, 3);
+        assert_eq!(groups.len(), 2);
+        for g in &groups {
+            assert!(g.iter().all(|e| e.agent_id == g[0].agent_id));
+        }
+    }
+
+    #[test]
+    fn distilled_procedure_is_owned_by_the_agent_that_produced_it() {
+        let agent = AgentID::new();
+        let group: Vec<EpisodicEntry> = (0..3)
+            .map(|_| {
+                let mut e = episode("task:summarize the kernel logs", None);
+                e.agent_id = agent;
+                e
+            })
+            .collect();
+        let p = distill_with_steps(&group, vec!["file-glob".into()]).unwrap();
+        // The description quotes this agent's task prompt, so the procedure
+        // must not be stored globally.
+        assert_eq!(p.agent_id, Some(agent));
+        assert!(p.description.starts_with("summarize the kernel logs"));
+    }
+
+    #[test]
     fn low_information_group_is_rejected() {
         let group = vec![episode("task completed successfully", None); 3];
-        assert!(distill_group_to_procedure(&group).is_none());
+        assert!(distill_from_metadata(&group).is_none());
     }
 
     #[test]
@@ -353,9 +507,50 @@ mod tests {
             episode("read config file", meta.clone()),
             episode("read config file", meta),
         ];
-        let procedure = distill_group_to_procedure(&group).unwrap();
+        let procedure = distill_from_metadata(&group).unwrap();
         assert_eq!(procedure.steps.len(), 1);
         assert_eq!(procedure.steps[0].tool.as_deref(), Some("file-read"));
+    }
+
+    fn tool_call(task: TaskID, tool: &str) -> EpisodicEntry {
+        EpisodicEntry {
+            id: 0,
+            task_id: task,
+            agent_id: AgentID::new(),
+            entry_type: EpisodeType::ToolCall,
+            content: format!("Tool: {tool}"),
+            summary: None,
+            metadata: Some(serde_json::json!({"tool": tool})),
+            timestamp: Utc::now(),
+            trace_id: TraceID::new(),
+        }
+    }
+
+    #[test]
+    fn tool_sequence_keeps_order_and_collapses_repeats() {
+        let t = TaskID::new();
+        let timeline = vec![
+            episode("task:x", None),
+            tool_call(t, "file-glob"),
+            tool_call(t, "file-reader"),
+            tool_call(t, "file-reader"),
+            tool_call(t, "file-writer"),
+        ];
+        assert_eq!(
+            tool_sequence(&timeline),
+            vec!["file-glob", "file-reader", "file-writer"]
+        );
+    }
+
+    #[test]
+    fn distill_with_steps_uses_task_line_and_order() {
+        let group = vec![episode("task:summarize the kernel logs\nresult:success", None); 3];
+        let p = distill_with_steps(&group, vec!["file-glob".into(), "file-reader".into()]).unwrap();
+        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.steps[0].tool.as_deref(), Some("file-glob"));
+        assert_eq!(p.steps[1].order, 1);
+        assert!(p.description.starts_with("summarize the kernel logs"));
+        assert!(distill_with_steps(&group, vec![]).is_none());
     }
 
     #[test]

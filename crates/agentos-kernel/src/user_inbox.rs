@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::params;
 use std::path::Path;
 
-/// Number of oldest read messages to delete when the inbox exceeds `max_inbox_size`.
+/// Minimum number of oldest messages to delete when the inbox exceeds `max_inbox_size`.
 const PURGE_BATCH: usize = 100;
 
 const MIGRATIONS: Migrations = &["CREATE TABLE IF NOT EXISTS user_messages (
@@ -95,24 +95,42 @@ impl UserInbox {
     /// Persist a new `UserMessage` to the inbox.
     ///
     /// If the inbox would exceed `max_inbox_size` after this insert, the oldest
-    /// `PURGE_BATCH` read messages are deleted first.
+    /// messages are deleted first (read ones before unread), except live
+    /// blocking questions — an `ask_user` task is parked on its inbox row and
+    /// purging it out from under the waiter makes the eventual response fail
+    /// with "not found or already has a response".
     pub async fn write(&self, msg: &UserMessage) -> Result<(), AgentOSError> {
         let max_size = self.max_inbox_size;
         let msg = msg.clone();
 
         self.store
             .exec_mut(move |conn| {
-                // Purge oldest read messages if inbox is at capacity.
+                // Purge oldest messages if inbox is at capacity.
                 let count: i64 = conn
                     .query_row("SELECT COUNT(*) FROM user_messages", [], |r| r.get(0))
                     .unwrap_or(0);
                 if count as usize >= max_size {
+                    // Drain the whole overflow, not one batch — an inbox that ran
+                    // over the cap while nothing was read never catches up at
+                    // PURGE_BATCH per write.
+                    let overflow = count as usize - max_size + 1;
                     conn.execute(
                         "DELETE FROM user_messages WHERE id IN (
-                             SELECT id FROM user_messages WHERE read = 1
-                             ORDER BY created_at ASC LIMIT ?1
+                             SELECT id FROM user_messages
+                             WHERE NOT (
+                                 interaction IS NOT NULL
+                                 AND response IS NULL
+                                 AND (expires_at IS NULL
+                                      OR expires_at > strftime('%Y-%m-%dT%H:%M:%S','now'))
+                             )
+                             AND NOT (
+                                 thread_id LIKE 'escalation:%'
+                                 AND expires_at IS NOT NULL
+                                 AND expires_at > strftime('%Y-%m-%dT%H:%M:%S','now')
+                             )
+                             ORDER BY read DESC, created_at ASC LIMIT ?1
                          )",
-                        params![PURGE_BATCH as i64],
+                        params![overflow.max(PURGE_BATCH) as i64],
                     )
                     .ok();
                 }
@@ -215,15 +233,18 @@ impl UserInbox {
     }
 
     /// Mark a notification as read by the user.
-    pub async fn mark_read(&self, id: &NotificationID) -> Result<(), AgentOSError> {
+    ///
+    /// Returns `false` when no row matched (unknown id) — callers that only
+    /// care about the end state can ignore it.
+    pub async fn mark_read(&self, id: &NotificationID) -> Result<bool, AgentOSError> {
         let id_str = id.to_string();
         self.store
             .exec_mut(move |conn| {
-                conn.execute(
+                let updated = conn.execute(
                     "UPDATE user_messages SET read = 1 WHERE id = ?1",
                     params![id_str],
                 )?;
-                Ok(())
+                Ok(updated > 0)
             })
             .await
             .map_err(|e| AgentOSError::KernelError {
@@ -256,6 +277,48 @@ impl UserInbox {
             .await
             .map_err(|e| AgentOSError::KernelError {
                 reason: format!("UserInbox: clear_read failed: {e}"),
+            })
+    }
+
+    /// Delete every notification except live blocking questions (unanswered
+    /// and unexpired) — the same guard as the capacity purge in `write`, for
+    /// the same reason: an `ask_user` task is parked on its row.
+    pub async fn clear_all(&self) -> Result<usize, AgentOSError> {
+        self.store
+            .exec_mut(move |conn| {
+                let deleted = conn.execute(
+                    "DELETE FROM user_messages WHERE NOT (
+                         interaction IS NOT NULL
+                         AND response IS NULL
+                         AND (expires_at IS NULL
+                              OR expires_at > strftime('%Y-%m-%dT%H:%M:%S','now'))
+                     )
+                     AND NOT (
+                         thread_id LIKE 'escalation:%'
+                         AND expires_at IS NOT NULL
+                         AND expires_at > strftime('%Y-%m-%dT%H:%M:%S','now')
+                     )",
+                    [],
+                )?;
+                Ok(deleted)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("UserInbox: clear_all failed: {e}"),
+            })
+    }
+
+    /// Mark every unread notification as read. Returns the number updated.
+    pub async fn mark_all_read(&self) -> Result<usize, AgentOSError> {
+        self.store
+            .exec_mut(move |conn| {
+                let updated =
+                    conn.execute("UPDATE user_messages SET read = 1 WHERE read = 0", [])?;
+                Ok(updated)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("UserInbox: mark_all_read failed: {e}"),
             })
     }
 
@@ -438,7 +501,8 @@ impl UserInbox {
                      FROM user_messages
                      WHERE expires_at IS NOT NULL
                        AND expires_at < ?1
-                       AND response IS NULL",
+                       AND response IS NULL
+                       AND interaction IS NOT NULL",
                 )?;
                 let rows = stmt.query_map(params![now_str], row_to_user_message)?;
                 let mut msgs = Vec::new();

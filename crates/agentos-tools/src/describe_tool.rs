@@ -214,6 +214,18 @@ impl AgentTool for DescribeToolTool {
             (Vec::new(), serde_json::Value::Null)
         };
 
+        // Not hidden, unlike `list-tools`/`search-tools`: an agent that has a
+        // tool's name (from a skill, a manual page, another agent) is better
+        // served by "you lack fs.artifacts:w" than by `ToolNotFound`, because
+        // the missing grant is something it can ask the operator for.
+        let missing_permissions: Vec<&String> = tool
+            .permissions
+            .iter()
+            .filter(|p| !agentos_capability::permission_str_granted(&context.permissions, p))
+            .collect();
+        let callable =
+            agentos_capability::any_permission_granted(&context.permissions, &tool.permissions);
+
         let mut result = json!({
             "name": tool.name,
             "description": tool.description,
@@ -228,7 +240,17 @@ impl AgentTool for DescribeToolTool {
             "capability_tags": tool.capability_tags,
             "input_schema_docs": input_schema_docs,
             "example": primary_example,
+            "callable": callable,
         });
+
+        if !missing_permissions.is_empty() {
+            result["missing_permissions"] = json!(missing_permissions);
+            result["permission_note"] = json!(if callable {
+                "Some actions of this tool need permissions you do not hold; calls needing them are denied."
+            } else {
+                "You hold none of this tool's permissions — every call is denied. Ask the operator to grant them."
+            });
+        }
 
         if verbose {
             result["payload_schema"] = tool

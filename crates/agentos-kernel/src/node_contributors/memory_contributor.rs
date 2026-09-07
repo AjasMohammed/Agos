@@ -87,7 +87,7 @@ fn memory_node(
             category: "memory".into(),
             icon: "database".into(),
             color: "#06b6d4".into(),
-            risk_class: "write_scoped".into(),
+            risk_class: "write_agent_state".into(),
             inputs: vec![NodePort {
                 kind: "main".into(),
                 required: true,
