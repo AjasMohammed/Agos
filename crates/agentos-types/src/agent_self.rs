@@ -29,6 +29,17 @@ pub struct AgentSelfView {
     pub subscriptions: Vec<SubscriptionSummary>,
     /// Active (queued / running / waiting) tasks for this agent, newest first.
     pub active_tasks: Vec<TaskIntrospectionSummary>,
+    /// Operator-granted host folders the file tools accept absolute paths in
+    /// (workspace grants). Empty = confined to the agent's own home dir.
+    #[serde(default)]
+    pub granted_folders: GrantedFoldersSummary,
+}
+
+/// Host folders reachable with absolute paths, split by access mode.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrantedFoldersSummary {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
 }
 
 /// Budget consumption summary at the point the `agent-self` tool was called.

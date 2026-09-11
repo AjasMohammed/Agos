@@ -178,6 +178,8 @@ pub async fn update_settings(
             // This form always submits every field, so each one is an explicit
             // set. An empty prompt means "clear", which the API spells `Some("")`.
             system_prompt: Some(system_prompt.unwrap_or_default()),
+            // ponytail: HTML form has no working-set control; REST/panel only.
+            working_set_size: None,
         })
         .await
     {

@@ -72,6 +72,7 @@ fn make_blocked_manifest() -> ToolManifest {
         executor: Default::default(),
         fallbacks: vec![],
         risk_class: Default::default(),
+        risk_class_by_action: Default::default(),
         usage_hints: None,
         tags: vec![],
     }
@@ -116,6 +117,7 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
         executor: Default::default(),
         fallbacks: vec![],
         risk_class: Default::default(),
+        risk_class_by_action: Default::default(),
         usage_hints: None,
         tags: vec![],
     }
@@ -148,7 +150,7 @@ async fn scenario_a_reject_unsigned_message() {
         expires_at: Some(now + chrono::Duration::seconds(60)),
     };
 
-    let result = bus.send_direct(unsigned_msg).await;
+    let result = bus.send_direct(unsigned_msg, 0).await;
     assert!(result.is_err(), "Unsigned A2A message MUST be rejected");
 
     let err = result.unwrap_err().to_string();
@@ -185,7 +187,7 @@ async fn scenario_b_reject_forged_signature() {
         expires_at: Some(now + chrono::Duration::seconds(60)),
     };
 
-    let result = bus.send_direct(forged_msg).await;
+    let result = bus.send_direct(forged_msg, 0).await;
     assert!(result.is_err(), "Forged A2A signature MUST be rejected");
 
     let err = result.unwrap_err().to_string();

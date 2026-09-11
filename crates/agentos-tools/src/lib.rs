@@ -104,10 +104,13 @@ pub mod think;
 pub mod tool_search_index;
 pub mod traits;
 pub mod usb_storage;
+pub mod user_file_list;
 pub mod user_file_reader;
+pub mod user_files;
 pub mod web_fetch;
 pub mod web_search;
 pub mod webcam;
+pub mod wifi;
 pub mod workspace;
 
 pub use a2a_tools::A2ADelegateTool;
@@ -142,7 +145,7 @@ pub use episodic_list::EpisodicList;
 pub use factory::{
     build_single_tool, build_single_tool_with_model_cache,
     build_single_tool_with_model_cache_and_weight, tool_category, tool_category_with_weight,
-    ToolCategory, CHAT_DEFAULT_TOOL_NAMES, META_TOOL_NAMES,
+    ToolCategory, CHAT_DEFAULT_TOOL_NAMES, META_TOOL_NAMES, VOLATILE_TOOL_NAMES,
 };
 pub use file_delete::FileDelete;
 pub use file_diff::FileDiff;
@@ -206,9 +209,12 @@ pub use task_status::TaskStatusTool;
 pub use think::ThinkTool;
 pub use traits::{AgentTool, ToolExecutionContext};
 pub use usb_storage::UsbStorageTool;
+pub use user_file_list::UserFileListTool;
 pub use user_file_reader::UserFileReader;
+pub use user_files::{UserFileRecord, UserFiles};
 pub use web_fetch::WebFetch;
 pub use webcam::WebcamTool;
+pub use wifi::WifiTool;
 
 #[cfg(test)]
 mod tests {
@@ -1560,7 +1566,302 @@ mod tests {
         assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
     }
 
+    /// Symlinked directories must not be descended into.
+    ///
+    /// `walkdir` detects *ancestor* loops on its own, so a self-referential link
+    /// alone proves nothing — this fixture uses a sibling link (`link -> real`),
+    /// which is not a loop and which a link-following walk therefore descends,
+    /// yielding the same canonical file a second time. That is the shape that
+    /// makes pnpm `node_modules` farms explode. Flip `follow_links` back to
+    /// `true` and the count below becomes 2.
+    #[tokio::test]
+    async fn test_file_glob_does_not_descend_symlinked_dirs() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        let real = home.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("note.txt"), "x").unwrap();
+        // Sibling link — not an ancestor loop, so nothing but `follow_links(false)`
+        // stops the walk from descending it.
+        std::os::unix::fs::symlink(&real, home.join("link")).unwrap();
+        // Self-referential link — the pnpm shape that wedged the old glob walk.
+        std::os::unix::fs::symlink(&real, real.join("cycle")).unwrap();
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"pattern": "**/*.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["count"], 1,
+            "symlinked dir was descended; matches: {}",
+            result["matches"]
+        );
+        assert!(result["matches"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("real/note.txt"));
+    }
+
+    /// The containment guarantee of the rewrite: a symlink whose target is
+    /// outside the granted tree must never be returned, even though the link
+    /// itself sits inside it and matches the pattern.
+    #[tokio::test]
+    async fn test_file_glob_drops_symlink_escaping_base() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "s").unwrap();
+        std::fs::write(agent_home(dir.path()).join("kept.txt"), "k").unwrap();
+        std::os::unix::fs::symlink(&secret, agent_home(dir.path()).join("leak.txt")).unwrap();
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"pattern": "*.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["count"], 1, "escaped the tree: {}", result);
+        assert!(result["matches"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("kept.txt"));
+    }
+
+    /// `*` must not cross a directory separator. The old code called
+    /// `glob_with`, which enforces this structurally by matching one path
+    /// component at a time; the rewrite matches a whole relative path with a
+    /// flat matcher, where it is `require_literal_separator` that enforces it.
+    /// Flip that flag to false and `*.txt` silently becomes a depth-12
+    /// recursive search.
+    #[tokio::test]
+    async fn test_file_glob_single_star_does_not_cross_separator() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        std::fs::write(home.join("top.txt"), "").unwrap();
+        std::fs::create_dir(home.join("sub")).unwrap();
+        std::fs::write(home.join("sub").join("nested.txt"), "").unwrap();
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+
+        let shallow = tool
+            .execute(
+                serde_json::json!({"pattern": "*.txt"}),
+                make_context_with_permissions(dir.path(), {
+                    let mut p = PermissionSet::new();
+                    p.grant("fs.user_data".to_string(), true, false, false, None);
+                    p
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shallow["count"], 1, "`*` crossed a separator: {}", shallow);
+
+        // `**` is unaffected by the flag and still recurses.
+        let deep = tool
+            .execute(
+                serde_json::json!({"pattern": "**/*.txt"}),
+                make_context_with_permissions(dir.path(), perms),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deep["count"], 2, "`**` stopped recursing: {}", deep);
+    }
+
+    /// `MAX_DEPTH` must stop *descent*, and a walk that ends on a cap must say
+    /// so — a silent partial result is what makes a model retry the same
+    /// hopeless search.
+    #[tokio::test]
+    async fn test_file_glob_depth_cap_truncates_and_reports() {
+        let dir = TempDir::new().unwrap();
+        let mut deep = agent_home(dir.path());
+        for i in 0..15 {
+            deep = deep.join(format!("d{}", i));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("buried.txt"), "").unwrap();
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"pattern": "**/*.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["count"], 0, "depth cap did not stop descent");
+        // Exhausting the tree without hitting a cap must NOT claim truncation.
+        assert!(
+            result["truncated"].is_null(),
+            "complete result flagged as truncated: {}",
+            result
+        );
+    }
+
+    /// A cancelled token must end the walk rather than run it to completion —
+    /// `spawn_blocking` cannot be cancelled by dropping the future.
+    #[tokio::test]
+    async fn test_file_glob_honours_cancellation() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        // More than CHECK_EVERY entries, so the poll is actually reached.
+        for i in 0..2000 {
+            std::fs::write(home.join(format!("f{}.txt", i)), "").unwrap();
+        }
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+        ctx.cancellation_token.cancel();
+
+        // Pattern deliberately matches nothing: otherwise MAX_MATCHES trips at
+        // entry 1000, before the token is ever polled at entry 1024.
+        let result = tool
+            .execute(serde_json::json!({"pattern": "*.rs"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["truncated"], true,
+            "walk ran to completion: {}",
+            result
+        );
+        assert!(result["note"].as_str().unwrap().contains("cancelled"));
+    }
+
+    /// file-grep shares `is_cycle_prone` with file-glob but had no coverage of
+    /// its own, and must still see symlinked *files* (`~/.bashrc -> dotfiles/`).
+    #[tokio::test]
+    async fn test_file_grep_skips_dependency_dirs_but_reads_symlinked_files() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        std::fs::create_dir(home.join("node_modules")).unwrap();
+        std::fs::write(home.join("node_modules").join("buried.txt"), "needle").unwrap();
+        let real = home.join("dotfiles");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("bashrc"), "needle").unwrap();
+        std::os::unix::fs::symlink(real.join("bashrc"), home.join("linked.txt")).unwrap();
+
+        let tool = crate::file_grep::FileGrep::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"pattern": "needle", "output_mode": "files_with_matches"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        // dotfiles/bashrc, reached directly and via the symlink — both
+        // canonicalize to the same file, so it is listed once. node_modules is
+        // pruned. Symlinked files are NOT invisible.
+        assert_eq!(result["count"], 1, "unexpected files: {}", result);
+        assert!(result["files"][0].as_str().unwrap().contains("bashrc"));
+    }
+
+    #[tokio::test]
+    async fn test_file_glob_skips_dependency_dirs() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        std::fs::write(home.join("keep.txt"), "").unwrap();
+        for skipped in ["node_modules", ".git", "target", ".venv"] {
+            std::fs::create_dir(home.join(skipped)).unwrap();
+            std::fs::write(home.join(skipped).join("buried.txt"), "").unwrap();
+        }
+
+        let tool = crate::file_glob::FileGlob::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"pattern": "**/*.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["count"], 1);
+
+        // Naming the skipped directory explicitly still reaches inside it.
+        let ctx2 = make_context_with_permissions(dir.path(), {
+            let mut p = PermissionSet::new();
+            p.grant("fs.user_data".to_string(), true, false, false, None);
+            p
+        });
+        let inside = tool
+            .execute(
+                serde_json::json!({"pattern": "*.txt", "path": "node_modules"}),
+                ctx2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inside["count"], 1);
+    }
+
     // ── file-grep tests ──────────────────────────────────────────────────────
+
+    /// Two regressions in one fixture.
+    ///
+    /// 1. The old BFS re-queued canonicalized symlink targets forever. With a
+    ///    glob filter matching nothing, `result` never grew, `max_files` never
+    ///    tripped, and the blocking thread spun until the kernel restarted.
+    /// 2. Symlinked directories must not be descended — a sibling link is not an
+    ///    ancestor loop, so `walkdir`'s own loop detection does not cover it and
+    ///    a link-following walk reports the same canonical file twice.
+    #[tokio::test]
+    async fn test_file_grep_does_not_descend_symlinked_dirs() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        let real = home.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("note.txt"), "needle").unwrap();
+        std::os::unix::fs::symlink(&real, home.join("link")).unwrap();
+        std::os::unix::fs::symlink(&real, real.join("cycle")).unwrap();
+
+        let tool = crate::file_grep::FileGrep::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+
+        // (1) `*.rs` matches nothing here — the case that used to never terminate.
+        let empty = tool
+            .execute(
+                serde_json::json!({"pattern": "needle", "glob": "*.rs"}),
+                make_context_with_permissions(dir.path(), perms.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty["count"], 0);
+
+        // (2) the real file is reported exactly once, not once per symlink path.
+        let found = tool
+            .execute(
+                serde_json::json!({"pattern": "needle", "glob": "*.txt"}),
+                make_context_with_permissions(dir.path(), perms),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            found["count"], 1,
+            "symlinked dir was descended; result: {}",
+            found
+        );
+    }
 
     #[tokio::test]
     async fn test_file_grep_content_mode() {

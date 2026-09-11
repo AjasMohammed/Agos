@@ -500,6 +500,7 @@ impl Kernel {
                 // MCP tools are externally-provided and may perform arbitrary operations.
                 // Default to ExecCapable (requires approval) rather than ReadonlyExternal.
                 risk_class: agentos_types::RiskClass::ExecCapable,
+                risk_class_by_action: Default::default(),
                 usage_hints: None,
                 tags: vec![],
             };

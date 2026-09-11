@@ -151,7 +151,7 @@ impl ChannelAdapter for MatrixAdapter {
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
         let room_id = urlencoding::encode(&msg.channel_instance_id).to_string();
-        let text = msg.content.render_for_delivery();
+        let text = msg.text_with_actions();
         let txn_id = Uuid::new_v4();
 
         let body = json!({ "msgtype": "m.text", "body": text });

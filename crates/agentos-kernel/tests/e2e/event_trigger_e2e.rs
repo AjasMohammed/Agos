@@ -234,6 +234,60 @@ async fn offline_agent_subscription_does_not_trigger_task() {
     handle.await.unwrap();
 }
 
+/// A direct message must trigger only its addressee. Every agent on a catch-all
+/// role is seeded with an unfiltered `DirectMessageReceived` subscription, so
+/// without recipient scoping one DM would spawn a full inference on every online
+/// agent — and each "reply directly using agent-message" would fan out again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn direct_message_triggers_only_the_addressee() {
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
+
+    let recipient_id = common::register_mock_agent(&kernel, "dm-recipient", vec![]).await;
+    let bystander_id = common::register_mock_agent(&kernel, "dm-bystander", vec![]).await;
+    let sender_id = common::register_mock_agent(&kernel, "dm-sender", vec![]).await;
+
+    for name in ["dm-recipient", "dm-bystander", "dm-sender"] {
+        let resp = client
+            .send_command(KernelCommand::EventSubscribe {
+                agent_name: name.to_string(),
+                event_filter: "DirectMessageReceived".to_string(),
+                payload_filter: None,
+                throttle: None,
+                priority: None,
+            })
+            .await
+            .expect("send EventSubscribe");
+        assert!(matches!(resp, KernelResponse::EventSubscriptionId(_)));
+    }
+
+    kernel
+        .emit_event(
+            EventType::DirectMessageReceived,
+            EventSource::AgentMessageBus,
+            EventSeverity::Info,
+            serde_json::json!({
+                "from_agent": sender_id.to_string(),
+                "to_agent": recipient_id.to_string(),
+                "message_id": agentos_types::MessageID::new().to_string(),
+                "live_listener": false,
+            }),
+            0,
+        )
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let summaries = kernel.scheduler.list_tasks().await;
+    let count = |id| summaries.iter().filter(|s| s.agent_id == id).count();
+    assert_eq!(count(recipient_id), 1, "addressee must be triggered once");
+    assert_eq!(count(bystander_id), 0, "bystander must not be triggered");
+    assert_eq!(count(sender_id), 0, "sender must not be triggered");
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
 /// A TaskLifecycle subscription must NOT fire for events about the
 /// subscriber's own tasks (self-trigger = infinite loop), but must still
 /// fire for other agents' task events.

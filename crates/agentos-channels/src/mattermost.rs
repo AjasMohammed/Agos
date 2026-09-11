@@ -132,7 +132,7 @@ impl ChannelAdapter for MattermostAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.render_for_delivery();
+        let text = msg.text_with_actions();
         let channel_id = if msg.channel_instance_id.is_empty() {
             self.default_channel_id.clone()
         } else {

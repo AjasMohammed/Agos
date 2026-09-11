@@ -241,6 +241,42 @@ struct ZoneTableInner {
     zones: HashMap<String, StorageZone>,
     /// Counter for generating zone IDs.
     next_id: u64,
+    /// Operator approvals recorded by the ToolPre gate for out-of-policy
+    /// `zone.create` requests, keyed by (agent, requested path) → escalation id.
+    /// Consumed (removed) by the matching `zone.create`.
+    pending_approvals: HashMap<(AgentID, PathBuf), u64>,
+    /// Optional SQLite write-through store; `None` = in-memory only (tests).
+    store: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
+}
+
+/// Blocking write-through helpers. Each runs inside `spawn_blocking`.
+fn store_put(conn: &std::sync::Mutex<rusqlite::Connection>, zone: &StorageZone) {
+    let json = match serde_json::to_string(zone) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(zone_id = %zone.zone_id, error = %e, "storage zone not persisted");
+            return;
+        }
+    };
+    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = conn.execute(
+        "INSERT OR REPLACE INTO storage_zones (zone_id, agent_id, json) VALUES (?1, ?2, ?3)",
+        rusqlite::params![zone.zone_id, zone.agent_id.to_string(), json],
+    ) {
+        tracing::warn!(zone_id = %zone.zone_id, error = %e, "storage zone not persisted");
+    }
+}
+
+fn store_delete(conn: &std::sync::Mutex<rusqlite::Connection>, zone_ids: &[String]) {
+    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+    for id in zone_ids {
+        if let Err(e) = conn.execute(
+            "DELETE FROM storage_zones WHERE zone_id = ?1",
+            rusqlite::params![id],
+        ) {
+            tracing::warn!(zone_id = %id, error = %e, "storage zone delete not persisted");
+        }
+    }
 }
 
 impl ZoneTable {
@@ -249,7 +285,114 @@ impl ZoneTable {
             inner: Arc::new(RwLock::new(ZoneTableInner {
                 zones: HashMap::new(),
                 next_id: 1,
+                pending_approvals: HashMap::new(),
+                store: None,
             })),
+        }
+    }
+
+    /// Attach a SQLite store at `db_path`, loading any persisted zones into
+    /// memory. Zones created after this call are written through. Returns the
+    /// number of zones restored. Expired zones are dropped on load.
+    pub async fn attach_store(&self, db_path: PathBuf) -> Result<usize, AgentOSError> {
+        let (conn, zones) = tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE IF NOT EXISTS storage_zones (
+                     zone_id  TEXT PRIMARY KEY,
+                     agent_id TEXT NOT NULL,
+                     json     TEXT NOT NULL
+                 );",
+            )?;
+            let mut stmt = conn.prepare("SELECT json FROM storage_zones")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .filter_map(|j| serde_json::from_str::<StorageZone>(&j).ok())
+                .collect::<Vec<_>>();
+            drop(stmt);
+            Ok((conn, rows))
+        })
+        .await
+        .map_err(|e| AgentOSError::KernelError {
+            reason: format!("storage zone store task panicked: {e}"),
+        })?
+        .map_err(|e| AgentOSError::KernelError {
+            reason: format!("failed to open storage zone store: {e}"),
+        })?;
+
+        let mut inner = self.inner.write().await;
+        let mut restored = 0usize;
+        for z in zones {
+            if z.is_expired() {
+                continue;
+            }
+            // Keep `next_id` above every persisted `zone-N`.
+            if let Some(n) = z
+                .zone_id
+                .strip_prefix("zone-")
+                .and_then(|n| n.parse::<u64>().ok())
+            {
+                inner.next_id = inner.next_id.max(n + 1);
+            }
+            inner.zones.insert(z.zone_id.clone(), z);
+            restored += 1;
+        }
+        inner.store = Some(Arc::new(std::sync::Mutex::new(conn)));
+        Ok(restored)
+    }
+
+    /// Record that the operator approved a `zone.create` for `path` (raw
+    /// payload string) via escalation `escalation_id`. Called by the ToolPre
+    /// gate after the approval resolves; consumed by the zone-create action so
+    /// an approved out-of-policy path is actually granted.
+    pub async fn record_operator_approval(
+        &self,
+        agent_id: AgentID,
+        path: &str,
+        escalation_id: u64,
+    ) {
+        let mut inner = self.inner.write().await;
+        inner
+            .pending_approvals
+            .insert((agent_id, PathBuf::from(path)), escalation_id);
+    }
+
+    /// Take (consume) a recorded operator approval matching either the raw
+    /// requested path or its canonical form.
+    async fn take_operator_approval(
+        &self,
+        agent_id: &AgentID,
+        raw: &Path,
+        canonical: &Path,
+    ) -> Option<u64> {
+        let mut inner = self.inner.write().await;
+        let raw_key = (*agent_id, raw.to_path_buf());
+        if let Some(id) = inner.pending_approvals.remove(&raw_key) {
+            return Some(id);
+        }
+        let canon_key = (*agent_id, canonical.to_path_buf());
+        inner.pending_approvals.remove(&canon_key)
+    }
+
+    async fn persist_put(
+        store: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
+        zone: StorageZone,
+    ) {
+        if let Some(store) = store {
+            let _ = tokio::task::spawn_blocking(move || store_put(&store, &zone)).await;
+        }
+    }
+
+    async fn persist_delete(
+        store: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
+        ids: Vec<String>,
+    ) {
+        if let Some(store) = store {
+            if !ids.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || store_delete(&store, &ids)).await;
+            }
         }
     }
 
@@ -304,7 +447,10 @@ impl ZoneTable {
     pub async fn insert(&self, zone: StorageZone) -> String {
         let mut inner = self.inner.write().await;
         let id = zone.zone_id.clone();
-        inner.zones.insert(id.clone(), zone);
+        inner.zones.insert(id.clone(), zone.clone());
+        let store = inner.store.clone();
+        drop(inner);
+        Self::persist_put(store, zone).await;
         id
     }
 
@@ -348,7 +494,10 @@ impl ZoneTable {
             granted_by,
         };
 
-        inner.zones.insert(zone_id.clone(), zone);
+        inner.zones.insert(zone_id.clone(), zone.clone());
+        let store = inner.store.clone();
+        drop(inner);
+        Self::persist_put(store, zone).await;
         Ok(zone_id)
     }
 
@@ -361,7 +510,13 @@ impl ZoneTable {
                 return None;
             }
         }
-        inner.zones.remove(zone_id)
+        let removed = inner.zones.remove(zone_id);
+        let store = inner.store.clone();
+        drop(inner);
+        if removed.is_some() {
+            Self::persist_delete(store, vec![zone_id.to_string()]).await;
+        }
+        removed
     }
 
     /// Count active zones for an agent.
@@ -385,9 +540,18 @@ impl ZoneTable {
     /// Sweep expired zones. Returns the number of zones removed.
     pub async fn sweep_expired(&self) -> usize {
         let mut inner = self.inner.write().await;
-        let before = inner.zones.len();
+        let expired: Vec<String> = inner
+            .zones
+            .values()
+            .filter(|z| z.is_expired())
+            .map(|z| z.zone_id.clone())
+            .collect();
         inner.zones.retain(|_, z| !z.is_expired());
-        before - inner.zones.len()
+        let store = inner.store.clone();
+        drop(inner);
+        let n = expired.len();
+        Self::persist_delete(store, expired).await;
+        n
     }
 }
 
@@ -493,13 +657,22 @@ impl StorageProvider {
                 operation: "path traversal ('..') not allowed in zone paths".into(),
             });
         }
+        // A zone is one concrete directory. Glob metacharacters would otherwise
+        // let "/home/*/Desktop" match the allow pattern literally and mint a
+        // zone no real path can ever `starts_with`.
+        if path_str.contains(['*', '?', '[']) {
+            return Err(AgentOSError::SchemaValidation(
+                "zone path must be a concrete directory, not a glob pattern".into(),
+            ));
+        }
 
-        // Canonicalize to resolve symlinks (best-effort — path may not exist yet).
-        let canonical = tokio::task::spawn_blocking({
+        // Canonicalize to resolve symlinks; the directory must exist.
+        let (canonical, is_dir) = tokio::task::spawn_blocking({
             let p = PathBuf::from(path_str);
             move || {
-                // Try to canonicalize. If the path doesn't exist, use the raw path.
-                p.canonicalize().unwrap_or(p)
+                let c = p.canonicalize().unwrap_or(p);
+                let is_dir = c.is_dir();
+                (c, is_dir)
             }
         })
         .await
@@ -520,8 +693,25 @@ impl StorageProvider {
             });
         }
 
-        // Check allow list.
-        if !self.is_allowed(&canonical_str) {
+        if !is_dir {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "zone path '{}' is not an existing directory",
+                canonical_str
+            )));
+        }
+
+        // Allow list, else a recorded operator approval (the ToolPre escalation
+        // the operator just answered). Without the approval fallback an
+        // approved out-of-policy request fails right after the operator said yes.
+        let granted_by = if self.is_allowed(&canonical_str) {
+            ZoneGrantSource::Policy
+        } else if let Some(escalation_id) = self
+            .zone_table
+            .take_operator_approval(&context.agent_id, path, &canonical)
+            .await
+        {
+            ZoneGrantSource::OperatorApproval { escalation_id }
+        } else {
             return Err(AgentOSError::PermissionDenied {
                 resource: "storage.zone".into(),
                 operation: format!(
@@ -530,7 +720,11 @@ impl StorageProvider {
                     canonical_str
                 ),
             });
-        }
+        };
+        let granted_by_label = match &granted_by {
+            ZoneGrantSource::Policy => "policy",
+            ZoneGrantSource::OperatorApproval { .. } => "operator_approval",
+        };
 
         // Atomically check zone limit, generate ID, and insert — prevents
         // TOCTOU race where concurrent requests both pass the limit check.
@@ -540,7 +734,7 @@ impl StorageProvider {
                 context.agent_id,
                 canonical.clone(),
                 access,
-                ZoneGrantSource::Policy,
+                granted_by,
                 self.config.max_zones_per_agent,
             )
             .await?;
@@ -550,7 +744,7 @@ impl StorageProvider {
                 "zone_id": zone_id,
                 "path": canonical_str.to_string(),
                 "access": access_str,
-                "granted_by": "policy",
+                "granted_by": granted_by_label,
             }),
             audit_metadata: json!({
                 "event": "StorageZoneCreated",
@@ -696,6 +890,20 @@ mod tests {
         StorageProvider::new(make_config(), ZoneTable::new())
     }
 
+    /// A real directory tree matching the `/tmp/agentos-*/**` allow pattern.
+    fn zone_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("agentos-")
+            .tempdir_in("/tmp")
+            .expect("tempdir")
+    }
+
+    fn subdir(root: &tempfile::TempDir, name: &str) -> String {
+        let p = root.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
     fn make_context() -> CapabilityContext {
         CapabilityContext {
             agent_id: AgentID::new(),
@@ -802,11 +1010,12 @@ mod tests {
     async fn create_zone_for_allowed_path() {
         let p = make_provider();
         let ctx = make_context();
+        let root = zone_root();
 
         let result = p
             .execute(
                 "zone.create",
-                json!({"path": "/home/user/projects/myapp", "access": "rw"}),
+                json!({"path": subdir(&root, "myapp"), "access": "rw"}),
                 &ctx,
             )
             .await
@@ -814,6 +1023,101 @@ mod tests {
 
         assert!(result.output["zone_id"].is_string());
         assert_eq!(result.output["granted_by"], "policy");
+    }
+
+    #[tokio::test]
+    async fn reject_glob_literal_and_missing_dir() {
+        let p = make_provider();
+        let ctx = make_context();
+        let root = zone_root();
+
+        let err = p
+            .execute(
+                "zone.create",
+                json!({"path": "/tmp/agentos-*/x", "access": "ro"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not a glob pattern"));
+
+        let missing = root
+            .path()
+            .join("does-not-exist")
+            .to_string_lossy()
+            .into_owned();
+        let err = p
+            .execute(
+                "zone.create",
+                json!({"path": missing, "access": "ro"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not an existing directory"));
+    }
+
+    #[tokio::test]
+    async fn operator_approval_grants_out_of_policy_path() {
+        let p = make_provider();
+        let ctx = make_context();
+        // `/tmp/other-*` matches neither the allow nor the deny list.
+        let outside = tempfile::Builder::new()
+            .prefix("other-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = outside.path().to_string_lossy().into_owned();
+
+        let err = p
+            .execute("zone.create", json!({"path": path, "access": "ro"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("requires operator approval"));
+
+        p.zone_table()
+            .record_operator_approval(ctx.agent_id, &path, 42)
+            .await;
+        let result = p
+            .execute("zone.create", json!({"path": path, "access": "ro"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.output["granted_by"], "operator_approval");
+
+        // Approval is single-use.
+        let err = p
+            .execute("zone.create", json!({"path": path, "access": "ro"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("requires operator approval"));
+    }
+
+    #[tokio::test]
+    async fn zones_survive_store_reattach() {
+        let root = zone_root();
+        let db = root.path().join("zones.db");
+        let agent = AgentID::new();
+
+        let t1 = ZoneTable::new();
+        t1.attach_store(db.clone()).await.unwrap();
+        let id = t1
+            .insert_if_under_limit(
+                agent,
+                root.path().to_path_buf(),
+                ZoneAccess::ReadOnly,
+                ZoneGrantSource::Policy,
+                5,
+            )
+            .await
+            .unwrap();
+
+        let t2 = ZoneTable::new();
+        assert_eq!(t2.attach_store(db.clone()).await.unwrap(), 1);
+        assert!(t2.is_path_in_zone(&agent, root.path()).await);
+        assert_eq!(t2.next_zone_id().await, "zone-2");
+
+        t2.remove(&id, &agent).await.unwrap();
+        let t3 = ZoneTable::new();
+        assert_eq!(t3.attach_store(db).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -852,11 +1156,16 @@ mod tests {
     async fn deny_zone_for_unmatched_path() {
         let p = make_provider();
         let ctx = make_context();
+        // Exists, is a directory, matches neither list.
+        let outside = tempfile::Builder::new()
+            .prefix("other-")
+            .tempdir_in("/tmp")
+            .unwrap();
 
         let err = p
             .execute(
                 "zone.create",
-                json!({"path": "/var/log/syslog", "access": "ro"}),
+                json!({"path": outside.path().to_string_lossy(), "access": "ro"}),
                 &ctx,
             )
             .await
@@ -900,11 +1209,12 @@ mod tests {
     async fn max_zones_per_agent_enforced() {
         let p = make_provider();
         let ctx = make_context();
+        let root = zone_root();
 
         for i in 0..3 {
             p.execute(
                 "zone.create",
-                json!({"path": format!("/home/user/projects/app{i}"), "access": "rw"}),
+                json!({"path": subdir(&root, &format!("app{i}")), "access": "rw"}),
                 &ctx,
             )
             .await
@@ -914,7 +1224,7 @@ mod tests {
         let err = p
             .execute(
                 "zone.create",
-                json!({"path": "/home/user/projects/app4", "access": "rw"}),
+                json!({"path": subdir(&root, "app4"), "access": "rw"}),
                 &ctx,
             )
             .await
@@ -926,10 +1236,11 @@ mod tests {
     async fn list_zones() {
         let p = make_provider();
         let ctx = make_context();
+        let root = zone_root();
 
         p.execute(
             "zone.create",
-            json!({"path": "/home/user/projects/app1", "access": "rw"}),
+            json!({"path": subdir(&root, "app1"), "access": "rw"}),
             &ctx,
         )
         .await
@@ -946,11 +1257,12 @@ mod tests {
     async fn revoke_zone() {
         let p = make_provider();
         let ctx = make_context();
+        let root = zone_root();
 
         let create_result = p
             .execute(
                 "zone.create",
-                json!({"path": "/home/user/projects/app1", "access": "rw"}),
+                json!({"path": subdir(&root, "app1"), "access": "rw"}),
                 &ctx,
             )
             .await
@@ -988,10 +1300,11 @@ mod tests {
             ..make_context()
         };
 
+        let root = zone_root();
         let result = p
             .execute(
                 "zone.create",
-                json!({"path": "/home/user/projects/shared", "access": "rw"}),
+                json!({"path": subdir(&root, "shared"), "access": "rw"}),
                 &ctx_a,
             )
             .await

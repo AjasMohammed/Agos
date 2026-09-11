@@ -121,6 +121,9 @@ impl Kernel {
             connected_channels,
             native_tool_calling,
             uses_tool_gateway,
+            granted_folders: system_prompt::GrantedFolders::from_paths(
+                &self.workspace_paths_for_agent(&task.agent_id),
+            ),
         });
         // Returned to the caller rather than appended: unread counts change as
         // notifications arrive, and appending them here would bust the cached

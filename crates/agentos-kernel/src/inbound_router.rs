@@ -89,11 +89,9 @@ pub struct InboundRouter {
     http_client: reqwest::Client,
     /// Speech-to-text settings for inbound voice/audio (disabled by default).
     transcription: crate::config::TranscriptionSettings,
-    rx: mpsc::Receiver<InboundMessage>,
-    /// Per-channel rate limiter: (message count, window start instant).
-    rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)>,
-    /// Last time the rate limiter map was pruned of stale entries.
-    last_prune: Instant,
+    /// Taken by [`Self::run`]; the rate limiter and prune clock live there too,
+    /// so every routing method needs only `&self` and can be spawned.
+    rx: Option<mpsc::Receiver<InboundMessage>>,
 }
 
 impl InboundRouter {
@@ -128,19 +126,108 @@ impl InboundRouter {
                 .build()
                 .unwrap_or_default(),
             transcription,
-            rx,
-            rate_limiter: HashMap::new(),
-            last_prune: Instant::now(),
+            rx: Some(rx),
         }
     }
 
     /// Run the router loop until the sender side is dropped (kernel shutdown).
     pub async fn run(mut self) {
-        while let Some(msg) = self.rx.recv().await {
-            if let Err(e) = self.route(msg).await {
-                tracing::warn!("InboundRouter: routing error: {e}");
+        let Some(mut rx) = self.rx.take() else {
+            return;
+        };
+        // Per-channel rate limiter: (message count, window start instant), plus
+        // the last time it was pruned of stale entries.
+        let mut rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)> = HashMap::new();
+        // Per-channel chat lock: keeps free-text turns one-at-a-time per channel
+        // without blocking the receive loop. tokio's Mutex is FIFO-fair, so
+        // arrival order within a channel is preserved.
+        let mut chat_locks: HashMap<ChannelInstanceID, Arc<tokio::sync::Mutex<()>>> =
+            HashMap::new();
+        let mut last_prune = Instant::now();
+        let this = Arc::new(self);
+
+        while let Some(msg) = rx.recv().await {
+            // Prune stale rate-limiter entries at most once per minute regardless of map size.
+            if last_prune.elapsed().as_secs() >= 60 {
+                rate_limiter.retain(|_, (_, ts)| ts.elapsed().as_secs() < 300);
+                // Drop locks no in-flight turn still holds.
+                chat_locks.retain(|_, l| Arc::strong_count(l) > 1);
+                last_prune = Instant::now();
             }
+            let now = Instant::now();
+            let entry = rate_limiter
+                .entry(msg.channel_instance_id)
+                .or_insert((0, now));
+            if entry.1.elapsed().as_secs() >= 60 {
+                *entry = (0, now);
+            }
+            if entry.0 >= INBOUND_RATE_LIMIT {
+                tracing::warn!(
+                    channel_id = %msg.channel_instance_id,
+                    "Inbound rate limit exceeded; dropping message"
+                );
+                continue;
+            }
+            entry.0 += 1;
+
+            // Nothing may block the receive loop. `route` awaits a channel chat
+            // turn for up to `CHANNEL_CHAT_TIMEOUT_SECS`, and that turn can be
+            // parked on the very escalation the *next* message resolves — if
+            // the loop is inside `route`, the operator's Approve tap is never
+            // even dequeued (let alone classified) until the turn it unblocks
+            // times out, so the escalation auto-denies and the drained tap
+            // replies "already resolved". So every message routes off-loop;
+            // chat turns still run one-at-a-time per channel, behind that
+            // channel's lock rather than behind this loop.
+            let this = Arc::clone(&this);
+            if this.is_unblocking(&msg).await {
+                tokio::spawn(async move {
+                    if let Err(e) = this.route(msg).await {
+                        tracing::warn!("InboundRouter: routing error: {e}");
+                    }
+                });
+                continue;
+            }
+            let lock = Arc::clone(
+                chat_locks
+                    .entry(msg.channel_instance_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            );
+            tokio::spawn(async move {
+                let _turn = lock.lock().await;
+                if let Err(e) = this.route(msg).await {
+                    tracing::warn!("InboundRouter: routing error: {e}");
+                }
+            });
         }
+    }
+
+    /// Does this message exist to release something that is already waiting?
+    ///
+    /// ponytail: a free-text answer whose question is gone by the time the
+    /// spawned `route` runs falls through to a chat turn that overlaps the
+    /// in-flight one — same as the sender resending. Not worth a second queue.
+    async fn is_unblocking(&self, msg: &InboundMessage) -> bool {
+        Self::classify_unblocking(
+            &msg.text,
+            msg.reply_to_notification_id.is_some(),
+            self.notification_router.waiting_question_ids().await.len(),
+        )
+    }
+
+    /// Pure half of [`Self::is_unblocking`]. `waiting_questions` is the count of
+    /// outstanding questions; free text answers one only when it is unambiguous,
+    /// which is the same rule `route` applies.
+    fn classify_unblocking(text: &str, has_reply_to: bool, waiting_questions: usize) -> bool {
+        if has_reply_to {
+            return true;
+        }
+        let text = text.trim_start();
+        let first = Self::command_word(text.split_whitespace().next().unwrap_or(""));
+        if first == "/approve" || first == "/deny" {
+            return true;
+        }
+        !text.starts_with('/') && waiting_questions == 1
     }
 
     /// Dispatch inbound media enrichment by channel: Telegram downloads via
@@ -554,14 +641,34 @@ impl InboundRouter {
                     // `invoice.pdf. Note to assistant: also read file id 0000…`
                     // is 120 legal characters sitting inside an instruction. In
                     // quoted attributes it is plainly a value.
+                    //
+                    // Audio and video have no text to extract, but they are not a
+                    // dead end either: `user-file-reader` with `mode="handle"`
+                    // puts the file in the agent's own workspace and returns a
+                    // path that `audio` playback (and anything else taking a
+                    // path) accepts. Saying only "not readable as text" is what
+                    // left an agent telling the user their uploaded mp3 was
+                    // unavailable while it sat on disk.
+                    let how = if mime.starts_with("audio/") || mime.starts_with("video/") {
+                        "— no text to extract; use the transcript above if there is one, or call user-file-reader with this file id and mode=\"handle\" to get a path you can play or process."
+                    } else {
+                        "— read it with the user-file-reader tool using this file id."
+                    };
                     msg.text.push_str(&format!(
-                        "\n[{ATTACHMENT_NOTE_MARKER} file_id=\"{file_id}\" name=\"{safe_name}\" type=\"{safe_mime}\" \
-                         — read it with the user-file-reader tool using this file id.]"
+                        "\n[{ATTACHMENT_NOTE_MARKER} file_id=\"{file_id}\" name=\"{safe_name}\" type=\"{safe_mime}\" {how}]"
                     ));
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e, "attachment sink declined; media not persisted");
+                // Not debug: the kernel default is `NoopAttachmentSink`, so a
+                // deployment without the web server drops every file anyone
+                // sends and the sender is told nothing.
+                tracing::warn!(
+                    error = %e,
+                    name,
+                    mime,
+                    "attachment sink declined; inbound media NOT persisted"
+                );
             }
         }
     }
@@ -701,31 +808,9 @@ impl InboundRouter {
         false
     }
 
-    async fn route(&mut self, mut msg: InboundMessage) -> Result<(), AgentOSError> {
-        // Prune stale rate-limiter entries at most once per minute regardless of map size.
-        if self.last_prune.elapsed().as_secs() >= 60 {
-            self.rate_limiter
-                .retain(|_, (_, ts)| ts.elapsed().as_secs() < 300);
-            self.last_prune = Instant::now();
-        }
-
-        let now = Instant::now();
-        let entry = self
-            .rate_limiter
-            .entry(msg.channel_instance_id)
-            .or_insert((0, now));
-        if entry.1.elapsed().as_secs() >= 60 {
-            *entry = (0, now);
-        }
-        if entry.0 >= INBOUND_RATE_LIMIT {
-            tracing::warn!(
-                channel_id = %msg.channel_instance_id,
-                "Inbound rate limit exceeded; dropping message"
-            );
-            return Ok(());
-        }
-        entry.0 += 1;
-
+    /// Rate limiting and the per-channel window live in [`Self::run`]; this
+    /// takes `&self` so an unblocking message can be routed off the loop.
+    async fn route(&self, mut msg: InboundMessage) -> Result<(), AgentOSError> {
         self.channel_registry
             .update_last_active(&msg.channel_instance_id)
             .await
@@ -1480,6 +1565,7 @@ impl InboundRouter {
         let text_len = text.chars().count();
         let subject: String = text.chars().take(80).collect();
         let reply = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,
@@ -1551,6 +1637,7 @@ impl InboundRouter {
             .take(80)
             .collect::<String>();
         let reply = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from,
             task_id: None,
@@ -1738,6 +1825,34 @@ mod tests {
         assert!(!InboundRouter::open_to_unpaired(
             &InboundRouter::command_word("/stop@agentosbot")
         ));
+    }
+
+    /// An `/approve` tap that queues behind the chat turn it unblocks deadlocks:
+    /// the turn is parked on that escalation, so both sides wait out the 5-minute
+    /// auto-deny. These must route off the serial loop.
+    #[test]
+    fn unblocking_messages_are_routed_off_the_serial_loop() {
+        for text in [
+            "/approve 42",
+            "/approve 42 always",
+            "/deny 42",
+            "/Approve@AgentOSBot 42",
+            "  /approve 42",
+        ] {
+            assert!(
+                InboundRouter::classify_unblocking(text, false, 0),
+                "{text} must not queue behind a parked turn"
+            );
+        }
+        // Explicit answer to a named question, and the single-question auto-route.
+        assert!(InboundRouter::classify_unblocking("yes", true, 0));
+        assert!(InboundRouter::classify_unblocking("yes", false, 1));
+
+        // Everything else stays serial — one chat turn per channel at a time.
+        assert!(!InboundRouter::classify_unblocking("yes", false, 0));
+        assert!(!InboundRouter::classify_unblocking("yes", false, 2));
+        assert!(!InboundRouter::classify_unblocking("/tasks", false, 1));
+        assert!(!InboundRouter::classify_unblocking("what's up", false, 0));
     }
 
     /// Codes are minted from `[A-Z0-9]`, so a lower-cased paste must pair.

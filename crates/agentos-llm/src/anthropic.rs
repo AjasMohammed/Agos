@@ -1044,6 +1044,18 @@ impl LLMCore for AnthropicCore {
                                 full_text.push_str(text);
                                 let _ = tx.send(InferenceEvent::Token(text.to_string())).await;
                             }
+                        } else if delta_type == "thinking_delta" {
+                            // Extended-thinking scratchpad. Kept out of `full_text`
+                            // so it can never leak into the answer. `signature_delta`
+                            // and `redacted_thinking` blocks are deliberately not
+                            // forwarded — neither carries readable text.
+                            if let Some(thinking) = delta["thinking"].as_str() {
+                                if !thinking.is_empty() {
+                                    let _ = tx
+                                        .send(InferenceEvent::Thinking(thinking.to_string()))
+                                        .await;
+                                }
+                            }
                         } else if delta_type == "input_json_delta" {
                             if let Some(partial) = delta["partial_json"].as_str() {
                                 current_tool_args_buffer.push_str(partial);
@@ -1340,6 +1352,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

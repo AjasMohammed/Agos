@@ -41,6 +41,12 @@ pub struct AgentProfile {
     /// Cleared when the agent reconnects via `agentos agent connect`.
     #[serde(default)]
     pub manually_offline: bool,
+    /// Per-agent override of `tools.discovery.working_set_size` (T1 tools
+    /// pre-armed by retrieval). `Some(0)` = pinned tools only, for small or
+    /// low-TPM models where prompt-eval time / tokens-per-minute dominate.
+    /// `None` = kernel default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_set_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

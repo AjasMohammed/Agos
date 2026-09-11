@@ -272,6 +272,8 @@ impl HardwareAbstractionLayer {
         ));
         #[cfg(all(feature = "webcam", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::webcam::WebcamDriver::new()));
+        #[cfg(all(feature = "wifi", target_os = "linux"))]
+        hal.register(Box::new(crate::drivers::wifi::WifiDriver::new()));
         hal.register(Box::new(crate::drivers::mounts::MountsDriver::new()));
         hal.register(Box::new(crate::drivers::open_files::OpenFilesDriver::new()));
         hal.register(Box::new(crate::drivers::services::ServicesDriver::new()));

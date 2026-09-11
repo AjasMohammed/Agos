@@ -144,6 +144,9 @@ static GROUP_SIGNALS: &[(&str, &[&str])] = &[
             "camera",
             "webcam",
             "bluetooth",
+            "wifi",
+            "wireless",
+            "ssid",
             "display",
             "print",
             "usb",
@@ -579,6 +582,7 @@ mod tests {
             executor: agentos_types::ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: agentos_types::RiskClass::ReadonlyScoped,
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         }

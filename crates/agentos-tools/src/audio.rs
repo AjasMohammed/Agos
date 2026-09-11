@@ -47,9 +47,24 @@ impl AgentTool for AudioTool {
             "list_capture_consents" => {
                 vec![("hardware.audio.capture".to_string(), PermissionOp::Read)]
             }
-            "playback" => vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)],
+            // Mirrors the driver: the lifecycle actions ride the same
+            // `playback:x` grant that started the session they address.
+            "playback" | "playback_pause" | "playback_resume" | "playback_stop"
+            | "playback_status" => {
+                vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)]
+            }
             "volume" => {
                 let op = if payload.get("volume").is_some() {
+                    PermissionOp::Write
+                } else {
+                    PermissionOp::Read
+                };
+                vec![("hardware.audio.volume".to_string(), op)]
+            }
+            // Must mirror the driver's own mapping: without this arm "mute"
+            // fell through to `audio.list:r`, gating a write on a read grant.
+            "mute" => {
+                let op = if payload.get("muted").is_some() {
                     PermissionOp::Write
                 } else {
                     PermissionOp::Read
@@ -135,5 +150,32 @@ mod tests {
             tool.required_permissions_for(&json!({ "action": "volume", "volume": 0.5 })),
             vec![("hardware.audio.volume".to_string(), PermissionOp::Write)]
         );
+        // The wrapper gate is what the KERNEL validates the capability token
+        // against; the driver re-checks its own mapping. If these two drift, a
+        // write is admitted on a read grant. Without this arm "mute" fell
+        // through to the `_` case and was gated on hardware.audio.list:r.
+        assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "mute" })),
+            vec![("hardware.audio.volume".to_string(), PermissionOp::Read)]
+        );
+        assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "mute", "muted": false })),
+            vec![("hardware.audio.volume".to_string(), PermissionOp::Write)]
+        );
+        // Same drift trap for the playback lifecycle: falling through to `_`
+        // would gate stopping a track on `audio.list:r`, which every agent has.
+        for action in [
+            "playback",
+            "playback_pause",
+            "playback_resume",
+            "playback_stop",
+            "playback_status",
+        ] {
+            assert_eq!(
+                tool.required_permissions_for(&json!({ "action": action })),
+                vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)],
+                "{action} must ride the playback grant"
+            );
+        }
     }
 }

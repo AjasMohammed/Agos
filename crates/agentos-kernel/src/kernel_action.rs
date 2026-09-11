@@ -1792,10 +1792,22 @@ impl Kernel {
         };
         drop(registry);
 
+        // Durable row first; the bus message reuses its id so the
+        // DirectMessageReceived `message_id` resolves via agent-messages-read.
+        let entry_id = self
+            .agent_inbox_writer
+            .write_message(
+                task.agent_id,
+                from_name.clone(),
+                to_agent.id,
+                content.to_string(),
+            )
+            .await;
+
         let now = chrono::Utc::now();
         let ttl_seconds: u64 = 60;
         let mut msg = AgentMessage {
-            id: MessageID::new(),
+            id: MessageID::from_uuid(*entry_id.as_uuid()),
             from: task.agent_id,
             to: MessageTarget::Direct(to_agent.id),
             content: MessageContent::Text(content.to_string()),
@@ -1827,20 +1839,40 @@ impl Kernel {
             }
         }
 
-        self.agent_inbox_writer
-            .write_message(
-                task.agent_id,
-                from_name.clone(),
-                to_agent.id,
-                content.to_string(),
+        // An Offline recipient still gets the durable inbox row and reads it on
+        // reconnect, but the sender must not be told "delivered" — it may be
+        // waiting for a reply that cannot come. This is the only remaining
+        // producer of AgentUnreachable.
+        let recipient_online = to_agent.status != AgentStatus::Offline;
+        if !recipient_online {
+            self.emit_event_with_trace(
+                EventType::AgentUnreachable,
+                EventSource::AgentMessageBus,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "unreachable_agent": to_agent.id.to_string(),
+                    "unreachable_agent_name": to_agent.name,
+                    "from_agent": task.agent_id.to_string(),
+                    "reason": "offline",
+                }),
+                task.event_chain_depth(),
+                Some(trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
+        }
 
-        match self.message_bus.send_direct(msg).await {
+        match self
+            .message_bus
+            .send_direct(msg, task.event_chain_depth())
+            .await
+        {
             Ok(_) => KernelActionResult {
                 success: true,
                 result: serde_json::json!({
-                    "status": "delivered",
+                    "status": if recipient_online { "delivered" } else { "queued" },
+                    "recipient_online": recipient_online,
                     "to": to,
                     "from": from_name,
                 }),
@@ -2436,6 +2468,7 @@ impl Kernel {
         }
 
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
             task_id: Some(task.id),
@@ -4674,6 +4707,7 @@ impl Kernel {
             _ => (send_text.clone(), attachment.clone()),
         };
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
             task_id: Some(task.id),
@@ -4798,6 +4832,7 @@ pub(crate) async fn ask_user_blocking(
     let body_prefixed = format!("{agent_name} asks:\n\n{question}");
 
     let msg = UserMessage {
+        actions: Vec::new(),
         id: NotificationID::new(),
         from: NotificationSource::Agent(agent_id),
         task_id: Some(task_id),

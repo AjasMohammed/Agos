@@ -137,6 +137,27 @@ pub struct OutboundMessage {
     pub channel_instance_id: String,
     pub content: MessageContent,
     pub thread_id: Option<String>,
+    /// Actionable controls carried from the originating `UserMessage`. Empty
+    /// for ordinary messages. Deliberately a sibling field rather than a
+    /// `MessageContent` variant: that enum is serialized verbatim into the
+    /// HMAC-signed webhook body and its `type` discriminant is a published
+    /// contract, so a new variant would break consumers while a new field
+    /// does not.
+    pub actions: Vec<agentos_types::PromptAction>,
+}
+
+impl OutboundMessage {
+    /// Delivery text with the shared action fallback appended.
+    ///
+    /// Adapters with no interactive primitive call this instead of
+    /// `content.render_for_delivery()` so the operator sees identical wording
+    /// on every such channel. Adapters that render native controls must NOT
+    /// call it — they would show buttons and the instructions both.
+    pub fn text_with_actions(&self) -> String {
+        let mut text = self.content.render_for_delivery();
+        text.push_str(&agentos_types::render_actions_fallback(&self.actions));
+        text
+    }
 }
 
 #[derive(Debug, Clone)]

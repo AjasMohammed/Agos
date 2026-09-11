@@ -50,6 +50,17 @@ pub fn signing_payload(manifest: &ToolManifest) -> Vec<u8> {
     // both drive enforcement (ApprovalHook friction, signature requirement) and
     // were previously mutable without invalidating the signature.
     payload.insert("risk_class".to_string(), json!(manifest.risk_class));
+    // Inserted only when non-empty so every already-signed manifest keeps its
+    // existing signature bytes. Adding a table to one of those changes the
+    // payload and invalidates the signature, which is the point: the table
+    // lowers the approval class per action, so it is exactly the downgrade
+    // vector `risk_class` is signed to prevent.
+    if !manifest.risk_class_by_action.is_empty() {
+        payload.insert(
+            "risk_class_by_action".to_string(),
+            json!(manifest.risk_class_by_action),
+        );
+    }
     payload.insert(
         "trust_tier".to_string(),
         json!(manifest.manifest.trust_tier),
@@ -85,10 +96,12 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
         });
     }
 
-    // `Interactive` is the only risk class `ApprovalMode::decide` short-circuits
-    // to `Allow` under EVERY mode, `deny` included — prompting a human to approve
-    // a request *for* human input is circular. That makes it a stronger bypass
-    // than `ReadonlyScoped`, so it is reserved for distribution-trusted tools.
+    // `ApprovalMode::decide` short-circuits `Interactive` to `Allow` under EVERY
+    // mode, `deny` included — prompting a human to approve a request *for* human
+    // input is circular. `ReadonlyScoped` short-circuits identically (see
+    // `approval.rs`), so the two are equally strong bypasses; `Interactive` is
+    // gated here because a tool can self-declare it, and it is reserved for
+    // distribution-trusted tools.
     // Without this gate a Community `tool.toml` declaring `risk_class =
     // "interactive"` and self-signed with its own generated key (there is no
     // trusted-key allowlist) would be auto-approved on every call, and the
@@ -110,6 +123,40 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
     if manifest.risk_class == agentos_types::RiskClass::WriteAgentState
         && info.trust_tier != TrustTier::Core
     {
+        return Err(AgentOSError::ToolBlocked {
+            name: info.name.clone(),
+        });
+    }
+
+    // Per-action overrides may name `ReadonlyExternal` and nothing else. They
+    // exist to stop a read action inheriting a write action's prompt — not to
+    // reclassify a tool.
+    //
+    // `ReadonlyScoped` is excluded even though it reads as the *safer* label:
+    // `ApprovalMode::decide` short-circuits it to `Allow` before it ever looks
+    // at the mode, so it is allowed under `deny` too — the same strength as
+    // `Interactive`, which the gate above reserves for `Core`. An override is
+    // meant to lower friction, and `ReadonlyExternal` does exactly that
+    // (allowed under `auto`/`ask_edit`, still prompts under `ask_always`, still
+    // denied under `deny`) without punching through an operator's `deny`.
+    //
+    // Without the bound, `[risk_class_by_action] connect = "readonly_scoped"`
+    // on a self-signed manifest would auto-approve under every mode while every
+    // discovery surface still reported the tool-level `control_plane` — a
+    // bypass hidden behind an accurate-looking label, through a field the two
+    // Core-only gates above never inspect. Checked before the tier match so it
+    // binds `Core` manifests too, which skip the signature check entirely.
+    if let Some((action, class)) = manifest
+        .risk_class_by_action
+        .iter()
+        .find(|(_, class)| !matches!(class, agentos_types::RiskClass::ReadonlyExternal))
+    {
+        tracing::error!(
+            tool = %info.name,
+            %action,
+            ?class,
+            "manifest risk_class_by_action may only name readonly_external"
+        );
         return Err(AgentOSError::ToolBlocked {
             name: info.name.clone(),
         });
@@ -317,6 +364,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: RiskClass::ReadonlyScoped,
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         }
@@ -340,6 +388,88 @@ mod tests {
         let manifest = make_manifest(TrustTier::Community);
         let err = verify_manifest(&manifest).unwrap_err();
         assert!(matches!(err, AgentOSError::ToolSignatureInvalid { .. }));
+    }
+
+    /// The table lowers the approval class per action, so it must be inside the
+    /// signature. Otherwise an author appends
+    /// `[risk_class_by_action] <every action> = "readonly_scoped"` to a manifest
+    /// already signed and shipped, and every call auto-approves under every
+    /// mode with the signature still verifying.
+    #[test]
+    fn override_table_is_covered_by_the_signature() {
+        let mut manifest = make_manifest(TrustTier::Community);
+        let before = signing_payload(&manifest);
+        // Empty table must not perturb the bytes, or every existing signature
+        // breaks the moment this field ships.
+        assert!(!String::from_utf8_lossy(&before).contains("risk_class_by_action"));
+
+        manifest
+            .risk_class_by_action
+            .insert("list".into(), RiskClass::ReadonlyExternal);
+        let after = signing_payload(&manifest);
+        assert_ne!(
+            before, after,
+            "bolting on a table must invalidate the signature"
+        );
+
+        // And the class itself is signed, not just the presence of a key.
+        manifest
+            .risk_class_by_action
+            .insert("list".into(), RiskClass::ReadonlyScoped);
+        assert_ne!(after, signing_payload(&manifest));
+    }
+
+    /// `ReadonlyExternal` is the only class an override may name.
+    ///
+    /// `ReadonlyScoped` is the trap: it reads as the safer of the two read
+    /// classes and is rejected precisely because it is not — it is `Allow` under
+    /// `deny`, the same strength as `Interactive`, which the Core-only gate
+    /// above exists to keep out of self-declared manifests.
+    #[test]
+    fn override_table_may_only_name_readonly_external() {
+        use agentos_types::{ApprovalDecision, ApprovalMode};
+
+        // The reason the bound is what it is, asserted rather than narrated.
+        assert_eq!(
+            ApprovalMode::Deny.decide(RiskClass::ReadonlyScoped),
+            ApprovalDecision::Allow
+        );
+        assert_eq!(
+            ApprovalMode::Deny.decide(RiskClass::ReadonlyExternal),
+            ApprovalDecision::Deny
+        );
+        assert_eq!(
+            ApprovalMode::AskAlways.decide(RiskClass::ReadonlyExternal),
+            ApprovalDecision::Prompt
+        );
+        assert_eq!(
+            ApprovalMode::AskEdit.decide(RiskClass::ReadonlyExternal),
+            ApprovalDecision::Allow
+        );
+
+        for class in [
+            RiskClass::ReadonlyScoped,
+            RiskClass::Interactive,
+            RiskClass::WriteAgentState,
+            RiskClass::WriteScoped,
+            RiskClass::ExecCapable,
+            RiskClass::ControlPlane,
+        ] {
+            let mut manifest = make_manifest(TrustTier::Core);
+            manifest
+                .risk_class_by_action
+                .insert("connect".into(), class.clone());
+            assert!(
+                verify_manifest(&manifest).is_err(),
+                "{class:?} must be rejected in risk_class_by_action"
+            );
+        }
+
+        let mut manifest = make_manifest(TrustTier::Core);
+        manifest
+            .risk_class_by_action
+            .insert("status".into(), RiskClass::ReadonlyExternal);
+        assert!(verify_manifest(&manifest).is_ok());
     }
 
     #[test]

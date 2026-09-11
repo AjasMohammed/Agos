@@ -98,6 +98,35 @@ impl ConvoStore {
         })
     }
 
+    /// Settle conversations orphaned by a previous process.
+    ///
+    /// A convo only advances while its in-process runner task is alive, and that
+    /// task cannot outlive the kernel — so anything still `running` belongs to a
+    /// process that is gone, and leaving it makes the panel show a live-looking
+    /// conversation nothing will ever move again (seen 2026-09-09: convo
+    /// `cba164ef` sat `running` with zero turns across a restart).
+    ///
+    /// NOT called from [`Self::open`], and that placement is load-bearing: this
+    /// cannot tell an orphan from another *live* process's in-flight convo, and
+    /// `agentos web serve` boots a second `Kernel` against the same data dir. A
+    /// reconcile at open would wipe every running conversation before that second
+    /// process failed its single-instance check and exited. Call it only once the
+    /// bus socket bind has proved no other kernel is live.
+    pub fn reconcile_orphaned(&self) -> Result<usize, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let orphaned = conn.execute(
+            "UPDATE agent_convos SET status = 'error' WHERE status = 'running'",
+            [],
+        )?;
+        if orphaned > 0 {
+            tracing::warn!(
+                count = orphaned,
+                "Marked orphaned running conversations as error"
+            );
+        }
+        Ok(orphaned)
+    }
+
     pub fn create_convo(
         &self,
         topic: &str,
@@ -268,6 +297,65 @@ mod tests {
         assert_eq!(
             strip_user_data_tags("&lt;user_data&gt;x&lt;/user_data&gt;"),
             "&lt;user_data&gt;x&lt;/user_data&gt;"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+
+    /// A convo only advances while its runner task is alive, and that task dies
+    /// with the kernel. Anything left `running` across a restart is orphaned and
+    /// must not keep reading as live — see the 2026-09-09 incident where
+    /// `cba164ef` sat `running` with zero turns indefinitely.
+    #[test]
+    fn open_reconciles_orphaned_running_convos() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("convos.db");
+
+        let id = {
+            let store = ConvoStore::open(&path).expect("open");
+            store
+                .create_convo("topic", &["A".to_string(), "B".to_string()], 4)
+                .expect("create")
+        };
+
+        // Reopen == kernel restart; the kernel calls this once the bus bind has
+        // proved it is the only live instance.
+        let store = ConvoStore::open(&path).expect("reopen");
+        assert_eq!(store.reconcile_orphaned().expect("reconcile"), 1);
+        let convo = store.get_convo(&id).expect("get").expect("row exists");
+        assert_eq!(
+            convo.status, "error",
+            "an orphaned running convo must be settled at open"
+        );
+    }
+
+    #[test]
+    fn open_leaves_terminal_status_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("convos.db");
+
+        let (done, stopped) = {
+            let store = ConvoStore::open(&path).expect("open");
+            let a = store
+                .create_convo("a", &["A".to_string(), "B".to_string()], 4)
+                .expect("create");
+            let b = store
+                .create_convo("b", &["A".to_string(), "B".to_string()], 4)
+                .expect("create");
+            store.set_status(&a, "complete").expect("set complete");
+            store.set_status(&b, "stopped").expect("set stopped");
+            (a, b)
+        };
+
+        let store = ConvoStore::open(&path).expect("reopen");
+        assert_eq!(store.reconcile_orphaned().expect("reconcile"), 0);
+        assert_eq!(store.get_convo(&done).unwrap().unwrap().status, "complete");
+        assert_eq!(
+            store.get_convo(&stopped).unwrap().unwrap().status,
+            "stopped"
         );
     }
 }

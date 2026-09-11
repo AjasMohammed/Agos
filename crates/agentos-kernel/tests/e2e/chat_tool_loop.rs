@@ -90,6 +90,71 @@ async fn chat_tool_call_is_gated_by_approval_hook() {
     handle.await.unwrap();
 }
 
+/// The turn-scope gate is the actual enforcement point for a conversation turn,
+/// not the manifest filter — a model routinely emits a tool name that was never
+/// offered to it, and on 2026-09-09 one did exactly that: a convo turn called
+/// `agent-message` twelve times, each one raising a human approval prompt and
+/// writing a DM the group chat could not render, while the transcript stayed
+/// empty. Withholding the schema alone would not have stopped any of it.
+///
+/// Approval mode is left at its default here on purpose: the scope check must
+/// reject *ahead* of the capability and approval gates, so the operator is never
+/// prompted for a call a convo turn was not allowed to make in the first place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn convo_scope_rejects_withheld_tool_at_dispatch() {
+    use agentos_kernel::kernel::ChatTurnScope;
+
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "convo-scope-agent",
+        vec![
+            tool_call_response("agent-message"),
+            MockResponse::text("Fine, I will just say it out loud.")
+                .with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let result = kernel
+        .chat_infer_with_tools_scoped(
+            "convo-scope-agent",
+            &[],
+            "Open the conversation.",
+            None,
+            None,
+            ChatTurnScope::ConvoTurn,
+        )
+        .await
+        .expect("chat_infer_with_tools_scoped failed");
+
+    assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
+    let call = &result.tool_calls[0];
+    let err = call
+        .result
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        err.contains("not available inside an agent conversation"),
+        "a convo turn must be refused the out-of-band egress family; got result: {}",
+        call.result
+    );
+    // The refusal has to tell the model what to do instead, or it spends the
+    // remaining iterations retrying the same call.
+    assert!(
+        err.contains("plain text"),
+        "the refusal must point the model at replying instead; got: {err}"
+    );
+    // The loop keeps going and the turn still produces speech.
+    assert!(result.answer.contains("say it out loud"));
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
 /// Chat memory parity: a chat turn must leave the same episodic trail a task
 /// leaves, and the agent's curated context memory must be injected back into
 /// the chat prompt. Before this was wired, agents truthfully reported "I have
@@ -202,7 +267,12 @@ async fn empty_answer_turn_is_recorded_as_degraded() {
     common::register_mock_agent_with_responses(
         &kernel,
         "chat-degraded-agent",
-        vec![MockResponse::text("").with_stop_reason(StopReason::EndTurn)],
+        // Two blanks: the loop nudges once on an empty final answer before
+        // giving up, so a single blank would be masked by the retry.
+        vec![
+            MockResponse::text("").with_stop_reason(StopReason::EndTurn),
+            MockResponse::text("").with_stop_reason(StopReason::EndTurn),
+        ],
     )
     .await;
 
@@ -228,6 +298,51 @@ async fn empty_answer_turn_is_recorded_as_degraded() {
             .and_then(|v| v.as_str()),
         Some("degraded"),
         "an empty final answer is not a successful turn"
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// A blank final answer (EndTurn, no text, no tool calls — seen on gpt-oss
+/// and nemotron after a tool-result burst) gets exactly one nudge retry. The
+/// second inference must see the nudge as the last user entry, and its text
+/// is what the user receives — not the placeholder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn empty_answer_is_retried_once_with_nudge() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+    let agent_id =
+        common::register_mock_agent_with_responses(&kernel, "chat-nudge-agent", vec![]).await;
+    // Swap in a mock we keep a handle to, so the retry call's context can be
+    // inspected after the turn.
+    let mock = std::sync::Arc::new(agentos_llm::MockLLMCore::with_responses(vec![
+        MockResponse::text("").with_stop_reason(StopReason::EndTurn),
+        MockResponse::text("Here is the answer.").with_stop_reason(StopReason::EndTurn),
+    ]));
+    kernel.active_llms.write().await.insert(
+        agent_id,
+        mock.clone() as std::sync::Arc<dyn agentos_llm::LLMCore>,
+    );
+
+    let result = kernel
+        .chat_infer_with_tools("chat-nudge-agent", &[], "Anything?", None, None)
+        .await
+        .expect("chat_infer_with_tools failed");
+
+    assert_eq!(result.answer, "Here is the answer.");
+    assert_eq!(result.iterations, 2, "one blank + one retry");
+
+    let history = mock.call_history();
+    assert_eq!(history.len(), 2);
+    let (role, text) = history[1]
+        .context_entries
+        .last()
+        .expect("retry call has context");
+    assert_eq!(*role, agentos_types::ContextRole::User);
+    assert!(
+        text.contains("previous reply was empty"),
+        "retry must carry the nudge, got: {text}"
     );
 
     kernel.shutdown();
@@ -400,6 +515,246 @@ async fn test_chat_tool_error_injected_and_llm_retries() {
     assert_eq!(
         result.answer,
         "I encountered an error but recovered with this answer."
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// Withholding a tool from the offered manifest list is not enforcement: models
+/// routinely emit names that were never offered. A convo turn that calls one
+/// anyway must be refused at dispatch, and told what to do instead.
+///
+/// Regression guard for 2026-09-09, when a convo turn spent 20 iterations and 12
+/// operator approvals sending `agent-message` DMs while the conversation the
+/// operator was watching stayed empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn convo_turn_refuses_withheld_tool_at_dispatch() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "convo-scope-agent",
+        vec![
+            tool_call_response("agent-message"),
+            MockResponse::text("Understood — here is my reply instead.")
+                .with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let result = kernel
+        .chat_infer_with_tools_scoped(
+            "convo-scope-agent",
+            &[],
+            "Say hello to the other participant.",
+            None,
+            None,
+            agentos_kernel::kernel::ChatTurnScope::ConvoTurn,
+        )
+        .await
+        .expect("chat_infer_with_tools_scoped failed");
+
+    assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
+    let err = result.tool_calls[0]
+        .result
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        err.contains("not available inside an agent conversation"),
+        "withheld tool must be refused with the scope message; got: {err}"
+    );
+    assert!(
+        err.contains("Reply with plain text"),
+        "the refusal must tell the model what to do instead, or it retries; got: {err}"
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// The same call is allowed on an ordinary chat turn — proves the refusal above
+/// comes from the turn scope, not from a permission or approval denial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn full_scope_does_not_refuse_messaging_tools() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "full-scope-agent",
+        vec![
+            tool_call_response("agent-message"),
+            MockResponse::text("Sent.").with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let result = kernel
+        .chat_infer_with_tools(
+            "full-scope-agent",
+            &[],
+            "Message the other agent.",
+            None,
+            None,
+        )
+        .await
+        .expect("chat_infer_with_tools failed");
+
+    let err = result.tool_calls[0]
+        .result
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !err.contains("not available inside an agent conversation"),
+        "an ordinary chat turn must not hit the convo scope gate; got: {err}"
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// A convo turn is capped well below the general chat cap. The turn that caused
+/// this work ran 20 iterations; four is enough for one lookup before speaking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn convo_turn_caps_tool_iterations() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    // Far more tool calls than the convo cap allows, each with a distinct
+    // payload so the dedup circuit breaker doesn't end the loop first.
+    let responses: Vec<MockResponse> = (0..20)
+        .map(|i| tool_call_response_with_payload("agent-manual", serde_json::json!({"section": i})))
+        .collect();
+    common::register_mock_agent_with_responses(&kernel, "convo-cap-agent", responses).await;
+
+    let result = kernel
+        .chat_infer_with_tools_scoped(
+            "convo-cap-agent",
+            &[],
+            "Keep going.",
+            None,
+            None,
+            agentos_kernel::kernel::ChatTurnScope::ConvoTurn,
+        )
+        .await
+        .expect("chat_infer_with_tools_scoped failed");
+
+    assert!(
+        result.tool_calls.len() as u32 <= agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS,
+        "a convo turn must stop at {} iterations; ran {}",
+        agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS,
+        result.tool_calls.len()
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// Pressing Stop in the browser aborts the fetch, which drops the SSE stream
+/// and with it the receiver on the kernel's event channel. The turn must end
+/// with whatever text already reached the reader — returning `Err` made both
+/// callers persist nothing, so the half-written reply vanished from the
+/// transcript on the next refetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stopped_stream_keeps_the_partial_answer() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    // Longer than the 64-slot channel holds at the mock's 20 chars per chunk,
+    // so the kernel is still sending when the reader goes away.
+    let long_answer = "The first twenty chars and a lot more after them. ".repeat(40);
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "chat-stop-agent",
+        vec![MockResponse::text(&long_answer).with_stop_reason(StopReason::EndTurn)],
+    )
+    .await;
+
+    // Read until the answer starts, then drop the receiver: what an aborted
+    // fetch leaves behind mid-reply.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<agentos_kernel::ChatStreamEvent>(64);
+    let reader = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, agentos_kernel::ChatStreamEvent::TextChunk { .. }) {
+                break;
+            }
+        }
+        drop(rx);
+    });
+
+    let result = kernel
+        .chat_infer_streaming(
+            "chat-stop-agent",
+            &[],
+            "Say something long.",
+            None,
+            tx,
+            None,
+        )
+        .await
+        .expect("a stopped stream must still return the partial turn");
+    reader.await.unwrap();
+
+    assert!(
+        result.answer.contains("The first twenty"),
+        "text already streamed must survive the stop; got {:?}",
+        result.answer
+    );
+    assert!(
+        result.answer.contains("[Note: stopped"),
+        "the transcript must say the reply was cut short; got {:?}",
+        result.answer
+    );
+    assert!(
+        result.answer.len() < long_answer.len(),
+        "a stopped turn must not carry the whole answer; got {} of {} chars",
+        result.answer.len(),
+        long_answer.len()
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// Stop pressed before the first token (or a reader that never read at all):
+/// the turn still closes cleanly instead of failing, and it never pays for an
+/// inference — the check runs on the first send of the iteration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_with_no_reader_ends_the_turn_without_failing() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "chat-noreader-agent",
+        vec![MockResponse::text("Never read by anyone.").with_stop_reason(StopReason::EndTurn)],
+    )
+    .await;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    drop(rx);
+
+    let result = kernel
+        .chat_infer_streaming("chat-noreader-agent", &[], "Anyone there?", None, tx, None)
+        .await
+        .expect("a reader that is already gone is not a turn failure");
+
+    assert!(
+        result
+            .answer
+            .contains("[Note: stopped before the reply started.]"),
+        "got {:?}",
+        result.answer
+    );
+    assert_eq!(
+        result.tokens_used, 0,
+        "the turn must bail before paying for an inference"
     );
 
     kernel.shutdown();

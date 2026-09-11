@@ -603,6 +603,7 @@ impl Kernel {
                 persisted_description,
                 persisted_thinking_level,
                 persisted_system_prompt,
+                persisted_working_set_size,
                 created_at,
                 is_reconnect,
             ) = match registry.get_by_name(&name) {
@@ -614,6 +615,7 @@ impl Kernel {
                     existing.description.clone(),
                     existing.default_thinking_level.clone(),
                     existing.system_prompt.clone(),
+                    existing.working_set_size,
                     existing.created_at,
                     true,
                 ),
@@ -624,6 +626,7 @@ impl Kernel {
                     vec![],
                     String::new(),
                     ThinkingLevel::Off,
+                    None,
                     None,
                     now,
                     false,
@@ -804,6 +807,12 @@ impl Kernel {
                 public_key_hex,
                 base_url: effective_base_url,
                 manually_offline: false,
+                // Only settable via the settings endpoint; survives reconnect.
+                working_set_size: if is_reconnect {
+                    persisted_working_set_size
+                } else {
+                    None
+                },
             };
 
             // Remove stale Offline entry with same name when a new agent connects with a
@@ -1684,9 +1693,21 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
         drop(registry);
 
+        // Durable row first; the bus message reuses its id (see
+        // AgentInboxWriter::write_message).
+        let entry_id = self
+            .agent_inbox_writer
+            .write_message(
+                from_agent.id,
+                from_name.clone(),
+                to_agent.id,
+                content.clone(),
+            )
+            .await;
+
         let now = chrono::Utc::now();
         let mut msg = AgentMessage {
-            id: MessageID::new(),
+            id: MessageID::from_uuid(*entry_id.as_uuid()),
             from: from_agent.id,
             to: agentos_types::MessageTarget::Direct(to_agent.id),
             content: agentos_types::MessageContent::Text(content.clone()),
@@ -1712,11 +1733,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             }
         }
 
-        self.agent_inbox_writer
-            .write_message(from_agent.id, from_name.clone(), to_agent.id, content)
-            .await;
-
-        match self.message_bus.send_direct(msg).await {
+        match self.message_bus.send_direct(msg, 0).await {
             Ok(_) => KernelResponse::Success { data: None },
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
@@ -1764,9 +1781,13 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             }
         }
         drop(registry);
+        member_ids.sort_unstable();
+        member_ids.dedup();
 
         let group_id = GroupID::new();
-        self.message_bus.create_group(group_id, member_ids).await;
+        self.message_bus
+            .create_group(group_id, group_name.clone(), member_ids)
+            .await;
 
         KernelResponse::Success {
             data: Some(
@@ -1778,7 +1799,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
     pub(crate) async fn cmd_broadcast_to_group(
         &self,
         from_name: String,
-        _group_name: String,
+        group_name: String,
         content: String,
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
@@ -1797,12 +1818,26 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
         drop(registry);
 
+        // Groups live in memory and are lost on kernel restart — say so rather than
+        // silently fanning the message out to every agent (the old behaviour).
+        let (group_id, members) = match self.message_bus.group_by_name(&group_name).await {
+            Some(g) => g,
+            None => {
+                return KernelResponse::Error {
+                    message: format!(
+                        "Group '{}' not found — create it with `agentos agent group create {} --members <a,b>` (groups reset on kernel restart)",
+                        group_name, group_name
+                    ),
+                };
+            }
+        };
+
         let now = chrono::Utc::now();
         let mut msg = AgentMessage {
             id: MessageID::new(),
             from: from_agent.id,
-            to: agentos_types::MessageTarget::Broadcast,
-            content: agentos_types::MessageContent::Text(content),
+            to: agentos_types::MessageTarget::Group(group_id),
+            content: agentos_types::MessageContent::Text(content.clone()),
             reply_to: None,
             timestamp: now,
             trace_id: TraceID::new(),
@@ -1825,7 +1860,18 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             }
         }
 
-        match self.message_bus.broadcast(msg).await {
+        // Durable delivery, same as a direct message: one inbox entry per member.
+        for member in members.iter().filter(|id| **id != from_agent.id) {
+            self.agent_inbox_writer
+                .write_message(from_agent.id, from_name.clone(), *member, content.clone())
+                .await;
+        }
+
+        match self
+            .message_bus
+            .send_to_group(&group_id, &members, msg)
+            .await
+        {
             Ok(count) => KernelResponse::Success {
                 data: Some(serde_json::json!({ "sent_to": count })),
             },
@@ -2287,6 +2333,36 @@ mod tests {
         }
         bad.sort();
         assert!(bad.is_empty(), "unparseable manifest permissions: {bad:#?}");
+    }
+
+    /// Every permission a tool checks at runtime must be declared by some
+    /// manifest, because manifests — not the Rust check sites — are what the
+    /// operator-facing catalogues are generated from (the panel's Grant dialog
+    /// reads `permission-catalog.gen.ts`, built by scanning
+    /// `[capabilities_required]`). `fs.workspace` was checked in nine places in
+    /// `agentos-tools` and declared by none, so a workspace folder grant could
+    /// be handed out from the UI while the permission that unlocks it could not.
+    ///
+    /// Declaring it is a *visibility* statement, not an enforcement one — every
+    /// consumer of manifest permissions goes through `any_permission_granted`.
+    #[test]
+    fn fs_workspace_is_declared_by_a_manifest() {
+        let declaring: Vec<String> = core_manifests()
+            .into_iter()
+            .filter(|m| {
+                m.capabilities_required
+                    .permissions
+                    .iter()
+                    .any(|p| p.starts_with("fs.workspace:"))
+            })
+            .map(|m| m.manifest.name)
+            .collect();
+        assert!(
+            !declaring.is_empty(),
+            "no manifest declares fs.workspace — the panel Grant dialog cannot \
+             offer it, so an operator can grant a workspace path but never the \
+             permission that unlocks it"
+        );
     }
 
     /// Every tool the system ships in its own default chat inventory must be

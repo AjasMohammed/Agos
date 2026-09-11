@@ -76,7 +76,13 @@ impl ChannelAdapter for EmailAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
+        // `as_text()` deliberately omits media URLs; the action fallback is
+        // appended separately since email has no interactive primitive.
+        let text = format!(
+            "{}{}",
+            msg.content.as_text(),
+            agentos_types::render_actions_fallback(&msg.actions)
+        );
         let subject = msg.thread_id.as_deref().unwrap_or("[AgentOS] Notification");
 
         let email = Message::builder()

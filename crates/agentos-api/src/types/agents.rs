@@ -84,6 +84,20 @@ pub struct UpdateAgentSettingsRequest {
     /// `None` leaves the prompt untouched; `Some("")` clears it.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Per-agent tool working-set size (T1 tools pre-armed by retrieval).
+    /// Absent = unchanged; `null` = revert to the kernel default; `0` = pinned
+    /// tools only (small / low-TPM models).
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<usize>)]
+    pub working_set_size: Option<Option<usize>>,
+}
+
+/// Distinguish "field absent" (`None`) from "field is null" (`Some(None)`).
+fn double_option<'de, D>(d: D) -> Result<Option<Option<usize>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<usize>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

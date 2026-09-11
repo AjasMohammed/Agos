@@ -1,6 +1,11 @@
 tags = ["read", "write"]
 risk_class = "control_plane"
 
+# Per-action override: `list` enumerates allowlisted devices. `open`/`close`/
+# `read`/`write`/`control` all touch the device and keep control_plane.
+[risk_class_by_action]
+list = "readonly_external"
+
 [manifest]
 name        = "raw-usb"
 version     = "1.0.0"
@@ -28,6 +33,11 @@ output = "RawUsbResult"
 
 [payload_schema]
 type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
 description = "Raw USB operation"
 
 [payload_schema.properties.action]

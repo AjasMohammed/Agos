@@ -5,6 +5,8 @@
 // "Driver '…' not found" error — that is the graceful-degradation stub.
 #[cfg(all(feature = "audio", target_os = "linux"))]
 pub mod audio;
+#[cfg(all(feature = "audio", target_os = "linux"))]
+pub(crate) mod audio_sessions;
 #[cfg(all(feature = "bluetooth", target_os = "linux"))]
 pub mod bluetooth;
 #[cfg(all(feature = "display", target_os = "linux"))]
@@ -32,3 +34,5 @@ pub mod system;
 pub mod usb_storage;
 #[cfg(all(feature = "webcam", target_os = "linux"))]
 pub mod webcam;
+#[cfg(all(feature = "wifi", target_os = "linux"))]
+pub mod wifi;

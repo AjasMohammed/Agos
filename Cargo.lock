@@ -633,6 +633,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid",
+ "walkdir",
  "wiremock",
  "zeroize",
 ]

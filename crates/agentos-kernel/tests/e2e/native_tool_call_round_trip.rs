@@ -53,6 +53,7 @@ async fn register_mock_agent_keep_handle(
         default_thinking_level: ThinkingLevel::Off,
         system_prompt: None,
         manually_offline: false,
+        working_set_size: None,
     };
     let mock = Arc::new(MockLLMCore::with_responses(responses));
     kernel.agent_registry.write().await.register(profile);

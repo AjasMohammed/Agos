@@ -83,12 +83,7 @@ impl ChannelAdapter for WhatsAppAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text: String = msg
-            .content
-            .render_for_delivery()
-            .chars()
-            .take(4096)
-            .collect();
+        let text: String = msg.text_with_actions().chars().take(4096).collect();
         let url = format!(
             "https://graph.facebook.com/v18.0/{}/messages",
             self.phone_number_id
@@ -104,7 +99,28 @@ impl ChannelAdapter for WhatsAppAdapter {
         // the URL). Caption capped at WhatsApp's 1024-char limit.
         let images = msg.content.image_urls();
         let files = msg.content.files();
-        let caption: String = msg.content.text_caption().chars().take(1024).collect();
+        // WhatsApp cannot combine media with interactive buttons, so a media
+        // message carrying actions falls through to the branches below — which
+        // means the caption is the only place the commands can travel. Truncate
+        // the caption first, then append, so a cap never cuts mid-command.
+        let caption: String = {
+            let base: String = msg
+                .content
+                .text_caption()
+                .chars()
+                .take(
+                    1024_usize.saturating_sub(
+                        agentos_types::render_actions_fallback(&msg.actions)
+                            .chars()
+                            .count(),
+                    ),
+                )
+                .collect();
+            format!(
+                "{base}{}",
+                agentos_types::render_actions_fallback(&msg.actions)
+            )
+        };
         let payload = if images.len() == 1 && files.is_empty() {
             let mut media = serde_json::json!({ "link": images[0] });
             if !caption.trim().is_empty() {
@@ -127,6 +143,44 @@ impl ChannelAdapter for WhatsAppAdapter {
                 "to": recipient,
                 "type": "document",
                 "document": media,
+            })
+        } else if !msg.actions.is_empty() && images.is_empty() && files.is_empty() {
+            // Cloud API interactive reply buttons: max 3, title ≤ 20 chars,
+            // body ≤ 1024. `id` is the literal command and comes back on the
+            // webhook as `interactive.button_reply.id`, so a tap reaches the
+            // same handler as the typed command.
+            //
+            // Media is excluded deliberately: WhatsApp cannot combine an
+            // interactive message with an image/document, and dropping the
+            // attachment to gain buttons would lose information. Those fall
+            // through to the media branches above, where the commands ride in
+            // the caption instead.
+            let buttons: Vec<serde_json::Value> = msg
+                .actions
+                .iter()
+                .take(3)
+                .map(|a| {
+                    serde_json::json!({
+                        "type": "reply",
+                        "reply": { "id": a.command, "title": a.short_label(20) },
+                    })
+                })
+                .collect();
+            let body: String = msg
+                .content
+                .render_for_delivery()
+                .chars()
+                .take(1024)
+                .collect();
+            serde_json::json!({
+                "messaging_product": "whatsapp",
+                "to": recipient,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": { "text": body },
+                    "action": { "buttons": buttons },
+                },
             })
         } else {
             serde_json::json!({

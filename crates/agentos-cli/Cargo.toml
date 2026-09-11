@@ -48,6 +48,11 @@ zeroize = { workspace = true }
 [features]
 default = []
 otel = ["agentos-kernel/otel"]
+# Peripheral passthroughs: the HAL drivers are feature-gated in agentos-kernel,
+# and the registry drops their manifests unless the matching feature is on.
+bluetooth = ["agentos-kernel/bluetooth"]
+wifi = ["agentos-kernel/wifi"]
+all-peripherals = ["agentos-kernel/all-peripherals"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

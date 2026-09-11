@@ -217,6 +217,17 @@ async fn search_schedules(state: &AppState, needle: &str) -> Vec<serde_json::Val
 /// Resolve one typed mention to an escaped `<user_data>` context block.
 /// `None` when the entity does not exist — mirrors unknown-filename behavior
 /// in `resolve_at_mentions` (mention passes through unresolved).
+/// Adapts the web `AppState` to the kernel's mention hook so file and entity
+/// mentions resolve in one pass, in one loop, with one regex.
+pub struct AppStateEntities<'a>(pub &'a AppState);
+
+#[async_trait::async_trait]
+impl agentos_kernel::chat_ingest::MentionEntityResolver for AppStateEntities<'_> {
+    async fn resolve(&self, entity_type: &str, name: &str) -> Option<String> {
+        resolve_entity(self.0, entity_type, name).await
+    }
+}
+
 pub async fn resolve_entity(state: &AppState, entity_type: &str, name: &str) -> Option<String> {
     match entity_type {
         "task" => resolve_task(state, name).await,

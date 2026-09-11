@@ -56,6 +56,18 @@ pub fn parse_whatsapp_inbound(
                 let from = m["from"].as_str().unwrap_or("").to_string();
                 let mtype = m["type"].as_str().unwrap_or("text");
                 let mut text = m["text"]["body"].as_str().unwrap_or("").to_string();
+                // An interactive reply carries the tapped button's `id`, which
+                // is the literal command (see the outbound adapter), so it
+                // routes exactly like typed text. `list_reply` is included for
+                // the list variant even though nothing emits one yet.
+                if text.is_empty() {
+                    for kind in ["button_reply", "list_reply"] {
+                        if let Some(id) = m["interactive"][kind]["id"].as_str() {
+                            text = id.to_string();
+                            break;
+                        }
+                    }
+                }
                 // Captioned media (image/document/video) carries a `caption`.
                 if text.is_empty() {
                     if let Some(cap) = m[mtype]["caption"].as_str() {
@@ -152,5 +164,41 @@ mod tests {
             }}]}]
         });
         assert!(parse_whatsapp_inbound(&p, cid()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod interactive_reply_tests {
+    use super::*;
+
+    #[test]
+    fn button_reply_id_becomes_the_inbound_text() {
+        // The tapped button's `id` is the literal command the outbound adapter
+        // put there, so it routes exactly like typed text.
+        let payload = serde_json::json!({
+            "entry": [{ "changes": [{ "value": { "messages": [{
+                "from": "15551234567",
+                "type": "interactive",
+                "interactive": {
+                    "type": "button_reply",
+                    "button_reply": { "id": "/approve 42", "title": "Approve" }
+                }
+            }]}}]}]
+        });
+        let msgs = parse_whatsapp_inbound(&payload, ChannelInstanceID::new());
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "/approve 42");
+        assert_eq!(msgs[0].external_sender_id, "15551234567");
+    }
+
+    #[test]
+    fn plain_text_still_parses() {
+        let payload = serde_json::json!({
+            "entry": [{ "changes": [{ "value": { "messages": [{
+                "from": "15551234567", "type": "text", "text": { "body": "/deny 42" }
+            }]}}]}]
+        });
+        let msgs = parse_whatsapp_inbound(&payload, ChannelInstanceID::new());
+        assert_eq!(msgs[0].text, "/deny 42");
     }
 }

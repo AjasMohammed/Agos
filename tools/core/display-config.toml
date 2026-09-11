@@ -1,6 +1,16 @@
 tags = ["read"]
 risk_class = "control_plane"
 
+# Per-action override: `list` enumerates outputs. Every setter keeps the
+# tool-level control_plane.
+#
+# `test` is excluded even though it is a dry run (`--dryrun`, never applied):
+# it dispatches on an `operation` field the payload_schema below does not
+# declare, so its real surface is not described here. Erring strict costs one
+# prompt on an action that currently always errors anyway.
+[risk_class_by_action]
+list = "readonly_external"
+
 [manifest]
 name        = "display-config"
 version     = "1.0.0"
@@ -25,6 +35,11 @@ output = "DisplayConfigResult"
 
 [payload_schema]
 type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
 description = "Display configuration request"
 
 [payload_schema.properties.action]

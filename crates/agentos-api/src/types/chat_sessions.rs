@@ -132,4 +132,9 @@ pub struct ExportQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SendChatMessageRequest {
     pub text: String,
+    /// Comma-separated upload ids attached to this message (from
+    /// `GET /api/v1/files`). Resolved into context parts — extracted text for
+    /// documents, image parts for a vision-capable agent.
+    #[serde(default)]
+    pub file_ids: Option<String>,
 }

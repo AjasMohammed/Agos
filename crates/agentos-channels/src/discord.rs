@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, warn};
 use zeroize::Zeroizing;
 
 /// Build inbound message content from a Discord `MESSAGE_CREATE` `d` object,
@@ -109,6 +109,12 @@ impl ChannelAdapter for DiscordAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
+        // Controls render as button components, so the text fallback is only
+        // used when there are none — appending it alongside the buttons would
+        // show the same commands twice.
+        // `render_for_delivery`, not `text_with_actions`: controls render as
+        // button components below, so appending the text instructions too
+        // would show the same commands twice.
         let text: String = msg
             .content
             .render_for_delivery()
@@ -119,12 +125,17 @@ impl ChannelAdapter for DiscordAdapter {
         let client = &self.client;
         let auth = self.auth_header();
         let policy = crate::retry::RetryPolicy::default();
+        let components = message_components(&msg.actions);
 
         crate::retry::with_retry(&policy, "discord", || async {
+            let mut payload = serde_json::json!({"content": &text});
+            if !components.is_null() {
+                payload["components"] = components.clone();
+            }
             let resp = client
                 .post(&url)
                 .header("Authorization", &auth)
-                .json(&serde_json::json!({"content": &text}))
+                .json(&payload)
                 .send()
                 .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
@@ -154,6 +165,10 @@ impl ChannelAdapter for DiscordAdapter {
         let instance_id = self.instance_id.clone();
         let channel_id = self.channel_id.clone();
         let listener_alive = self.listener_alive.clone();
+        // Needed to acknowledge component interactions: Discord shows "This
+        // interaction failed" unless the callback endpoint is hit within 3s.
+        let http = self.client.clone();
+        let auth = self.auth_header();
 
         let mut reconnect_delay = std::time::Duration::from_secs(1);
         let max_reconnect_delay = std::time::Duration::from_secs(60);
@@ -253,6 +268,45 @@ impl ChannelAdapter for DiscordAdapter {
                                             if event_type == Some("READY") {
                                                 // Gateway is ready and authenticated.
                                                 listener_alive.store(true, Ordering::Release);
+                                            }
+                                            // A button press arrives here, not as a message.
+                                            // `custom_id` is the literal command, so it feeds the
+                                            // same inbound path as typed text.
+                                            if event_type == Some("INTERACTION_CREATE") {
+                                                let d = &payload["d"];
+                                                if let Some(inbound) = interaction_inbound(
+                                                    d,
+                                                    &channel_id,
+                                                    &instance_id,
+                                                    &payload,
+                                                ) {
+                                                    // Ack first, and never block on it: the 3s
+                                                    // budget is Discord's, and the escalation's own
+                                                    // reply comes back through the normal outbound
+                                                    // path. Type 6 = DEFERRED_UPDATE_MESSAGE, which
+                                                    // clears the spinner and changes nothing.
+                                                    if let (Some(id), Some(token)) =
+                                                        (d["id"].as_str(), d["token"].as_str())
+                                                    {
+                                                        let ack_url = format!(
+                                                            "https://discord.com/api/v10/interactions/{id}/{token}/callback"
+                                                        );
+                                                        let http = http.clone();
+                                                        let auth = auth.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Err(e) = http
+                                                                .post(&ack_url)
+                                                                .header("Authorization", &auth)
+                                                                .json(&serde_json::json!({"type": 6}))
+                                                                .send()
+                                                                .await
+                                                            {
+                                                                warn!("Discord interaction ack failed: {e}");
+                                                            }
+                                                        });
+                                                    }
+                                                    let _ = tx.send(inbound).await;
+                                                }
                                             }
                                             if event_type == Some("MESSAGE_CREATE") {
                                                 let d = &payload["d"];
@@ -477,5 +531,219 @@ mod tests {
     fn whitespace_only_text_is_none() {
         let d = json!({ "content": "   ", "attachments": [] });
         assert!(discord_message_content(&d).is_none());
+    }
+}
+
+/// Build Discord button components from actionable controls.
+///
+/// `custom_id` is the literal command, returned verbatim in the
+/// `INTERACTION_CREATE` payload — so a press routes to the same handler as the
+/// typed command. Discord caps `custom_id` at 100 characters, looser than the
+/// 64-byte cap `PromptAction::fits_callback_data` already enforced upstream.
+fn message_components(actions: &[agentos_types::PromptAction]) -> serde_json::Value {
+    use agentos_types::ActionStyle;
+    if actions.is_empty() {
+        return serde_json::Value::Null;
+    }
+    // Max 5 buttons per action row, max 5 rows.
+    let rows: Vec<serde_json::Value> = actions
+        .chunks(5)
+        .take(5)
+        .map(|row| {
+            let buttons: Vec<serde_json::Value> = row
+                .iter()
+                .map(|a| {
+                    let style = match a.style {
+                        ActionStyle::Primary => 1,
+                        ActionStyle::Secondary => 2,
+                        ActionStyle::Danger => 4,
+                    };
+                    serde_json::json!({
+                        "type": 2,
+                        "style": style,
+                        "label": a.short_label(80),
+                        "custom_id": a.command,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "type": 1, "components": buttons })
+        })
+        .collect();
+    serde_json::json!(rows)
+}
+
+#[cfg(test)]
+mod action_component_tests {
+    use super::*;
+    use agentos_types::{ActionStyle, PromptAction};
+
+    fn actions() -> Vec<PromptAction> {
+        vec![
+            PromptAction::new("✅ Approve", "/approve 42", ActionStyle::Primary),
+            PromptAction::new("❌ Deny", "/deny 42", ActionStyle::Danger),
+            PromptAction::new(
+                "✅ Approve & always allow",
+                "/approve 42 always",
+                ActionStyle::Secondary,
+            ),
+        ]
+    }
+
+    #[test]
+    fn no_actions_yields_null_so_the_payload_key_is_omitted() {
+        assert!(message_components(&[]).is_null());
+    }
+
+    #[test]
+    fn custom_id_is_the_command_verbatim() {
+        // A truncated custom_id would resolve a different escalation.
+        let v = message_components(&actions());
+        let row = &v[0]["components"];
+        assert_eq!(row[0]["custom_id"], "/approve 42");
+        assert_eq!(row[1]["custom_id"], "/deny 42");
+        assert_eq!(row[2]["custom_id"], "/approve 42 always");
+    }
+
+    #[test]
+    fn styles_map_to_discord_numbers() {
+        let v = message_components(&actions());
+        let row = &v[0]["components"];
+        assert_eq!(row[0]["style"], 1, "primary");
+        assert_eq!(row[1]["style"], 4, "danger");
+        assert_eq!(row[2]["style"], 2, "secondary");
+        assert_eq!(v[0]["type"], 1, "action row");
+        assert_eq!(row[0]["type"], 2, "button");
+    }
+
+    #[test]
+    fn rows_hold_at_most_five_buttons() {
+        let many: Vec<PromptAction> = (0..7)
+            .map(|i| PromptAction::new(format!("o{i}"), format!("/x {i}"), ActionStyle::Secondary))
+            .collect();
+        let v = message_components(&many);
+        assert_eq!(v.as_array().expect("rows").len(), 2);
+        assert_eq!(v[0]["components"].as_array().expect("row").len(), 5);
+        assert_eq!(v[1]["components"].as_array().expect("row").len(), 2);
+    }
+}
+
+/// Build an `InboundMessage` from a Discord `INTERACTION_CREATE` `d` object,
+/// or `None` if it is not a component press this channel should act on.
+///
+/// Extracted from the gateway loop because this is the one place in the button
+/// path where a wrong `platform_id` would hand escalation authority to the
+/// wrong identity — it needs to be directly testable.
+fn interaction_inbound(
+    d: &serde_json::Value,
+    channel_id: &str,
+    instance_id: &str,
+    raw: &serde_json::Value,
+) -> Option<InboundMessage> {
+    // 3 == MESSAGE_COMPONENT. Anything else (slash command, modal) is not ours.
+    if d["type"].as_u64() != Some(3) {
+        return None;
+    }
+    if d["channel_id"].as_str() != Some(channel_id) {
+        return None;
+    }
+    let custom_id = d["data"]["custom_id"].as_str().unwrap_or("");
+    if custom_id.is_empty() {
+        return None;
+    }
+    // The presser, not the channel and not the message author: a guild button
+    // press is under `member.user`, a DM press under `user`. Using the message
+    // author would attribute the tap to the bot that posted the keyboard.
+    let presser = if d["member"]["user"]["id"].is_string() {
+        &d["member"]["user"]
+    } else {
+        &d["user"]
+    };
+    // Mirror the MESSAGE_CREATE loop guard. Components cannot be pressed by a
+    // bot today, but the two paths should not disagree about it.
+    if presser["bot"].as_bool() == Some(true) {
+        return None;
+    }
+    Some(InboundMessage {
+        id: d["id"].as_str().unwrap_or("").to_string(),
+        channel_type: "discord".to_string(),
+        channel_instance_id: instance_id.to_string(),
+        sender: ChannelIdentity {
+            platform_id: presser["id"].as_str().unwrap_or("").to_string(),
+            display_name: presser["username"].as_str().map(String::from),
+        },
+        content: MessageContent::Text(custom_id.to_string()),
+        thread_id: None,
+        timestamp: chrono::Utc::now(),
+        raw: raw.clone(),
+    })
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    fn press(overrides: serde_json::Value) -> serde_json::Value {
+        let mut d = serde_json::json!({
+            "id": "i1",
+            "type": 3,
+            "channel_id": "chan-1",
+            "token": "tok",
+            "data": { "custom_id": "/approve 42" },
+            "member": { "user": { "id": "user-9", "username": "ajas" } }
+        });
+        if let (Some(base), Some(ov)) = (d.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ov {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        d
+    }
+
+    #[test]
+    fn guild_press_is_attributed_to_the_presser_not_the_bot() {
+        let d = press(serde_json::json!({}));
+        let m = interaction_inbound(&d, "chan-1", "inst-1", &d).expect("press must yield inbound");
+        // This is the pairing-allowlist identity — the same field the
+        // MESSAGE_CREATE arm fills from `author.id`.
+        assert_eq!(m.sender.platform_id, "user-9");
+        assert_eq!(m.content.as_text(), "/approve 42");
+    }
+
+    #[test]
+    fn dm_press_reads_the_top_level_user() {
+        let d = press(serde_json::json!({
+            "member": serde_json::Value::Null,
+            "user": { "id": "dm-user", "username": "ajas" }
+        }));
+        let m = interaction_inbound(&d, "chan-1", "inst-1", &d).expect("dm press");
+        assert_eq!(m.sender.platform_id, "dm-user");
+    }
+
+    #[test]
+    fn press_from_another_channel_is_ignored() {
+        // Without this the bot would accept approvals from any channel it can
+        // see, bypassing the pairing scope.
+        let d = press(serde_json::json!({ "channel_id": "other" }));
+        assert!(interaction_inbound(&d, "chan-1", "inst-1", &d).is_none());
+    }
+
+    #[test]
+    fn non_component_interactions_are_ignored() {
+        let d = press(serde_json::json!({ "type": 2 }));
+        assert!(interaction_inbound(&d, "chan-1", "inst-1", &d).is_none());
+    }
+
+    #[test]
+    fn empty_custom_id_is_ignored() {
+        let d = press(serde_json::json!({ "data": { "custom_id": "" } }));
+        assert!(interaction_inbound(&d, "chan-1", "inst-1", &d).is_none());
+    }
+
+    #[test]
+    fn bot_press_is_ignored_like_bot_messages() {
+        let d = press(serde_json::json!({
+            "member": { "user": { "id": "b1", "username": "bot", "bot": true } }
+        }));
+        assert!(interaction_inbound(&d, "chan-1", "inst-1", &d).is_none());
     }
 }

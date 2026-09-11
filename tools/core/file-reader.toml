@@ -4,14 +4,14 @@ risk_class = "readonly_external"
 [manifest]
 name        = "file-reader"
 version     = "1.1.0"
-description = "Reads files from the data directory with line-based pagination and directory listing. Respects write locks — returns FileLocked if another agent is writing."
+description = "Reads files and lists directories with line-based pagination. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Respects write locks — returns FileLocked if another agent is writing."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 search_hints = ["read a file", "open config", "cat a path", "show file contents"]
 
 [capabilities_required]
-permissions = ["fs.user_data:r"]
+permissions = ["fs.user_data:r", "fs.workspace:r"]
 
 [capabilities_provided]
 outputs = ["content.text"]
@@ -26,7 +26,7 @@ required = ["path"]
 
 [payload_schema.properties.path]
 type = "string"
-description = "Relative path to file or directory"
+description = "Path to file or directory: relative (under your home dir) or absolute inside a granted folder"
 
 [payload_schema.properties.mode]
 type = "string"

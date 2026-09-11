@@ -51,6 +51,7 @@ bluetooth = ["dep:bluer"]
 display = ["dep:wayland-client", "dep:wayland-protocols-wlr"]
 raw-usb = ["dep:nusb"]
 webcam = ["dep:v4l"]
+wifi = []
 mqtt = ["dep:rumqttc"]
 homeassistant = ["dep:reqwest"]
 

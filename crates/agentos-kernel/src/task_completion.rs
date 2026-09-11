@@ -493,6 +493,7 @@ impl Kernel {
         });
 
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,
@@ -1450,6 +1451,7 @@ impl Kernel {
         };
 
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: Some(task.id),

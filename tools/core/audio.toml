@@ -1,10 +1,27 @@
 tags = ["read", "write"]
 risk_class = "control_plane"
 
+# Per-action override: `list` enumerates sinks/sources. `capture`, `playback`,
+# `volume` and `mute` all change state and keep the tool-level control_plane.
+#
+# The playback lifecycle actions are here because they address a session handle,
+# never a device: the sink was gated when `playback` started the session, the
+# driver only accepts them from the agent that owns it, and they cannot start
+# audio, reach another sink or capture anything — their blast radius is a strict
+# subset of the playback the operator already approved, and `playback_stop` only
+# ever reduces it. Without this, "stop the music" raises an approval prompt, the
+# one case where waiting on a human is actively harmful.
+[risk_class_by_action]
+list = "readonly_external"
+playback_pause = "readonly_external"
+playback_resume = "readonly_external"
+playback_stop = "readonly_external"
+playback_status = "readonly_external"
+
 [manifest]
 name        = "audio"
 version     = "1.0.0"
-description = "List audio devices, capture audio, play back audio files, and adjust volume through the HAL audio driver."
+description = "List audio devices, capture audio, play back audio files (pause/resume/stop them), and adjust volume or mute state through the HAL audio driver."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "hal"
@@ -28,11 +45,16 @@ output = "AudioResult"
 
 [payload_schema]
 type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
 description = "Audio operation request"
 
 [payload_schema.properties.action]
 type = "string"
-enum = ["list", "capture", "playback", "volume", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
+enum = ["list", "capture", "playback", "playback_pause", "playback_resume", "playback_stop", "playback_status", "volume", "mute", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
 default = "list"
 description = "Audio action to execute."
 
@@ -60,13 +82,32 @@ description = "Absolute output path for captured audio."
 
 [payload_schema.properties.audio_path]
 type = "string"
-description = "Absolute path to an audio file for playback."
+description = "Absolute path to an audio file for playback. WAV/FLAC/OGG play directly; other containers (MP3, M4A, AAC) are transcoded via ffmpeg first, which must be installed."
+
+[payload_schema.properties.max_seconds]
+type = "integer"
+minimum = 1
+maximum = 3600
+description = "Playback duration cap in seconds (default 300). Time spent paused does not count against it. A track cut short by the cap ends in state \"truncated\"."
+
+[payload_schema.properties.playback_id]
+type = "string"
+description = "Session handle returned by action \"playback\". Required by playback_pause and playback_resume. Optional for playback_stop (omit to stop every session you started) and playback_status (omit to list them)."
+
+[payload_schema.properties.wait]
+type = "boolean"
+default = false
+description = "Block until the track finishes instead of returning a playback_id immediately. Only for short notification sounds — it parks the whole turn for the length of the audio."
 
 [payload_schema.properties.volume]
 type = "number"
 minimum = 0
 maximum = 1
 description = "Volume level between 0.0 and 1.0. Omit to read current level."
+
+[payload_schema.properties.muted]
+type = "boolean"
+description = "Mute (true) or unmute (false) the node. Omit to read current mute state."
 
 [payload_schema.properties.ttl_seconds]
 type = "integer"
@@ -88,8 +129,24 @@ payload = { action = "list" }
 
 [[examples]]
 description = "Capture 10 seconds from source audio:47"
-payload = { action = "capture", source = "audio:47", duration_seconds = 10, output_path = "/tmp/agentos-capture.wav" }
+payload = { action = "capture", source = "<source device_id from action=list>", duration_seconds = 10, output_path = "/tmp/agentos-capture.wav" }
 
 [[examples]]
-description = "Play back a local audio file"
-payload = { action = "playback", audio_path = "/tmp/alert.wav", sink = "audio:62" }
+description = "Start playback; returns a playback_id immediately, the track keeps playing"
+payload = { action = "playback", audio_path = "/tmp/alert.wav", sink = "<sink device_id from action=list>" }
+
+[[examples]]
+description = "Pause, then resume, a running track"
+payload = { action = "playback_pause", playback_id = "<playback_id from action=playback>" }
+
+[[examples]]
+description = "Stop everything this agent is playing"
+payload = { action = "playback_stop" }
+
+[[examples]]
+description = "Check what is playing and how far in"
+payload = { action = "playback_status" }
+
+[[examples]]
+description = "Unmute a sink"
+payload = { action = "mute", node_id = "<sink device_id from action=list>", muted = false }

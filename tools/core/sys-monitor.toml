@@ -4,15 +4,15 @@ risk_class = "readonly_scoped"
 [manifest]
 name        = "sys-monitor"
 version     = "1.0.0"
-description = "Return live system monitoring stats (CPU load, memory usage, process counts) via the Hardware Abstraction Layer."
+description = "Return live system monitoring stats (CPU load, memory usage, swap, disk usage, uptime, and battery charge/charging state) via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "system"
-search_hints = ["cpu load", "memory usage", "disk space", "how busy is the machine"]
+search_hints = ["cpu load", "memory usage", "disk space", "how busy is the machine", "battery percentage", "battery level", "is it charging", "power state"]
 
 [manifest.usage_hints]
-use_for = ["Checking current CPU/memory load", "Lightweight host health snapshot"]
-prefer_over = ["shell-exec top", "shell-exec free", "shell-exec uptime"]
+use_for = ["Checking current CPU/memory load", "Reading battery charge and charging state", "Lightweight host health snapshot"]
+prefer_over = ["shell-exec top", "shell-exec free", "shell-exec uptime", "shell-exec acpi", "shell-exec upower"]
 quick_example = {}
 
 [capabilities_required]

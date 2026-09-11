@@ -1,0 +1,104 @@
+tags = ["read", "write", "network"]
+risk_class = "control_plane"
+
+# Per-action overrides. `connect`/`disconnect`/`radio` keep the tool-level
+# control_plane; these two change nothing.
+#
+# `readonly_external`, never `readonly_scoped`: the latter is Allow under
+# `deny` as well, and neither of these should punch through an operator's
+# `deny`. `scan` is not free either — it forces `--rescan yes`, taking a
+# single-radio adapter off-channel for several seconds, which is a measurable
+# latency cost on an active connection. Still a read, but not a no-op.
+[risk_class_by_action]
+status = "readonly_external"
+scan = "readonly_external"
+
+[manifest]
+name        = "wifi"
+version     = "1.0.0"
+description = "Inspect WiFi radio and interface state, scan for access points, connect/disconnect, and toggle the radio via the HAL wifi driver (NetworkManager)."
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "hal"
+
+[capabilities_required]
+permissions = [
+  "hardware.wifi.list:r",
+  "hardware.wifi.scan:o",
+  "hardware.wifi.connection:x",
+  "hardware.wifi.radio:x",
+]
+
+[capabilities_provided]
+outputs = ["hardware.wifi", "content.structured"]
+
+[intent_schema]
+input  = "WifiIntent"
+output = "WifiResult"
+
+[payload_schema]
+type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
+description = "WiFi operation request"
+
+[payload_schema.properties.action]
+type = "string"
+enum = ["status", "scan", "connect", "disconnect", "radio"]
+default = "status"
+description = "WiFi action to execute."
+
+[payload_schema.properties.ssid]
+type = "string"
+maxLength = 128
+description = "Network SSID. Required for 'connect'. Must not start with '-'."
+
+[payload_schema.properties.password]
+type = "string"
+maxLength = 128
+description = "Pre-shared key for a secured network. Omit for open networks or when a saved profile already holds the secret."
+
+[payload_schema.properties.ifname]
+type = "string"
+maxLength = 128
+pattern = "^[A-Za-z0-9._:-]+$"
+description = "WiFi interface, e.g. 'wlan0'. Required for 'disconnect'; optional for 'scan' and 'connect'."
+
+[payload_schema.properties.enabled]
+type = "boolean"
+description = "Desired radio state for the 'radio' action: true powers WiFi on, false powers it off."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 60000
+syscalls      = []
+
+[[examples]]
+description = "Show radio state and WiFi interfaces"
+payload = { action = "status" }
+
+[[examples]]
+description = "Scan for nearby access points"
+payload = { action = "scan" }
+
+[[examples]]
+description = "Connect to a WPA network"
+payload = { action = "connect", ssid = "HomeNet", password = "hunter2hunter2" }
+
+[[examples]]
+description = "Connect to a network with a saved profile"
+payload = { action = "connect", ssid = "HomeNet" }
+
+[[examples]]
+description = "Disconnect an interface"
+payload = { action = "disconnect", ifname = "wlan0" }
+
+[[examples]]
+description = "Turn the WiFi radio off"
+payload = { action = "radio", enabled = false }

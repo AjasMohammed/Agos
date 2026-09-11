@@ -27,6 +27,9 @@ mod multimodal_chat;
 #[path = "e2e/chat_manifest_selection.rs"]
 mod chat_manifest_selection;
 
+#[path = "e2e/convo_runner_e2e.rs"]
+mod convo_runner_e2e;
+
 #[path = "e2e/native_tool_call_round_trip.rs"]
 mod native_tool_call_round_trip;
 
@@ -50,3 +53,6 @@ mod heartbeat_work_loop_e2e;
 
 #[path = "e2e/runaway_containment_e2e.rs"]
 mod runaway_containment_e2e;
+
+#[path = "e2e/agent_inbox_e2e.rs"]
+mod agent_inbox_e2e;

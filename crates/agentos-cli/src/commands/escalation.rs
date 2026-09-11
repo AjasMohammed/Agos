@@ -75,8 +75,13 @@ pub async fn handle(client: &mut BusClient, command: EscalationCommands) -> anyh
                             .unwrap_or("-");
                         let short_task = &task_id[..task_id.len().min(8)];
                         let status = if resolved { "resolved" } else { "pending" };
-                        let summary_short = if summary.len() > 40 {
-                            format!("{}...", &summary[..40])
+                        // First line only: `context_summary` is a multi-line
+                        // Who/What/Where/Why block and the rest would wreck the
+                        // table. Chars, not bytes — a byte slice can land
+                        // mid-codepoint and panic.
+                        let summary = summary.lines().next().unwrap_or("-");
+                        let summary_short = if summary.chars().count() > 40 {
+                            format!("{}...", summary.chars().take(40).collect::<String>())
                         } else {
                             summary.to_string()
                         };

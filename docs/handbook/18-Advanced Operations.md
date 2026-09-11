@@ -98,6 +98,7 @@ The HAL ships **20 drivers** — some always available, others feature-gated at 
 | `raw_usb` | `raw-usb` | Direct USB device access (bulk/interrupt/control transfers) |
 | `usb_storage` | `usb-storage` | USB mass storage mount/unmount/eject via UDisks2 |
 | `webcam` | `webcam` | Webcam image and burst capture via Video4Linux |
+| `wifi` | `wifi` | WiFi status, AP scan, connect/disconnect, radio toggle via NetworkManager (`nmcli`) |
 | `mqtt` | `mqtt` | MQTT broker bridge — publish, subscribe, and back IoT device twins |
 | `homeassistant` | `homeassistant` | Home Assistant integration — enumerate entities, set states, observe events |
 
@@ -118,7 +119,7 @@ Feature-gated drivers are compiled only when their feature flag is enabled:
 cargo build -p agentos-kernel --features audio,bluetooth,webcam
 
 # Build with all peripheral drivers
-cargo build -p agentos-kernel --features audio,bluetooth,display,printer,raw-usb,usb-storage,webcam
+cargo build -p agentos-kernel --features all-peripherals
 ```
 
 ### Consent Store

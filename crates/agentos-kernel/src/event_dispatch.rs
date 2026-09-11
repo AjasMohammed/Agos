@@ -512,7 +512,7 @@ impl Kernel {
             EventSource::AgentMessageBus,
             notif.severity,
             notif.payload,
-            0,
+            notif.chain_depth,
         )
         .await;
     }
@@ -736,7 +736,27 @@ impl Kernel {
         }
 
         // Evaluate subscriptions
-        let matching_subs = self.event_bus.evaluate_subscriptions(&event).await;
+        let mut matching_subs = self.event_bus.evaluate_subscriptions(&event).await;
+
+        // A direct message concerns exactly one agent. The catch-all role seeds
+        // every agent with an `Exact(DirectMessageReceived)` subscription whose
+        // payload `filter` is None, and AgentCommunication bypasses batching — so
+        // without this scope one DM would spawn a reaction task (a full inference)
+        // on every online agent, each prompted to "reply directly using
+        // agent-message", and every reply would fan out again. Bystanders are
+        // dropped outright: a DM addressed to someone else is not their business,
+        // so it does not go to their inbox either. Fails open if the payload has
+        // no parseable `to_agent`.
+        if event.event_type == EventType::DirectMessageReceived {
+            if let Some(to) = event
+                .payload
+                .get("to_agent")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<AgentID>().ok())
+            {
+                matching_subs.retain(|sub| sub.agent_id == to);
+            }
+        }
 
         // Exclude the causing agent from being triggered by events about its own
         // activity. A triggered task emits its own TaskStarted/TaskFailed/...,
@@ -756,7 +776,6 @@ impl Kernel {
         // now handled below by `is_budget_event`, which drops the reaction task
         // for EVERY subscriber, not just the agent that tripped it.
         let self_excludable = is_self_excludable(event.event_type);
-        let mut matching_subs = matching_subs;
         if self_excludable {
             if let Some(causer) = causing_agent(&event.payload) {
                 let mut kept = Vec::with_capacity(matching_subs.len());

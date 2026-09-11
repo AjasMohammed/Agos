@@ -430,34 +430,78 @@ impl FileStore {
         Ok(path)
     }
 
-    /// Delete `derived` records older than `max_age_hours` and return their disk
-    /// paths so the caller can unlink them.
+    /// Delete `derived` records older than `max_age_hours` and return their
+    /// `(id, disk path)` pairs so the caller can unlink them.
     ///
     /// Derived files (rendered scanned-PDF pages) are machine-generated and
     /// hidden from the Files page, so a user can never remove them by hand —
     /// without this they accumulate forever. Callers invoke it opportunistically
     /// when writing a new derived file; there is no separate sweeper.
-    pub fn prune_derived(&self, max_age_hours: u32) -> Result<Vec<String>, rusqlite::Error> {
+    pub fn prune_derived(
+        &self,
+        max_age_hours: u32,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        self.prune_older_than("scope = 'derived'", max_age_hours)
+    }
+
+    /// Delete inbound channel media older than `max_age_hours` and return their
+    /// `(id, disk path)` pairs so the caller can unlink them.
+    ///
+    /// Files arriving from a chat channel are tagged `inbound` by the kernel's
+    /// attachment sink. Nothing else writes that tag and no sender-controlled
+    /// value reaches it. Without this the uploads directory has no ceiling: a
+    /// paired sender can push 20 MiB x 5 attachments per message forever, and
+    /// nobody is watching the Files page.
+    pub fn prune_inbound_media(
+        &self,
+        max_age_hours: u32,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        self.prune_older_than(INBOUND_TAG_PREDICATE, max_age_hours)
+    }
+
+    /// Shared body for the prune helpers: delete every row matching `predicate`
+    /// and older than `max_age_hours`, returning `(id, disk path)` pairs.
+    ///
+    /// The id travels with the path because a pruned upload can have copies
+    /// materialized under agent homes (`user-file-reader` `mode: "handle"`),
+    /// and those directories are named by file id. Returning only the path
+    /// would leave them behind with nothing left to identify them by.
+    ///
+    /// `predicate` is a static SQL fragment chosen by the caller above — never
+    /// user input, and never interpolated from one.
+    fn prune_older_than(
+        &self,
+        predicate: &str,
+        max_age_hours: u32,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let cutoff = format!("-{max_age_hours} hours");
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let paths: Vec<String> = {
-            let mut stmt = conn.prepare(
-                "SELECT path FROM uploaded_files
-                 WHERE scope = 'derived' AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
-            )?;
-            let rows = stmt.query_map(params![cutoff], |row| row.get(0))?;
+        let paths: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, path FROM uploaded_files
+                 WHERE {predicate} AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)"
+            ))?;
+            let rows = stmt.query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<Result<_, _>>()?
         };
         if !paths.is_empty() {
             conn.execute(
-                "DELETE FROM uploaded_files
-                 WHERE scope = 'derived' AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+                &format!(
+                    "DELETE FROM uploaded_files
+                     WHERE {predicate} AND uploaded_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)"
+                ),
                 params![cutoff],
             )?;
         }
         Ok(paths)
     }
 }
+
+/// Matches rows the attachment sink wrote for inbound channel media. Comma-wrapped
+/// so it keys on the whole tag, and so a legacy `inbound,telegram` row still hits.
+/// `agentos_tools::user_files` carries its own copy of this predicate: the tools
+/// crate sits below this one in the dependency graph and cannot import it.
+const INBOUND_TAG_PREDICATE: &str = "','||tags||',' LIKE '%,inbound,%'";
 
 fn parse_tags(raw: String) -> Vec<String> {
     raw.split(',')
@@ -555,6 +599,70 @@ mod tests {
             got_b.is_empty(),
             "other principal must not see non-legacy uploads"
         );
+    }
+
+    /// Inbound channel media is the only thing that grows without an operator
+    /// ever touching it, so the TTL sweep must catch aged inbound rows and
+    /// nothing else — not a fresh attachment, not an operator upload.
+    #[test]
+    fn prune_inbound_media_only_takes_aged_inbound_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::open(dir.path()).expect("open");
+
+        let register = |id: &str, tags: &str| {
+            let path = store.uploads_dir.join(format!("{id}_f.bin"));
+            fs::write(&path, b"x").expect("write");
+            store
+                .register_file(
+                    id,
+                    "f.bin",
+                    "application/octet-stream",
+                    1,
+                    &path.to_string_lossy(),
+                    tags,
+                    "owner",
+                    "global",
+                )
+                .expect("register");
+            path
+        };
+        let old_inbound = "33333333-3333-3333-3333-333333333333";
+        let new_inbound = "44444444-4444-4444-4444-444444444444";
+        let old_upload = "55555555-5555-5555-5555-555555555555";
+        let old_inbound_path = register(old_inbound, "inbound");
+        register(new_inbound, "inbound");
+        register(old_upload, "");
+
+        // Age two rows past the TTL. `register_file` stamps `now`, so backdating
+        // needs a direct write; a second connection on the same WAL db is enough.
+        let side = Connection::open(store.uploads_dir.join("file_registry.db")).expect("side conn");
+        side.execute(
+            "UPDATE uploaded_files SET uploaded_at = '2020-01-01T00:00:00Z' WHERE id IN (?1, ?2)",
+            params![old_inbound, old_upload],
+        )
+        .expect("backdate");
+
+        let pruned = store.prune_inbound_media(24).expect("prune");
+        assert_eq!(
+            pruned,
+            vec![(
+                old_inbound.to_string(),
+                old_inbound_path.to_string_lossy().to_string()
+            )],
+            "only the aged inbound row is swept, with the id its handles are filed under"
+        );
+
+        let survivors = store.list_files("owner", Some("global")).expect("list");
+        let ids: Vec<&str> = survivors.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&new_inbound),
+            "fresh inbound media kept: {ids:?}"
+        );
+        assert!(
+            ids.contains(&old_upload),
+            "operator uploads are not inbound media: {ids:?}"
+        );
+        assert!(!ids.contains(&old_inbound));
     }
 
     #[test]

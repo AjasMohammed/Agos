@@ -598,6 +598,7 @@ fn row_to_user_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<UserM
     });
 
     Ok(Ok(UserMessage {
+        actions: Vec::new(),
         id,
         from,
         task_id,

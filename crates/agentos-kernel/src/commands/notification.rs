@@ -43,6 +43,7 @@ impl Kernel {
         };
 
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from,
             task_id: None,

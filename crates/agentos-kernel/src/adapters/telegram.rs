@@ -196,6 +196,12 @@ impl TelegramDeliveryAdapter {
         }
     }
 
+    /// Bot API endpoint for `method`.
+    ///
+    /// The bot token is part of the path. Every `reqwest::Error` from a request
+    /// built on this URL therefore carries the token in its `Display`, so such
+    /// errors must always be replaced with a constant — never formatted into a
+    /// log line or a `DeliveryError`.
     fn api_url(&self, method: &str) -> String {
         format!(
             "https://api.telegram.org/bot{}/{method}",
@@ -496,6 +502,61 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
 
     async fn is_available(&self) -> bool {
         !self.bot_token.is_empty() && !self.chat_id.read().await.is_empty()
+    }
+
+    /// `sendChatAction` with `action=typing`. Telegram clears the indicator
+    /// after ~5s or when the bot sends a message, whichever comes first, so the
+    /// caller re-pings on a timer and never has to stop it explicitly.
+    ///
+    /// Deliberately posts directly instead of going through
+    /// `telegram_post_json_with_retry`: that helper sleeps out a 429 flood-wait
+    /// for up to an hour, and a cosmetic ping must never hold a task that long.
+    /// A dropped indicator is invisible; a stalled one is a bug.
+    async fn typing(&self) -> Result<(), DeliveryError> {
+        let chat_id: String = {
+            let guard = self.chat_id.read().await;
+            if guard.is_empty() {
+                // Auto-discovery has not run yet — there is no one to show it to.
+                return Ok(());
+            }
+            guard.clone()
+        };
+
+        let resp = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&json!({ "chat_id": chat_id, "action": "typing" }))
+            .send()
+            .await
+            .map_err(|_| {
+                DeliveryError("Telegram sendChatAction failed (details redacted)".into())
+            })?;
+
+        // `reqwest` only errors on transport failures, so a revoked token (401),
+        // an unknown chat (400) and flood control (429) all arrive here as `Ok`.
+        //
+        // Always read the body, on success as well as failure. Two reasons:
+        // the status alone cannot tell "chat not found" from "bot was blocked by
+        // the user" from "not enough rights" — three different operator actions —
+        // and under HTTP/1.1 a response whose body is dropped unread costs the
+        // pooled connection, which would mean a fresh TLS handshake every 4s on
+        // the same client that delivers real messages.
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+
+        // Telegram also reports failure as HTTP 200 with `{"ok": false, …}`, so
+        // the status is necessary but not sufficient.
+        //
+        // `telegram_error_summary` is used rather than `error_for_status()`
+        // because it reads `description`/`error_code` out of the body: the URL
+        // carries the bot token and every reqwest error Displays the URL.
+        if !status.is_success() || body.get("error_code").is_some() {
+            return Err(DeliveryError(format!(
+                "sendChatAction: {}",
+                telegram_error_summary(&body)
+            )));
+        }
+        Ok(())
     }
 
     fn adapter_instance_id(&self) -> Option<String> {
@@ -967,6 +1028,8 @@ fn format_telegram_plain(msg: &UserMessage) -> String {
     let subject: String = msg.subject.chars().take(400).collect();
     let body: String = msg.body.chars().take(3600).collect();
 
+    // No action fallback here: `build_inline_keyboard` renders every control as
+    // a real button, so appending "reply /approve 42" would duplicate it.
     let out = if body.trim().is_empty() {
         format!("{icon} AgentOS — {subject}")
     } else {
@@ -987,8 +1050,34 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     out
 }
 
-/// Build an inline keyboard for `Question` messages with defined options.
+/// Build an inline keyboard for a message carrying actionable controls, or for
+/// a `Question` with defined options.
+///
+/// `PromptAction.command` is used as `callback_data` verbatim — it is the same
+/// string `InboundRouter` accepts as typed text, and Telegram returns it as
+/// `InboundMessage.text` on a tap (see `extract_inbound_message`), so a button
+/// press needs no routing of its own. It must NOT be truncated here: a clipped
+/// `/approve 4` resolves a different escalation than the one displayed.
+/// `escalation_actions` already dropped anything over the 64-byte cap.
 fn build_inline_keyboard(msg: &UserMessage) -> serde_json::Value {
+    if !msg.actions.is_empty() {
+        let buttons: Vec<Vec<serde_json::Value>> = msg
+            .actions
+            .chunks(2)
+            .map(|row| {
+                row.iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "text": a.short_label(64),
+                            "callback_data": a.command,
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        return serde_json::json!({ "inline_keyboard": buttons });
+    }
+
     if let UserMessageKind::Question {
         options: Some(opts),
         ..
@@ -1340,5 +1429,123 @@ mod tests {
         let inbound =
             extract_inbound_message(&update, "42", ChannelInstanceID::new()).expect("inbound");
         assert_eq!(inbound.text, "hello");
+    }
+}
+
+#[cfg(test)]
+mod action_keyboard_tests {
+    use super::*;
+    use agentos_types::{
+        ActionStyle, NotificationID, NotificationPriority, NotificationSource, PromptAction,
+        TraceID, UserMessage, UserMessageKind,
+    };
+
+    fn msg(kind: UserMessageKind, actions: Vec<PromptAction>) -> UserMessage {
+        UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: None,
+            trace_id: TraceID::new(),
+            kind,
+            priority: NotificationPriority::Urgent,
+            subject: "AgentOS approval needed (#42)".into(),
+            body: "AgentOS approval needed (#42)\nDecision: install python3".into(),
+            interaction: None,
+            actions,
+            delivery_status: Default::default(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: Some("escalation:42".into()),
+            reply_to_external_id: None,
+            attachment: None,
+        }
+    }
+
+    fn escalation_actions() -> Vec<PromptAction> {
+        vec![
+            PromptAction::new("✅ Approve", "/approve 42", ActionStyle::Primary),
+            PromptAction::new("❌ Deny", "/deny 42", ActionStyle::Danger),
+            PromptAction::new(
+                "✅ Approve & always allow",
+                "/approve 42 always",
+                ActionStyle::Secondary,
+            ),
+        ]
+    }
+
+    #[test]
+    fn escalation_actions_become_an_inline_keyboard() {
+        // An escalation is a `Notification`, so before actions existed this
+        // fell through `build_inline_keyboard` and returned null.
+        let m = msg(UserMessageKind::Notification, escalation_actions());
+        let kb = build_inline_keyboard(&m);
+        let rows = kb["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["callback_data"], "/approve 42");
+        assert_eq!(rows[1][0]["callback_data"], "/approve 42 always");
+    }
+
+    #[test]
+    fn actions_win_over_question_options() {
+        let m = msg(
+            UserMessageKind::Question {
+                question: "pick".into(),
+                options: Some(vec!["yes".into(), "no".into()]),
+                free_text_allowed: true,
+            },
+            escalation_actions(),
+        );
+        let kb = build_inline_keyboard(&m);
+        assert_eq!(kb["inline_keyboard"][0][0]["callback_data"], "/approve 42");
+    }
+
+    #[test]
+    fn question_options_still_work_without_actions() {
+        let m = msg(
+            UserMessageKind::Question {
+                question: "pick".into(),
+                options: Some(vec!["yes".into(), "no".into()]),
+                free_text_allowed: true,
+            },
+            Vec::new(),
+        );
+        let kb = build_inline_keyboard(&m);
+        assert_eq!(kb["inline_keyboard"][0][0]["callback_data"], "yes");
+    }
+
+    #[test]
+    fn rendered_text_omits_the_commands_when_buttons_carry_them() {
+        // Buttons plus "reply /approve 42" would show the same thing twice.
+        let m = msg(UserMessageKind::Notification, escalation_actions());
+        let text = format_telegram_plain(&m);
+        assert!(!text.contains("/approve 42"), "got: {text}");
+        assert!(text.contains("install python3"));
+    }
+
+    #[test]
+    fn a_button_tap_round_trips_to_the_approve_command() {
+        // Telegram returns `callback_data` as the inbound text, which is what
+        // `InboundRouter::handle_approval_command` parses. This is the whole
+        // reason `PromptAction.command` and the button payload are one string.
+        let kb = build_inline_keyboard(&msg(UserMessageKind::Notification, escalation_actions()));
+        let tapped = kb["inline_keyboard"][0][0]["callback_data"]
+            .as_str()
+            .expect("callback_data");
+
+        let update: TelegramUpdate = serde_json::from_value(serde_json::json!({
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb1",
+                "data": tapped,
+                "message": { "message_id": 7, "chat": { "id": 12345 } }
+            }
+        }))
+        .expect("parse update");
+
+        let inbound = extract_inbound_message(&update, "12345", ChannelInstanceID::new())
+            .expect("callback must yield an inbound message");
+        assert_eq!(inbound.text, "/approve 42");
     }
 }

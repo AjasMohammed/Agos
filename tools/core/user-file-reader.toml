@@ -4,7 +4,7 @@ risk_class = "readonly_external"
 [manifest]
 name        = "user-file-reader"
 version     = "1.0.0"
-description = "Reads files uploaded by users via the AgentOS web UI or API. Accepts a file_id (UUID) or file_name to look up the file in the upload registry and return its content. Returns UTF-8 text for text files and for formats that are converted automatically — PDF, Word/Excel/PowerPoint, OpenDocument, RTF, HTML — so never shell out to decode these yourself. Archives and other opaque binaries come back as base64. Images are refused: this tool returns text only and cannot show a picture to you — an attached image is either already visible in the conversation or unavailable."
+description = "Reads a file the user uploaded or sent over a chat channel. Look the file up with a file_id (preferred) or a file_name; if you have neither, call user-file-list first rather than asking the user for one. mode=\"content\" (the default) returns UTF-8 text for text files and for formats that are converted automatically — PDF, Word/Excel/PowerPoint, OpenDocument, RTF, HTML — so never shell out to decode these yourself. mode=\"handle\" instead materializes the file in your own workspace and returns its path, for handing to a tool that takes a file path. Audio, video and large opaque files are always served as a handle, never as base64: play audio with the audio tool using the returned path. Images are refused in content mode — this tool returns text only and cannot show you a picture — but mode=\"handle\" still gives you a path for another tool to process."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
@@ -30,10 +30,16 @@ description = "UUID of the uploaded file (from the file registry)"
 
 [payload_schema.properties.file_name]
 type        = "string"
-description = "Original filename or display name of the uploaded file"
+description = "Original filename or display name of the uploaded file. Media sent over a chat channel is deliberately not addressable by name — use its file_id from user-file-list."
+
+[payload_schema.properties.mode]
+type        = "string"
+enum        = ["content", "handle"]
+description = "\"content\" (default) reads the file into the conversation. \"handle\" places a copy in your workspace and returns its path, for passing to a tool that takes a file path."
 
 # Conversion of PDF/Office documents forks an external converter (pdftotext,
-# soffice) that writes to a private temp dir, so this tool is not the pure
+# soffice) that writes to a private temp dir, and mode="handle" links or copies
+# the file into the agent's own directory, so this tool is not the pure
 # in-process reader these limits once described. The converter itself is capped
 # at 20s wall clock and 5 MiB of output by agentos-tools::extract.
 [sandbox]

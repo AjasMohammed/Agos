@@ -100,6 +100,29 @@ async fn message_appears_in_prompt_grouped_by_sender() {
     assert!(!seg.contains("hello"), "body must not leak: {seg}");
 }
 
+/// The bus `AgentMessage.id` is derived from this return value and rides on
+/// `DirectMessageReceived`; the recipient reads it back with `agent-messages-read`.
+/// If the two ids ever diverge again, every DM reads as "not found".
+#[tokio::test]
+async fn write_message_returns_the_row_id() {
+    let dir = TempDir::new().unwrap();
+    let (_, messages, writer, _) = setup(&dir);
+    let alice = AgentID::new();
+    let bob = AgentID::new();
+
+    let id = writer
+        .write_message(alice, "alice".into(), bob, "hello".into())
+        .await;
+    let got = messages
+        .get(id)
+        .await
+        .unwrap()
+        .expect("row must exist under the returned id");
+    assert_eq!(got.body, "hello");
+    assert_eq!(got.to_agent_id, bob);
+    assert_eq!(got.from_agent_id, alice);
+}
+
 #[tokio::test]
 async fn idle_agent_gets_empty_segment() {
     let dir = TempDir::new().unwrap();

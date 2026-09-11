@@ -5,7 +5,7 @@ Thank you for your interest in contributing to AgentOS!
 ## Quick Start
 
 ```bash
-git clone https://github.com/agentos/agentos
+git clone https://github.com/AjasMohammed/Agos.git
 cd agentos
 cargo build --workspace
 cargo test --workspace

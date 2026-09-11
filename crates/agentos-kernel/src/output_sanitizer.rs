@@ -660,7 +660,11 @@ impl Default for ThinkTagFilter {
 /// 2. When `enforce_final_tag = true`: [`FinalTagFilter`] drops everything
 ///    outside `<final>...</final>` and strips `<think>`.
 /// 3. When `enforce_final_tag = false`: [`ThinkTagFilter`] strips only
-///    `<think>` blocks so model reasoning never leaks to the live SSE stream.
+///    `<think>` blocks, so in-band reasoning never lands in the ANSWER text.
+///    Reasoning the provider exposes out-of-band (Anthropic extended thinking,
+///    `reasoning_content`, Gemini thought parts) is a separate channel and does
+///    reach the SSE stream, as labelled `Thinking { text }` frames — but only
+///    under this branch: `enforce_final_tag = true` suppresses it too.
 ///
 /// JSON tool blocks are removed first (step 1) so their contents (which
 /// contain literal `<` characters from JSON strings) cannot confuse the

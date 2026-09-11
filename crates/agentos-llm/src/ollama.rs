@@ -963,10 +963,14 @@ impl LLMCore for OllamaCore {
                             full_text.push_str(&resp.message.content);
                             let _ = tx.send(InferenceEvent::Token(resp.message.content)).await;
                         }
-                        // Accumulate thinking content from thinking models.
+                        // Thinking models: stream it as reasoning, and keep
+                        // accumulating because it is still the fallback answer when
+                        // `content` is empty AND there are no tool calls (below) —
+                        // the one case where a client sees the same text twice.
                         if let Some(ref thinking) = resp.message.thinking {
                             if !thinking.is_empty() {
                                 full_thinking.push_str(thinking);
+                                let _ = tx.send(InferenceEvent::Thinking(thinking.clone())).await;
                             }
                         }
                         // Collect tool calls from ANY chunk — Ollama sends them
@@ -1167,6 +1171,8 @@ impl LLMCore for OllamaCore {
 
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
         let mut line_buf: Vec<u8> = Vec::new();
+        // Last raw NDJSON line, kept for the blank-turn diagnostic below.
+        let mut last_raw_line = String::new();
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
         while let Some(chunk_result) = stream.next().await {
@@ -1188,15 +1194,29 @@ impl LLMCore for OllamaCore {
             while let Some(newline_pos) = line_buf.iter().position(|&b| b == b'\n') {
                 let line = &line_buf[..newline_pos];
                 if !line.is_empty() {
-                    if let Ok(resp) = serde_json::from_slice::<OllamaChatResponse>(line) {
+                    last_raw_line = String::from_utf8_lossy(line).chars().take(400).collect();
+                    let parsed = serde_json::from_slice::<OllamaChatResponse>(line);
+                    if let Err(e) = &parsed {
+                        tracing::warn!(
+                            model = %self.model,
+                            error = %e,
+                            line_preview = %last_raw_line,
+                            "Ollama stream: dropping unparseable NDJSON line"
+                        );
+                    }
+                    if let Ok(resp) = parsed {
                         if !resp.message.content.is_empty() {
                             full_text.push_str(&resp.message.content);
                             let _ = tx.send(InferenceEvent::Token(resp.message.content)).await;
                         }
-                        // Accumulate thinking content from thinking models.
+                        // Thinking models: stream it as reasoning, and keep
+                        // accumulating because it is still the fallback answer when
+                        // `content` is empty AND there are no tool calls (below) —
+                        // the one case where a client sees the same text twice.
                         if let Some(ref thinking) = resp.message.thinking {
                             if !thinking.is_empty() {
                                 full_thinking.push_str(thinking);
+                                let _ = tx.send(InferenceEvent::Thinking(thinking.clone())).await;
                             }
                         }
                         // Collect tool calls from ANY chunk — Ollama sends them
@@ -1250,6 +1270,17 @@ impl LLMCore for OllamaCore {
                 "Ollama stream content empty but thinking present — using thinking as fallback"
             );
             full_text = full_thinking;
+        }
+
+        if full_text.trim().is_empty() && tool_calls.is_empty() {
+            tracing::warn!(
+                model = %self.model,
+                done_reason = ?done_reason,
+                completion_tokens,
+                prompt_tokens,
+                last_line_preview = %last_raw_line,
+                "Ollama stream ended with no content, no thinking, no tool calls"
+            );
         }
 
         let stop_reason = if !tool_calls.is_empty() {

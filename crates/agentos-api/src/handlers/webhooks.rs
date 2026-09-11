@@ -57,6 +57,13 @@ pub async fn telegram_webhook(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
+    // Dismiss the button spinner before routing. The long-poll listener does
+    // this in its own loop; in webhook mode nothing else would, so a tapped
+    // "Approve" on an escalation would spin with no sign the tap registered.
+    if let Some(cq) = &update.callback_query {
+        svc.telegram_ack_callback(&channel_id, &cq.id).await;
+    }
+
     let pinned = match svc.channel_pinned_external_id(&channel_id).await {
         Ok(v) => v,
         Err(_) => return StatusCode::BAD_REQUEST,

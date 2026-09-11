@@ -171,6 +171,7 @@ impl Kernel {
                 audit: self.audit.clone(),
                 hook_registry: self.hook_registry.clone(),
                 escalation_manager: self.escalation_manager.clone(),
+                zone_table: self.zone_table.clone(),
                 cancellation_token: self.cancellation_token.child_token(),
             };
 
@@ -786,6 +787,7 @@ pub(crate) struct OwnedPipelineExecutor {
     // Approval enforcement — a detached pipeline step must still fire ToolPre.
     pub(crate) hook_registry: Arc<crate::hooks::HookRegistry>,
     pub(crate) escalation_manager: Arc<crate::escalation::EscalationManager>,
+    pub(crate) zone_table: crate::managed_storage::ZoneTable,
     pub(crate) cancellation_token: CancellationToken,
 }
 
@@ -1153,6 +1155,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         crate::task_executor::enforce_tool_pre(
             &self.hook_registry,
             &self.escalation_manager,
+            &self.zone_table,
             self.agent_id,
             task_id,
             tool_name,

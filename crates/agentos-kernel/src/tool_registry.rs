@@ -148,6 +148,7 @@ fn manifest_enabled_for_build(tool_name: &str) -> bool {
         "raw-usb" => cfg!(feature = "raw-usb"),
         "usb-storage" => cfg!(feature = "usb-storage"),
         "webcam" => cfg!(feature = "webcam"),
+        "wifi" => cfg!(feature = "wifi"),
         _ => true,
     }
 }
@@ -619,6 +620,7 @@ pub(crate) mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         }
@@ -663,6 +665,7 @@ pub(crate) mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         }
@@ -691,6 +694,11 @@ pub(crate) mod tests {
             manifest_enabled_for_build("webcam"),
             cfg!(feature = "webcam")
         );
+        assert_eq!(
+            manifest_enabled_for_build("printer"),
+            cfg!(feature = "printer")
+        );
+        assert_eq!(manifest_enabled_for_build("wifi"), cfg!(feature = "wifi"));
         assert!(manifest_enabled_for_build("file-reader"));
     }
 

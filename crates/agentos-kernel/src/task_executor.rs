@@ -110,6 +110,7 @@ fn prompt_requests_brevity(prompt: &str) -> bool {
 pub(crate) async fn enforce_tool_pre(
     hook_registry: &Arc<crate::hooks::HookRegistry>,
     escalation_manager: &Arc<EscalationManager>,
+    zone_table: &crate::managed_storage::ZoneTable,
     agent_id: AgentID,
     task_id: TaskID,
     tool_name: &str,
@@ -137,6 +138,16 @@ pub(crate) async fn enforce_tool_pre(
                     escalation_id = esc_id,
                     "Approval resolved → resuming privileged tool call"
                 );
+                // The storage provider re-checks its allow list on execution;
+                // hand it the operator's decision so an approved out-of-policy
+                // path is granted instead of denied right after the "yes".
+                if tool_name == "storage-zone-create" {
+                    if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
+                        zone_table
+                            .record_operator_approval(agent_id, path, esc_id)
+                            .await;
+                    }
+                }
                 Ok(())
             }
             ApprovalWaitOutcome::Denied => Err(format!("denied by user (escalation {esc_id})")),
@@ -346,6 +357,7 @@ impl Kernel {
         body: String,
     ) {
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: Some(task.id),
@@ -423,6 +435,7 @@ impl Kernel {
         enforce_tool_pre(
             &self.hook_registry,
             &self.escalation_manager,
+            &self.zone_table,
             agent_id,
             task_id,
             tool_name,
@@ -2302,37 +2315,14 @@ impl Kernel {
             AgentRegistrySnapshot::new(agents)
         };
         let task_snapshot = self.scheduler.snapshot_tasks().await;
-        let escalation_snapshot = {
-            let pending = self.escalation_manager.list_pending().await;
-            let agent_id = task.agent_id;
-            let summaries: Vec<EscalationSummary> = pending
-                .into_iter()
-                .filter(|e| e.agent_id == agent_id)
-                .map(|e| EscalationSummary {
-                    id: e.id,
-                    task_id: e.task_id,
-                    agent_id: e.agent_id,
-                    reason: format!("{:?}", e.reason),
-                    context_summary: e.context_summary,
-                    decision_point: e.decision_point,
-                    options: e.options,
-                    urgency: e.urgency,
-                    blocking: e.blocking,
-                    created_at: e.created_at,
-                    expires_at: e.expires_at,
-                    resolved: e.resolved,
-                    resolution: e.resolution,
-                })
-                .collect();
-            EscalationSnapshot::new(summaries)
-        };
         let capability_snapshot = {
             let reg = self.capability_registry.read().await;
             CapabilityRegistrySnapshot::new(reg.list_capabilities())
         };
         let agent_snapshot_ref: Arc<dyn AgentRegistryQuery> = Arc::new(agent_snapshot);
         let task_snapshot_ref: Arc<dyn TaskQuery> = Arc::new(task_snapshot);
-        let escalation_snapshot_ref: Arc<dyn EscalationQuery> = Arc::new(escalation_snapshot);
+        let escalation_snapshot_ref: Arc<dyn EscalationQuery> =
+            self.escalation_snapshot_for(task.agent_id).await;
         let capability_snapshot_ref: Arc<dyn CapabilityRegistryQuery> =
             Arc::new(capability_snapshot);
 
@@ -3255,19 +3245,29 @@ impl Kernel {
                 task.agent_id,
             )
             .await;
+            // Per-agent override (`AgentProfile.working_set_size`): 0 = pinned
+            // tools only, for small / low-TPM models where prompt-eval time or
+            // tokens-per-minute dominate.
+            let working_set_size = self
+                .agent_registry
+                .read()
+                .await
+                .get_by_id(&task.agent_id)
+                .and_then(|p| p.working_set_size)
+                .unwrap_or(discovery.working_set_size);
             let t1_ranked = self
                 // Over-request: hits already pinned in T0 fall through in `admit`
                 // (which caps at working_set_size), so ask for 2K candidates.
                 .rank_working_set(
                     &task.original_prompt,
-                    discovery.working_set_size * 2,
+                    working_set_size * 2,
                     base_names.as_ref(),
                 )
                 .await;
             let policy = crate::tool_scoping::WorkingSetPolicy {
                 pinned_tools: &discovery.pinned_tools,
                 pinned_usage_top_n: discovery.pinned_usage_top_n,
-                working_set_size: discovery.working_set_size,
+                working_set_size,
             };
             let (native, pool) =
                 crate::tool_scoping::admit(all_manifests, &usage, &t1_ranked, &policy);
@@ -6028,30 +6028,7 @@ impl Kernel {
                         AgentRegistrySnapshot::new(agents)
                     };
                     let task_snapshot = self.scheduler.snapshot_tasks().await;
-                    let escalation_snapshot = {
-                        let pending = self.escalation_manager.list_pending().await;
-                        let agent_id = task.agent_id;
-                        let summaries: Vec<EscalationSummary> = pending
-                            .into_iter()
-                            .filter(|e| e.agent_id == agent_id)
-                            .map(|e| EscalationSummary {
-                                id: e.id,
-                                task_id: e.task_id,
-                                agent_id: e.agent_id,
-                                reason: format!("{:?}", e.reason),
-                                context_summary: e.context_summary,
-                                decision_point: e.decision_point,
-                                options: e.options,
-                                urgency: e.urgency,
-                                blocking: e.blocking,
-                                created_at: e.created_at,
-                                expires_at: e.expires_at,
-                                resolved: e.resolved,
-                                resolution: e.resolution,
-                            })
-                            .collect();
-                        EscalationSnapshot::new(summaries)
-                    };
+                    let escalation_snapshot = self.escalation_snapshot_for(task.agent_id).await;
 
                     let ws_sync = self.workspace_paths_for_agent(&task.agent_id);
                     let exec_context = ToolExecutionContext {
@@ -6069,9 +6046,7 @@ impl Kernel {
                             Arc::new(agent_snapshot) as Arc<dyn AgentRegistryQuery>
                         ),
                         task_registry: Some(Arc::new(task_snapshot) as Arc<dyn TaskQuery>),
-                        escalation_query: Some(
-                            Arc::new(escalation_snapshot) as Arc<dyn EscalationQuery>
-                        ),
+                        escalation_query: Some(escalation_snapshot),
                         workspace_paths: ws_sync.read,
                         workspace_paths_writable: ws_sync.writable,
                         workspace_paths_executable: ws_sync.executable,

@@ -221,6 +221,7 @@ mod tests {
             .await
             .unwrap();
         let msg = OutboundMessage {
+            actions: Vec::new(),
             channel_instance_id: "test1".to_string(),
             content: crate::types::MessageContent::Text("hello".to_string()),
             thread_id: None,
@@ -234,6 +235,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let manager = ChannelManager::new(tx, cancel);
         let msg = OutboundMessage {
+            actions: Vec::new(),
             channel_instance_id: "nonexistent".to_string(),
             content: crate::types::MessageContent::Text("hello".to_string()),
             thread_id: None,

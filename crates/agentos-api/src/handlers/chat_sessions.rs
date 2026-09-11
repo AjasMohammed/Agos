@@ -262,7 +262,9 @@ pub async fn send(
     Json(req): Json<crate::types::SendChatMessageRequest>,
 ) -> Result<Json<Envelope<ApiChatMessage>>, ApiError> {
     require_permission(&key, "chat:w")?;
-    let reply = svc.send_chat_message(&id, req.text).await?;
+    let reply = svc
+        .send_chat_message(&id, req.text, req.file_ids, &key.0.id)
+        .await?;
     Ok(Json(Envelope::new(reply)))
 }
 
@@ -292,9 +294,11 @@ pub async fn send_stream(
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<agentos_kernel::ChatStreamEvent>(64);
     let svc2 = svc.clone();
     let id2 = id.clone();
+    // The uploads this key owns are the ones its attachments can resolve to.
+    let owner = key.0.id.clone();
     tokio::spawn(async move {
         if let Err(e) = svc2
-            .stream_chat_message(&id2, req.text, out_tx.clone())
+            .stream_chat_message(&id2, req.text, req.file_ids, &owner, out_tx.clone())
             .await
         {
             let _ = out_tx

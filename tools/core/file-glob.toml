@@ -4,14 +4,14 @@ risk_class = "readonly_scoped"
 [manifest]
 name        = "file-glob"
 version     = "1.0.0"
-description = "Recursively discovers files matching a glob pattern (e.g. **/*.rs) within data_dir. Patterns containing '..' or absolute paths are rejected. Returns paths with size and modification time, sorted by mtime descending."
+description = "Recursively discovers files matching a glob pattern (e.g. **/*.rs) under a base path. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Patterns containing '..' are rejected. Returns paths with size and modification time, sorted by mtime descending. The walk does not follow symlinks and skips node_modules, .git, target and .venv (name one of those as 'path' to search inside it). `*` matches within one path segment only — use `**/` to recurse (e.g. `**/*.mp3`, not `*.mp3`). Brace alternates work: `**/*.{mp3,wav,m4a}`. Matching is case-sensitive. It stops early at 1000 matches, 200000 entries scanned, depth 12, or 20 seconds, and then sets \"truncated\": true with a \"note\" naming the limit that was hit — narrow 'path' or the pattern rather than repeating the same broad search."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 search_hints = ["find files matching a pattern", "list files in a folder", "ls"]
 
 [capabilities_required]
-permissions = ["fs.user_data:r"]
+permissions = ["fs.user_data:r", "fs.workspace:r"]
 
 [capabilities_provided]
 outputs = ["file_list"]
@@ -31,7 +31,7 @@ description = "Glob pattern relative to the search base path"
 [payload_schema.properties.path]
 type = "string"
 default = "."
-description = "Optional subdirectory inside data_dir to search from"
+description = "Base directory to search from: relative (under your home dir) or absolute inside a granted folder; default is your home dir"
 
 [sandbox]
 network       = false

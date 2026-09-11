@@ -401,6 +401,31 @@ impl KernelMcpExecutor {
             .unwrap_or_else(|| tool_name.to_string());
         let tool_name = resolved_name.as_str();
 
+        // Turn-scope gate. These calls never pass through the chat loop — the
+        // subprocess drives its own agent loop and invokes tools straight at this
+        // gateway — so the loop's `ChatTurnScope` check cannot see them. Without
+        // this, a claude-code participant in a multi-agent conversation can fan
+        // `agent-message`/`notify-user`/`channel-send` out of band while the
+        // transcript the operator is watching stays empty: the exact incident
+        // the scope exists to prevent, failing open for one adapter class.
+        //
+        // Checked by agent id against the kernel's live set rather than a value
+        // captured at construction: this gateway outlives any single turn.
+        if let Some(kernel) = self.kernel() {
+            if kernel.is_in_convo_turn(&self.agent_id).await
+                && crate::kernel::ChatTurnScope::ConvoTurn.withholds(tool_name)
+            {
+                tracing::warn!(
+                    tool = %tool_name,
+                    agent_id = %self.agent_id,
+                    "Gateway tool call withheld by convo turn scope"
+                );
+                return Err(
+                    crate::kernel::ChatTurnScope::ConvoTurn.withheld_tool_message(tool_name)
+                );
+            }
+        }
+
         // ONE resolution of the agent's live permissions per call, shared by the
         // capability token below and by the `ToolExecutionContext` the tool
         // actually runs under — the gate and the execution must never see
@@ -456,6 +481,7 @@ impl KernelMcpExecutor {
         crate::task_executor::enforce_tool_pre(
             &self.hook_registry,
             &self.escalation_manager,
+            &self.zone_table,
             self.agent_id,
             task_id,
             tool_name,
@@ -798,83 +824,102 @@ impl KernelMcpExecutor {
     }
 }
 
+/// The four tools the gateway exposes to claude-code. Static, so it lives
+/// outside the trait impl where a test can check it against the manifests it
+/// mirrors without standing up a whole executor.
+fn mcp_tool_defs() -> Vec<McpToolDef> {
+    vec![
+        McpToolDef {
+            name: "search_tools".to_string(),
+            description: "Semantic search over AgentOS's tool inventory. Returns tools matching a \
+                     natural-language query."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language description of the capability you need."
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        McpToolDef {
+            name: "describe_tool".to_string(),
+            description: "Return the full description, payload schema, and metadata for a \
+                              single AgentOS tool by name."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact tool name (e.g. \"file-reader\")."
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        McpToolDef {
+            name: "list_tools".to_string(),
+            description: "List the available AgentOS tools, optionally filtered by category \
+                              and paginated."
+                .to_string(),
+            // Hand-written mirror of `tools/core/list-tools.toml`'s
+            // `[payload_schema]` — keep the two in step. It said `page` was
+            // 1-based where the tool is 0-based, so a claude-code agent
+            // asking for "the first page" silently got the second one, and
+            // never saw the alphabetically-first tools.
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": ["string", "null"],
+                        "description": "Optional category filter (e.g. \"fs\", \"network\"). Omit, or pass null or \"\", for no filter."
+                    },
+                    "tag": {
+                        "type": ["string", "null"],
+                        "description": "Optional tag filter: read, write, exec, network, fs, or meta. Omit, or pass null or \"\", for no filter."
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Zero-based page index — the first page is 0, not 1. A page past the end serves the last page."
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "Tools per page, 1-50 (default 20)."
+                    }
+                }
+            }),
+        },
+        McpToolDef {
+            name: "invoke_tool".to_string(),
+            description: "Execute an AgentOS tool by name with a JSON payload. Runs under the \
+                              calling agent's real permission set and capability context."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact tool name to invoke."
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "Tool-specific input payload (JSON object)."
+                    }
+                },
+                "required": ["name", "payload"]
+            }),
+        },
+    ]
+}
+
 #[async_trait]
 impl McpToolExecutor for KernelMcpExecutor {
     async fn list_tools(&self) -> Vec<McpToolDef> {
-        vec![
-            McpToolDef {
-                name: "search_tools".to_string(),
-                description:
-                    "Semantic search over AgentOS's tool inventory. Returns tools matching a \
-                     natural-language query."
-                        .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Natural-language description of the capability you need."
-                        }
-                    },
-                    "required": ["query"]
-                }),
-            },
-            McpToolDef {
-                name: "describe_tool".to_string(),
-                description: "Return the full description, payload schema, and metadata for a \
-                              single AgentOS tool by name."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Exact tool name (e.g. \"file-reader\")."
-                        }
-                    },
-                    "required": ["name"]
-                }),
-            },
-            McpToolDef {
-                name: "list_tools".to_string(),
-                description: "List the available AgentOS tools, optionally filtered by category \
-                              and paginated."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "category": {
-                            "type": "string",
-                            "description": "Optional category filter (e.g. \"fs\", \"network\")."
-                        },
-                        "page": {
-                            "type": "integer",
-                            "description": "Optional 1-based page number for pagination."
-                        }
-                    }
-                }),
-            },
-            McpToolDef {
-                name: "invoke_tool".to_string(),
-                description: "Execute an AgentOS tool by name with a JSON payload. Runs under the \
-                              calling agent's real permission set and capability context."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Exact tool name to invoke."
-                        },
-                        "payload": {
-                            "type": "object",
-                            "description": "Tool-specific input payload (JSON object)."
-                        }
-                    },
-                    "required": ["name", "payload"]
-                }),
-            },
-        ]
+        mcp_tool_defs()
     }
 
     async fn call_tool(
@@ -1017,6 +1062,70 @@ pub async fn start_claude_mcp_gateway(
 mod tests {
     use super::*;
     use agentos_capability::CapabilityEngine;
+
+    /// The gateway hand-writes MCP schemas for tools whose real schema lives in
+    /// `tools/core/*.toml`, and the two drifted: the gateway told claude-code
+    /// `page` was 1-based where `list-tools` is 0-based, so "the first page"
+    /// silently returned the second one. Every property the gateway names must
+    /// exist in the manifest it mirrors and carry the manifest's own
+    /// description — the gateway may expose a subset, never a contradiction.
+    #[test]
+    fn gateway_schemas_match_the_manifests_they_mirror() {
+        // Gateway MCP name -> the core manifest it mirrors.
+        let mirrored = [
+            ("search_tools", "search-tools.toml"),
+            ("describe_tool", "describe-tool.toml"),
+            ("list_tools", "list-tools.toml"),
+        ];
+        let defs = mcp_tool_defs();
+
+        for (mcp_name, manifest_file) in mirrored {
+            let raw = crate::core_manifests::EmbeddedCoreManifests::get(manifest_file)
+                .unwrap_or_else(|| panic!("{manifest_file} is not embedded"));
+            let manifest: toml::Value = toml::from_str(std::str::from_utf8(&raw.data).unwrap())
+                .unwrap_or_else(|e| panic!("{manifest_file}: {e}"));
+            let Some(props) = manifest
+                .get("payload_schema")
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.as_table())
+            else {
+                continue; // manifest declares no properties to disagree with
+            };
+
+            let def = defs
+                .iter()
+                .find(|d| d.name == mcp_name)
+                .unwrap_or_else(|| panic!("gateway no longer exposes {mcp_name}"));
+            let gateway_props = def.input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{mcp_name} schema has no properties object"));
+
+            for (name, gateway_prop) in gateway_props {
+                assert!(
+                    props.contains_key(name),
+                    "{mcp_name} declares `{name}`, absent from {manifest_file} — \
+                     the gateway may expose a subset of a manifest, never a field it does not have"
+                );
+                // Wording legitimately differs (the gateway addresses
+                // claude-code, the manifest addresses every other adapter), so
+                // only the claim that broke is asserted: a 0-based index
+                // described as 1-based hands back the wrong page silently, and
+                // the request stays in range so the tool's clamp never fires.
+                for desc in [
+                    gateway_prop.get("description").and_then(|d| d.as_str()),
+                    props[name].get("description").and_then(|d| d.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    assert!(
+                        !(name == "page" && desc.to_lowercase().contains("1-based")),
+                        "{mcp_name}.{name} is described as 1-based; list-tools pages from 0"
+                    );
+                }
+            }
+        }
+    }
 
     /// The gateway's permission set, granting only `fs.read:Read`.
     fn scoped_permissions() -> PermissionSet {

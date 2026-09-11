@@ -84,6 +84,16 @@ fn dedupe_key(esc: &PendingEscalation) -> String {
     format!("{}|{}|{}", esc.task_id, esc.agent_id, esc.decision_point)
 }
 
+/// Truncate to `max` characters, marking the cut with an ellipsis.
+fn truncate(s: &str, max: usize) -> String {
+    let head: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// Broadcasts every new `PendingEscalation` to all paired DM channels.
 ///
 /// Defends against:
@@ -268,6 +278,9 @@ impl ChannelBroadcastSink {
             subject: body.lines().next().unwrap_or_default().to_string(),
             body,
             interaction: None,
+            // The controls travel as data so each adapter can render them
+            // natively; `render`/`render_summary` no longer spell them out.
+            actions: crate::escalation_prompt::escalation_actions(esc),
             delivery_status: HashMap::new(),
             response: None,
             created_at: chrono::Utc::now(),
@@ -287,48 +300,55 @@ impl ChannelBroadcastSink {
     /// secret-bearing call that is a plaintext credential. The router fans out
     /// to operator-configured third-party endpoints (webhook POST, Slack
     /// incoming webhook, desktop DBus), a target set that never saw escalation
-    /// content before. So the router path gets a pointer, not the payload; the
-    /// full prompt stays on the explicitly paired DM channels.
+    /// content before. So the router path names *what* is being approved —
+    /// `decision_point`, which the kernel builds as "Tool 'x' (risk: y) awaiting
+    /// approval" and which carries no tool input — but withholds
+    /// `context_summary`; the payload preview stays on the explicitly paired DM
+    /// channels. Without the decision point the prompt said only "urgent",
+    /// which is unactionable: every adapter registered with the router (Telegram,
+    /// ntfy, desktop, email, webhook) is marked `covered_by_router` and so never
+    /// receives the full [`Self::render`] body.
     ///
-    /// It also drops the `/approve` reply instructions, which are inbound
-    /// *channel* commands — unusable by the panel-only operator this path
-    /// exists for. They are told where to act instead.
+    /// The body no longer spells out the `/approve` reply instructions: the
+    /// controls ride along as `UserMessage.actions`, so an adapter with an
+    /// interactive primitive draws buttons and one without appends the shared
+    /// text fallback. That closes the gap where a router-only recipient (ntfy,
+    /// webhook, desktop) was told a decision was needed but given no way to
+    /// make it.
     fn render_summary(esc: &PendingEscalation) -> String {
         let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
         format!(
             "🛂 AgentOS approval needed (#{id})\n\
              Urgency: {urgency}\n\
-             Open the escalation queue to review and approve \
+             Decision: {decision}\n\
+             Open the escalation queue for the full context \
              (auto-denies in ~{exp}s).",
             id = esc.id,
             urgency = esc.urgency,
+            decision = truncate(&esc.decision_point, 240),
             exp = expires_in_secs,
         )
     }
 
     /// Render a human-readable approval prompt for the given escalation.
-    /// Includes the escalation id, urgency, decision_point, and
-    /// instructions for the `/approve` and `/deny` reply commands.
+    /// Includes the escalation id, urgency, decision_point and context.
+    ///
+    /// The `/approve` and `/deny` instructions are deliberately absent: they
+    /// come from `UserMessage.actions` at the adapter, either as native
+    /// controls or via `render_actions_fallback`. Spelling them out here too
+    /// would print them twice on every text-only channel.
     fn render(esc: &PendingEscalation) -> String {
-        let preview = esc.context_summary.chars().take(280).collect::<String>();
-        let preview = if esc.context_summary.chars().count() > 280 {
-            format!("{preview}…")
-        } else {
-            preview
-        };
-        let decision: String = esc.decision_point.chars().take(240).collect();
-        let decision = if esc.decision_point.chars().count() > 240 {
-            format!("{decision}…")
-        } else {
-            decision
-        };
+        // 700, not 280: `context_summary` is now a labelled Who/What/Where/Why
+        // block rather than a JSON blob, and clipping at 280 cut it mid-"Why".
+        let preview = truncate(&esc.context_summary, 700);
+        let decision = truncate(&esc.decision_point, 240);
         let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
         format!(
             "🛂 AgentOS approval needed (#{id})\n\
              Urgency: {urgency}\n\
              Decision: {decision}\n\
              Context: {preview}\n\n\
-             Reply `/approve {id}` or `/deny {id}` (expires in ~{exp}s)",
+             Expires in ~{exp}s.",
             id = esc.id,
             urgency = esc.urgency,
             decision = decision,
@@ -476,6 +496,7 @@ impl BroadcastSink for ChannelBroadcastSink {
                 }
                 None => {
                     let msg = OutboundMessage {
+                        actions: crate::escalation_prompt::escalation_actions(escalation),
                         channel_instance_id: sender.channel_id.clone(),
                         content: MessageContent::Markdown(body.clone()),
                         thread_id: None,
@@ -533,17 +554,72 @@ mod tests {
         }
     }
 
+    /// Every router-registered adapter (Telegram, ntfy, desktop, email,
+    /// webhook) is marked `covered_by_router` and receives only this body, so
+    /// it has to name the tool — "Urgency: high" alone tells the operator
+    /// nothing about what they are approving.
     #[test]
-    fn render_includes_id_and_commands() {
+    fn render_summary_names_the_decision_but_withholds_the_payload() {
+        let esc = fixture(42);
+        let body = ChannelBroadcastSink::render_summary(&esc);
+        assert!(body.contains("#42"), "summary must carry the id: {body}");
+        assert!(
+            body.contains(&esc.decision_point),
+            "summary must name the decision: {body}"
+        );
+        assert!(
+            !body.contains("Agent wants to"),
+            "summary must not leak the context preview: {body}"
+        );
+    }
+
+    #[test]
+    fn render_includes_id_and_context_but_not_the_commands() {
         let esc = fixture(42);
         let body = ChannelBroadcastSink::render(&esc);
         assert!(body.contains("#42"), "body must contain escalation id");
-        assert!(
-            body.contains("/approve 42"),
-            "body must include approve cmd"
-        );
-        assert!(body.contains("/deny 42"), "body must include deny cmd");
         assert!(body.contains("install of python3"));
+        // The commands come from `actions` at the adapter. Emitting them here
+        // too would print them twice on every text-only channel.
+        assert!(
+            !body.contains("/approve 42"),
+            "body must not spell out the commands"
+        );
+    }
+
+    #[test]
+    fn both_render_paths_carry_the_controls() {
+        // The full paired-DM prompt and the redacted router summary must both
+        // be actionable — the router path reaches ntfy/webhook/desktop, which
+        // previously got a prompt with no way to act on it.
+        let esc = fixture(42);
+        for body in [
+            ChannelBroadcastSink::render(&esc),
+            ChannelBroadcastSink::render_summary(&esc),
+        ] {
+            let msg = ChannelBroadcastSink::as_user_message(&esc, body);
+            let cmds: Vec<&str> = msg.actions.iter().map(|a| a.command.as_str()).collect();
+            assert_eq!(cmds, ["/approve 42", "/deny 42", "/approve 42 always"]);
+        }
+    }
+
+    #[test]
+    fn fallback_append_yields_each_command_exactly_once() {
+        // Guards the double-instruction regression: `render` dropped its own
+        // trailing line precisely so this append is the only source.
+        let esc = fixture(42);
+        let body = ChannelBroadcastSink::render(&esc);
+        let msg = ChannelBroadcastSink::as_user_message(&esc, body);
+        let full = format!(
+            "{}{}",
+            msg.body,
+            agentos_types::render_actions_fallback(&msg.actions)
+        );
+        assert_eq!(full.matches("/approve 42 always").count(), 1);
+        // "/approve 42" is a prefix of "/approve 42 always" — count the two
+        // occurrences that implies, not three.
+        assert_eq!(full.matches("/approve 42").count(), 2);
+        assert_eq!(full.matches("/deny 42").count(), 1);
     }
 
     #[test]
@@ -687,12 +763,12 @@ mod tests {
             body.contains("…"),
             "long context should be ellipsis-truncated"
         );
-        // Truncated preview should not exceed ~330 chars including formatting.
+        // Truncated preview should not exceed the 700-char clip plus formatting.
         let preview_line = body
             .lines()
             .find(|l| l.starts_with("Context:"))
             .expect("Context line present");
-        assert!(preview_line.chars().count() < 350);
+        assert!(preview_line.chars().count() < 750);
     }
 
     #[test]

@@ -24,17 +24,18 @@ output = "ToolListPage"
 type = "object"
 
 [payload_schema.properties.category]
-type = "string"
-description = "Optional category filter such as filesystem, memory, network, or coordination"
+type = ["string", "null"]
+description = "Optional category filter such as filesystem, memory, network, or coordination. Omit, or pass null or \"\", for no filter."
 
 [payload_schema.properties.tag]
-type = "string"
-description = "Optional tag filter: read, write, exec, network, fs, or meta"
+type = ["string", "null"]
+description = "Optional tag filter: read, write, exec, network, fs, or meta. Omit, or pass null or \"\", for no filter."
 
 [payload_schema.properties.page]
 type = "integer"
 minimum = 0
 default = 0
+description = "Zero-based page index — the first page is 0, not 1. A page past the end serves the last page."
 
 [payload_schema.properties.page_size]
 type = "integer"

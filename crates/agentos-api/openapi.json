@@ -4066,7 +4066,7 @@
           {
             "name": "channel",
             "in": "query",
-            "description": "Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,\n`system`, or `events`). Subscribing requires the matching `<channel>:r`\nscope on the API key.",
+            "description": "Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,\n`system`, `escalations`, or `events`). Subscribing requires the matching\n`<channel>:r` scope on the API key.",
             "required": true,
             "schema": {
               "type": "string"
@@ -18243,6 +18243,13 @@
           "text"
         ],
         "properties": {
+          "file_ids": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Comma-separated upload ids attached to this message (from\n`GET /api/v1/files`). Resolved into context parts — extracted text for\ndocuments, image parts for a vision-capable agent."
+          },
           "text": {
             "type": "string"
           }
@@ -18498,6 +18505,14 @@
               "string",
               "null"
             ]
+          },
+          "working_set_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Per-agent tool working-set size (T1 tools pre-armed by retrieval).\nAbsent = unchanged; `null` = revert to the kernel default; `0` = pinned\ntools only (small / low-TPM models).",
+            "minimum": 0
           }
         }
       },

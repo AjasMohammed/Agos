@@ -678,10 +678,12 @@ impl LLMCore for GeminiCore {
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
 
-                    // Only stream text from non-thought parts.
-                    if !is_thought {
-                        if let Some(t) = part.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
+                    // Thought parts go out as reasoning, never as answer text.
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            if is_thought {
+                                let _ = tx.send(InferenceEvent::Thinking(t.to_string())).await;
+                            } else {
                                 full_text.push_str(t);
                                 let _ = tx.send(InferenceEvent::Token(t.to_string())).await;
                             }
@@ -1057,6 +1059,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

@@ -26,6 +26,10 @@ impl AgentTool for BluetoothTool {
     fn required_permissions(&self) -> Vec<(String, PermissionOp)> {
         vec![
             ("hardware.bluetooth.list".to_string(), PermissionOp::Read),
+            (
+                "hardware.bluetooth.power".to_string(),
+                PermissionOp::Execute,
+            ),
             ("hardware.bluetooth.scan".to_string(), PermissionOp::Observe),
             ("hardware.bluetooth.pair".to_string(), PermissionOp::Execute),
             (
@@ -43,7 +47,13 @@ impl AgentTool for BluetoothTool {
             .and_then(Value::as_str)
             .unwrap_or("list_adapters")
         {
-            "list_adapters" => vec![("hardware.bluetooth.list".to_string(), PermissionOp::Read)],
+            "list_adapters" | "list_paired" => {
+                vec![("hardware.bluetooth.list".to_string(), PermissionOp::Read)]
+            }
+            "power" => vec![(
+                "hardware.bluetooth.power".to_string(),
+                PermissionOp::Execute,
+            )],
             "scan" => vec![("hardware.bluetooth.scan".to_string(), PermissionOp::Observe)],
             "pair" => vec![("hardware.bluetooth.pair".to_string(), PermissionOp::Execute)],
             "connect" | "disconnect" => vec![(
@@ -98,12 +108,25 @@ mod tests {
             vec![("hardware.bluetooth.list".to_string(), PermissionOp::Read)]
         );
         assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "power", "enabled": false })),
+            vec![(
+                "hardware.bluetooth.power".to_string(),
+                PermissionOp::Execute
+            )]
+        );
+        assert_eq!(
             tool.required_permissions_for(&json!({ "action": "scan" })),
             vec![("hardware.bluetooth.scan".to_string(), PermissionOp::Observe)]
         );
         assert_eq!(
             tool.required_permissions_for(&json!({ "action": "gatt_write" })),
             vec![("hardware.bluetooth.gatt".to_string(), PermissionOp::Write)]
+        );
+        // Reading the pairing database is a list, not a scan: it needs no
+        // radio and must not demand the scan permission.
+        assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "list_paired" })),
+            vec![("hardware.bluetooth.list".to_string(), PermissionOp::Read)]
         );
     }
 }

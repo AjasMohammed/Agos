@@ -171,6 +171,7 @@ mod tests {
             default_thinking_level: agentos_types::ThinkingLevel::Off,
             system_prompt: None,
             manually_offline: false,
+            working_set_size: None,
         }
     }
 

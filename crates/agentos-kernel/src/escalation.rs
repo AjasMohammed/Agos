@@ -149,9 +149,52 @@ pub struct EscalationManager {
     /// the receiver lifetime is decoupled from the hook fire path —
     /// hooks are sync-and-fire-and-forget; the awaiting happens later.
     pending_resolution_rx: RwLock<HashMap<u64, oneshot::Receiver<ResolutionOutcome>>>,
+    /// Hardware registry, so that approving a `device_access` escalation
+    /// actually grants the device. Without it the operator's decision was
+    /// recorded and then dropped: `resolve` marked the escalation approved
+    /// while the device stayed `Pending`, so the next HAL call raised a fresh
+    /// escalation and the agent could never get through. Set at kernel boot;
+    /// `None` in unit tests and in the CLI, where no HAL exists.
+    hardware_registry: RwLock<Option<Arc<agentos_hal::HardwareRegistry>>>,
+    /// Lossy realtime fan-out for the control panel's WebSocket layer. Set at
+    /// kernel boot; `None` in the CLI and in unit tests. Without it the panel
+    /// only learns about a new (or resolved) escalation on its next poll, so an
+    /// operator who got the push notification instantly still stared at an
+    /// empty approval queue for up to a full poll interval.
+    realtime_tx: std::sync::OnceLock<tokio::sync::broadcast::Sender<RealtimeEvent>>,
 }
 
 impl EscalationManager {
+    /// Attach the panel's realtime broadcast channel. Idempotent — a second
+    /// call is ignored.
+    pub fn set_realtime_sender(&self, tx: tokio::sync::broadcast::Sender<RealtimeEvent>) {
+        let _ = self.realtime_tx.set(tx);
+    }
+
+    /// Push a coarse `escalations` event to the control panel so it refetches
+    /// the queue immediately instead of waiting for its poll.
+    ///
+    /// At most the id travels: the escalation body can carry
+    /// redacted-but-still-sensitive tool arguments, and every subscriber
+    /// refetches through the `escalations:r`-scoped REST endpoint anyway.
+    /// Bulk paths pass `None` and emit exactly one event rather than a
+    /// fabricated id per row — a burst of N invalidations only makes the
+    /// subscriber cancel and restart the same refetch N times.
+    fn emit_realtime(&self, event: &str, id: Option<u64>) {
+        if let Some(tx) = self.realtime_tx.get() {
+            let data = match id {
+                Some(id) => serde_json::json!({ "escalation_id": id }),
+                None => serde_json::json!({}),
+            };
+            // `Err` = no subscribers connected; nothing to do.
+            let _ = tx.send(RealtimeEvent {
+                channel: "escalations".to_string(),
+                event: event.to_string(),
+                data,
+            });
+        }
+    }
+
     /// Attach the audit log so approval decisions leave a durable trail.
     pub async fn set_audit_log(&self, audit: Arc<AuditLog>) {
         *self.audit.write().await = Some(audit);
@@ -199,7 +242,71 @@ impl EscalationManager {
             pending_resolution_tx: RwLock::new(HashMap::new()),
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
+            hardware_registry: RwLock::new(None),
+            realtime_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the hardware registry so device-access approvals take effect.
+    /// See [`Self::hardware_registry`].
+    pub async fn set_hardware_registry(&self, registry: Arc<agentos_hal::HardwareRegistry>) {
+        *self.hardware_registry.write().await = Some(registry);
+    }
+
+    /// Announce a new escalation on every registered `BroadcastSink`
+    /// (channel DMs, push). Best-effort: each sink runs in its own task so a
+    /// failure never blocks escalation creation, and each is bounded by
+    /// `SINK_BROADCAST_TIMEOUT` so a misbehaving adapter (hung HTTP,
+    /// unresponsive WebSocket) cannot leak detached tasks across kernel
+    /// uptime (R3 finding I3).
+    ///
+    /// Called from BOTH creation paths. `create_device_access_escalation`
+    /// bypasses `create_escalation_internal`, so before this was shared, a
+    /// HAL device prompt reached the control panel and nothing else — an
+    /// operator working over Telegram was never told the agent was waiting.
+    async fn fan_out_to_sinks(&self, escalation: &PendingEscalation) {
+        const SINK_BROADCAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let sinks = self.broadcast_sinks.read().await.clone();
+        for sink in sinks {
+            let esc = escalation.clone();
+            tokio::spawn(async move {
+                let sink_name = sink.name();
+                if tokio::time::timeout(SINK_BROADCAST_TIMEOUT, sink.broadcast(&esc))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        sink = sink_name,
+                        escalation_id = esc.id,
+                        timeout_secs = SINK_BROADCAST_TIMEOUT.as_secs(),
+                        "BroadcastSink timed out; dropping the broadcast"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Deliver `outcome` to whoever is parked on `escalation_id` and drop the
+    /// channel. Every path that marks an escalation resolved must call this —
+    /// a resolution that is recorded but never delivered leaves the waiter
+    /// (`task_executor::enforce_tool_pre`, `KernelDeviceAccessGate::check`)
+    /// parked until its own timeout on a decision that was already made.
+    async fn wake_resolution(&self, escalation_id: u64, outcome: ResolutionOutcome) {
+        if let Some(tx) = self
+            .pending_resolution_tx
+            .write()
+            .await
+            .remove(&escalation_id)
+        {
+            // `Err(_)` means the receiver was already dropped (waiter
+            // cancelled or timed out) — nothing to do.
+            let _ = tx.send(outcome);
+        }
+        // Clear any orphan receiver so the map doesn't leak.
+        self.pending_resolution_rx
+            .write()
+            .await
+            .remove(&escalation_id);
     }
 
     /// Install a oneshot resolution channel for `escalation_id`. Returns
@@ -505,38 +612,10 @@ impl EscalationManager {
             "New escalation created"
         );
 
-        // Fan out to registered BroadcastSinks (channels, push, etc.).
-        // Each sink runs in its own task — failures are best-effort and
-        // never block escalation creation. The legacy `notify_url`
-        // webhook below is intentionally kept as a separate path so
-        // existing deployments are unaffected.
-        //
-        // Each sink invocation is bounded by `SINK_BROADCAST_TIMEOUT` so a
-        // misbehaving adapter (hung HTTP, unresponsive WebSocket) cannot
-        // leak detached tasks across kernel uptime — without this guard,
-        // every new escalation would spawn one more leaked task forever
-        // (R3 finding I3).
-        {
-            const SINK_BROADCAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-            let sinks = self.broadcast_sinks.read().await.clone();
-            for sink in sinks {
-                let esc = escalation.clone();
-                tokio::spawn(async move {
-                    let sink_name = sink.name();
-                    if tokio::time::timeout(SINK_BROADCAST_TIMEOUT, sink.broadcast(&esc))
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            sink = sink_name,
-                            escalation_id = esc.id,
-                            timeout_secs = SINK_BROADCAST_TIMEOUT.as_secs(),
-                            "BroadcastSink timed out; dropping the broadcast"
-                        );
-                    }
-                });
-            }
-        }
+        self.fan_out_to_sinks(&escalation).await;
+
+        // Wake the control panel now instead of on its next poll.
+        self.emit_realtime("escalation.created", Some(id));
 
         // Fire-and-forget webhook notification if configured.
         // The URL is validated before use to prevent SSRF attacks.
@@ -587,6 +666,41 @@ impl EscalationManager {
             .collect()
     }
 
+    /// Escalations an agent may reasonably still be asking about: everything
+    /// unresolved, plus anything resolved within `resolved_grace`.
+    ///
+    /// `list_pending` alone is not enough behind the `escalation-status` tool.
+    /// An agent polls precisely to learn whether its approval landed, and a
+    /// pending-only view answers "no such escalation" the moment the operator
+    /// says yes — indistinguishable from "never existed", which is how the
+    /// 2026-09-08 agent concluded it was still blocked after three approvals.
+    ///
+    /// `list_all` is not the answer either: `prune_resolved` exists but is
+    /// never scheduled, so the resolved tail grows for the life of the kernel
+    /// and this runs on every tool call. The grace window keeps the clone
+    /// bounded by the escalation *rate* rather than by uptime.
+    pub async fn list_recent_for_agent(
+        &self,
+        agent_id: &AgentID,
+        resolved_grace: chrono::Duration,
+    ) -> Vec<PendingEscalation> {
+        let cutoff = chrono::Utc::now() - resolved_grace;
+        self.escalations
+            .read()
+            .await
+            .iter()
+            .filter(|e| e.agent_id == *agent_id)
+            .filter(|e| match (e.resolved, e.resolved_at) {
+                (false, _) => true,
+                (true, Some(at)) => at >= cutoff,
+                // Resolved but untimestamped: keep, the same defensive choice
+                // `prune_resolved` makes.
+                (true, None) => true,
+            })
+            .cloned()
+            .collect()
+    }
+
     /// List all escalations (including resolved).
     pub async fn list_all(&self) -> Vec<PendingEscalation> {
         self.escalations.read().await.clone()
@@ -631,14 +745,30 @@ impl EscalationManager {
         };
         drop(escalations);
 
+        // Computed once: the audit record, the device grant, and the outcome
+        // sent on the resolution channel must never disagree.
+        let mut approved = resolution_is_approval(&resolution);
+
         if let Some(escalation) = to_persist {
+            // Grant first, for two reasons. An executor woken by the sender
+            // below may retry the HAL call immediately and must not race the
+            // grant; and if the grant fails there is nothing to approve, so
+            // both the audit trail and the wake have to say so rather than
+            // reporting a success that did not happen.
+            let device_grant_failed = !self
+                .apply_device_access_resolution(&escalation, approved)
+                .await;
+            if device_grant_failed {
+                approved = false;
+            }
             self.audit(Self::audit_entry(
                 AuditEventType::EscalationResolved,
                 &escalation,
                 serde_json::json!({
                     "escalation_id": id,
                     "resolution": resolution,
-                    "approved": resolution_is_approval(&resolution),
+                    "approved": approved,
+                    "device_grant_failed": device_grant_failed,
                     "decision_point": escalation.decision_point,
                 }),
             ))
@@ -653,18 +783,16 @@ impl EscalationManager {
         // from a non-blocking source like CLI `agentos escalation
         // create`).
         if result.is_some() {
-            let outcome = if resolution_is_approval(&resolution) {
+            let outcome = if approved {
                 ResolutionOutcome::Approved
             } else {
                 ResolutionOutcome::Denied
             };
-            if let Some(tx) = self.pending_resolution_tx.write().await.remove(&id) {
-                // `Err(_)` here means the receiver was already dropped,
-                // which is fine — the awaiter cancelled or timed out.
-                let _ = tx.send(outcome);
-            }
-            // Clear any orphan receiver so the map doesn't leak.
-            self.pending_resolution_rx.write().await.remove(&id);
+            self.wake_resolution(id, outcome).await;
+            // Drop the row from every open queue: a decision made on one
+            // surface (channel DM, CLI) must not leave a live Approve button
+            // on another.
+            self.emit_realtime("escalation.resolved", Some(id));
         }
 
         result
@@ -691,8 +819,20 @@ impl EscalationManager {
             }
         }
         let count = to_persist.len();
+        let outcome = if resolution_is_approval(resolution) {
+            ResolutionOutcome::Approved
+        } else {
+            ResolutionOutcome::Denied
+        };
         for escalation in to_persist {
+            let id = escalation.id;
             self.persist_escalation(escalation).await;
+            // A parked waiter on a task that just reached a terminal state
+            // must be told, or it sits out its full approval window on a
+            // decision that is already closed. Reachable whenever a second
+            // caller deduped onto this task's device escalation
+            // (`find_pending_device_access` matches on device+agent, not task).
+            self.wake_resolution(id, outcome).await;
         }
         if count > 0 {
             tracing::info!(
@@ -701,6 +841,10 @@ impl EscalationManager {
                 resolution,
                 "Resolved pending escalations for terminal task"
             );
+            // The rows just vanished from the queue; refresh open panels. One
+            // event for the batch: `to_persist` is already consumed and the
+            // subscribers refetch the whole list regardless.
+            self.emit_realtime("escalation.resolved", None);
         }
         count
     }
@@ -793,19 +937,19 @@ impl EscalationManager {
         // otherwise sit on the receiver until their own timeout fires.
         // Soft-approve maps to Approved, hard-deny maps to Denied. Errors
         // (receiver already dropped) are ignored.
-        {
-            let mut tx_map = self.pending_resolution_tx.write().await;
-            let mut rx_map = self.pending_resolution_rx.write().await;
-            for (id, _, _, _, auto_action) in &expired {
-                let outcome = match auto_action {
-                    AutoAction::Approve => ResolutionOutcome::Approved,
-                    AutoAction::Deny => ResolutionOutcome::Expired,
-                };
-                if let Some(tx) = tx_map.remove(id) {
-                    let _ = tx.send(outcome);
-                }
-                rx_map.remove(id);
-            }
+        for (id, _, _, _, auto_action) in &expired {
+            let outcome = match auto_action {
+                AutoAction::Approve => ResolutionOutcome::Approved,
+                AutoAction::Deny => ResolutionOutcome::Expired,
+            };
+            self.wake_resolution(*id, outcome).await;
+        }
+
+        if !expired.is_empty() {
+            // One event for the whole sweep. Emitting per id turned an
+            // away-from-desk backlog into N invalidations in a single tick,
+            // each cancelling the refetch the last one started.
+            self.emit_realtime("escalation.expired", None);
         }
 
         expired
@@ -887,13 +1031,14 @@ impl EscalationManager {
         };
 
         self.escalations.write().await.push(escalation.clone());
-        self.persist_escalation(escalation).await;
+        self.persist_escalation(escalation.clone()).await;
         tracing::info!(
             escalation_id = id,
             task_id = %task_id,
             expires_at = %expires_at.to_rfc3339(),
             "Soft-approval escalation created (auto-approves in 30s)"
         );
+        self.emit_realtime("escalation.created", Some(id));
 
         id
     }
@@ -944,13 +1089,19 @@ impl EscalationManager {
         };
 
         self.escalations.write().await.push(escalation.clone());
-        self.persist_escalation(escalation).await;
+        self.persist_escalation(escalation.clone()).await;
         tracing::info!(
             escalation_id = id,
             task_id = %task_id,
             device_id = %device_id,
             "HAL device access escalation created"
         );
+        // This path bypasses `create_escalation_internal`, so nothing else
+        // announces it — without this the whole hardware surface still lags the
+        // panel by a poll interval while the agent sits blocked, and an
+        // operator who is not looking at the panel never hears about it at all.
+        self.fan_out_to_sinks(&escalation).await;
+        self.emit_realtime("escalation.created", Some(id));
 
         (id, true)
     }
@@ -979,6 +1130,91 @@ impl EscalationManager {
                         == Some(device_id)
             })
             .cloned()
+    }
+
+    /// Carry an operator decision on a `device_access` escalation through to
+    /// the hardware registry.
+    ///
+    /// Without this the approval was recorded and dropped: `resolve` flipped
+    /// the escalation to `approve` while the device stayed `Pending`, so the
+    /// agent's next HAL call raised *another* escalation. The operator could
+    /// approve indefinitely and never grant anything. The expiry path in
+    /// `run_loop` has always carried the deny side through; this is the
+    /// missing approve side.
+    ///
+    /// A denial deliberately leaves the device `Pending` rather than
+    /// quarantining it — quarantine is irreversible from the agent's side and
+    /// is a heavier consequence than "no, not this time". The expiry sweeper
+    /// still quarantines on timeout.
+    /// Returns `false` only when this *was* an approving device-access
+    /// resolution and the grant did not take effect — the caller downgrades the
+    /// decision so nothing reports a success that did not happen. Every other
+    /// case (a denial, a non-device escalation) is `true`: there was nothing to
+    /// grant, so nothing failed.
+    ///
+    /// The most reachable failure is a quarantined device: any device-access
+    /// escalation that expires quarantines the device
+    /// (`run_loop::sweep_expired`), and `approve_for_agent` refuses to approve
+    /// a quarantined one. An operator whose first prompt timed out would
+    /// otherwise see "resolved: approve" on every surface and watch nothing
+    /// happen — the original symptom, one step later.
+    ///
+    /// ponytail: the grant lives only in the in-memory `HardwareRegistry`, so
+    /// it does not survive a kernel restart; the escalation does, restored as
+    /// resolved, so nothing replays it and the agent re-escalates. Persisting
+    /// `granted_to` is the upgrade path if restarts start costing approvals.
+    async fn apply_device_access_resolution(
+        &self,
+        escalation: &PendingEscalation,
+        approved: bool,
+    ) -> bool {
+        if !approved {
+            return true;
+        }
+        if escalation
+            .metadata
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("device_access")
+        {
+            return true;
+        }
+        let Some(device_id) = escalation
+            .metadata
+            .get("device_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return true;
+        };
+        let Some(registry) = self.hardware_registry.read().await.clone() else {
+            tracing::error!(
+                escalation_id = escalation.id,
+                device_id = %device_id,
+                "Device access approved but no hardware registry is attached — grant dropped"
+            );
+            return false;
+        };
+        match registry.approve_for_agent(device_id, escalation.agent_id) {
+            Ok(()) => {
+                tracing::info!(
+                    escalation_id = escalation.id,
+                    device_id = %device_id,
+                    agent_id = %escalation.agent_id,
+                    "Device access granted from escalation approval"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::error!(
+                    escalation_id = escalation.id,
+                    device_id = %device_id,
+                    agent_id = %escalation.agent_id,
+                    error = %error,
+                    "Device access approved but the registry grant failed"
+                );
+                false
+            }
+        }
     }
 
     pub async fn auto_resolve_device_escalation(
@@ -1021,8 +1257,28 @@ impl EscalationManager {
         drop(escalations);
 
         let count = updated.len();
+        let outcome = if approved {
+            ResolutionOutcome::Approved
+        } else {
+            ResolutionOutcome::Denied
+        };
         for escalation in updated {
+            let id = escalation.id;
             self.persist_escalation(escalation).await;
+            // Wake anyone parked in `KernelDeviceAccessGate::check`. The
+            // caller has already applied the grant to the hardware registry,
+            // so the woken call re-checks and proceeds. Without this an
+            // `agentos hal approve` (or the HAL page) left the agent parked
+            // until its approval window expired, even though the device was
+            // approved seconds after it asked.
+            self.wake_resolution(id, outcome).await;
+        }
+        if count > 0 {
+            // Approving a device from the HAL page or the CLI silently flips
+            // these rows. Without the push, the queue keeps rendering Approve
+            // for them and the click comes back a 409 on a decision the
+            // operator already made.
+            self.emit_realtime("escalation.resolved", None);
         }
 
         count
@@ -1101,6 +1357,43 @@ mod tests {
         fn name(&self) -> &'static str {
             "test-hanging"
         }
+    }
+
+    /// The panel's approval queue is poll-driven; without this push it lags the
+    /// operator's phone notification by a poll interval. Covers both ends of an
+    /// escalation's life, since a stale Approve button is as bad as a missing one.
+    #[tokio::test]
+    async fn realtime_sender_receives_create_and_resolve() {
+        let manager = EscalationManager::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        manager.set_realtime_sender(tx);
+
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "ctx".into(),
+                "decide".into(),
+                vec!["approve".into()],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        let created = rx.try_recv().expect("create should broadcast");
+        assert_eq!(created.channel, "escalations");
+        assert_eq!(created.event, "escalation.created");
+        assert_eq!(created.data["escalation_id"], id);
+        // Only the id travels — the escalation body can carry sensitive args.
+        assert_eq!(created.data.as_object().unwrap().len(), 1);
+
+        manager.resolve(id, "approve".to_string()).await;
+        let resolved = rx.try_recv().expect("resolve should broadcast");
+        assert_eq!(resolved.event, "escalation.resolved");
+        assert_eq!(resolved.data["escalation_id"], id);
     }
 
     #[tokio::test]
@@ -1234,6 +1527,8 @@ mod tests {
             pending_resolution_tx: RwLock::new(HashMap::new()),
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
+            hardware_registry: RwLock::new(None),
+            realtime_tx: std::sync::OnceLock::new(),
         };
         let id = manager
             .create_escalation(
@@ -1485,6 +1780,8 @@ mod tests {
             pending_resolution_tx: RwLock::new(HashMap::new()),
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
+            hardware_registry: RwLock::new(None),
+            realtime_tx: std::sync::OnceLock::new(),
         };
 
         let task_id = TaskID::new();
@@ -1532,6 +1829,8 @@ mod tests {
             pending_resolution_tx: RwLock::new(HashMap::new()),
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
+            hardware_registry: RwLock::new(None),
+            realtime_tx: std::sync::OnceLock::new(),
         };
 
         let task_id = TaskID::new();
@@ -1666,6 +1965,110 @@ mod tests {
             manager.list_pending().await[0].metadata["kind"].as_str(),
             Some("device_access")
         );
+    }
+
+    /// A HAL device prompt must reach the operator's channels, not just the
+    /// control panel. `create_device_access_escalation` bypasses
+    /// `create_escalation_internal`, so it announced itself on the panel SSE
+    /// stream and nowhere else — an operator working over Telegram was never
+    /// told the agent was parked waiting for them.
+    #[tokio::test]
+    async fn device_access_escalation_fans_out_to_registered_sinks() {
+        let manager = EscalationManager::new();
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        manager
+            .add_sink(Arc::new(RecordingSink { seen: seen.clone() }))
+            .await;
+
+        let (id, created) = manager
+            .create_device_access_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                "audio:49",
+                "write",
+                TraceID::new(),
+            )
+            .await;
+        assert!(created);
+
+        // Sinks run in spawned tasks — give them a moment to land.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(seen.lock().await.clone(), vec![id]);
+    }
+
+    /// Every path that resolves an escalation must deliver the outcome to a
+    /// parked waiter. `auto_resolve_device_escalation` (the `agentos hal
+    /// approve` path) and `resolve_for_task` (terminal task cleanup) both
+    /// recorded the decision and dropped it on the floor, leaving the waiter
+    /// parked until its own timeout.
+    #[tokio::test]
+    async fn resolution_paths_wake_a_parked_waiter() {
+        for approve in [true, false] {
+            let manager = EscalationManager::new();
+            let agent_id = AgentID::new();
+            let (id, created) = manager
+                .create_device_access_escalation(
+                    TaskID::new(),
+                    agent_id,
+                    "audio:49",
+                    "write",
+                    TraceID::new(),
+                )
+                .await;
+            assert!(created);
+            manager.prepare_resolution(id).await;
+            let rx = manager
+                .take_resolution_receiver(id)
+                .await
+                .expect("channel installed");
+
+            manager
+                .auto_resolve_device_escalation("audio:49", Some(&agent_id), approve)
+                .await;
+
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+                .await
+                .expect("operator device decision must wake the waiter, not time it out")
+                .expect("sender must not be dropped without an outcome");
+            assert_eq!(
+                outcome,
+                if approve {
+                    ResolutionOutcome::Approved
+                } else {
+                    ResolutionOutcome::Denied
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_for_task_wakes_a_parked_waiter() {
+        let manager = EscalationManager::new();
+        let task_id = TaskID::new();
+        let (id, _) = manager
+            .create_device_access_escalation(
+                task_id,
+                AgentID::new(),
+                "webcam:video0",
+                "execute",
+                TraceID::new(),
+            )
+            .await;
+        manager.prepare_resolution(id).await;
+        let rx = manager
+            .take_resolution_receiver(id)
+            .await
+            .expect("channel installed");
+
+        // A second caller can dedup onto this escalation and park on it, so a
+        // task reaching a terminal state has to release it.
+        manager.resolve_for_task(&task_id, "Task terminated").await;
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("terminal-task cleanup must wake the waiter")
+            .expect("sender must not be dropped without an outcome");
+        assert_eq!(outcome, ResolutionOutcome::Denied);
     }
 
     #[tokio::test]

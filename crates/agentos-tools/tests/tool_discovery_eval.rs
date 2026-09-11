@@ -375,8 +375,9 @@ async fn semantic_recall_beats_lexical_baseline_on_synonym_rows() {
 //      (explicit `[manifest].category` wins; vocabulary: fs/shell/web/process/system/agent/task/
 //       artifact/hal/memory/mcp/scratchpad/channel/events/skills/plugins/containers/
 //       webhooks/capabilities/scheduling/notifications — else "core")
-// 2. Add a matching ToolSummary to gold_summaries() in this file so it has
-//    realistic name, description, category, and tags.
+// 2. Nothing else to add here: `gold_summaries()` loads the real
+//    `tools/core` manifests, so a new tool's description, category,
+//    `search_hints` and `payload_schema` are picked up automatically.
 // 3. Run Tier-1 to confirm the row passes validity guards:
 //    cargo test -p agentos-tools --test tool_discovery_eval structural
 

@@ -279,6 +279,7 @@ impl AgentRegistry {
         description: Option<String>,
         default_thinking_level: Option<ThinkingLevel>,
         system_prompt: Option<Option<String>>,
+        working_set_size: Option<Option<usize>>,
     ) -> Result<AgentID, String> {
         let id = *self
             .name_index
@@ -293,6 +294,9 @@ impl AgentRegistry {
             }
             if let Some(p) = system_prompt {
                 agent.system_prompt = p;
+            }
+            if let Some(w) = working_set_size {
+                agent.working_set_size = w;
             }
             self.save_to_disk();
             Ok(id)
@@ -735,6 +739,7 @@ mod tests {
             default_thinking_level: ThinkingLevel::Off,
             system_prompt: None,
             manually_offline: false,
+            working_set_size: None,
         }
     }
 
@@ -930,7 +935,7 @@ mod tests {
         // All-None = touch nothing. This is the case that used to erase a system
         // prompt when an operator edited only the description.
         registry
-            .update_profile_settings("alice", None, None, None)
+            .update_profile_settings("alice", None, None, None, None)
             .expect("partial update");
         let a = registry.get_by_name("alice").unwrap();
         assert_eq!(a.description, "original");
@@ -939,7 +944,7 @@ mod tests {
 
         // Description only: the other two survive.
         registry
-            .update_profile_settings("alice", Some("edited".to_string()), None, None)
+            .update_profile_settings("alice", Some("edited".to_string()), None, None, None)
             .expect("description-only update");
         let a = registry.get_by_name("alice").unwrap();
         assert_eq!(a.description, "edited");
@@ -948,7 +953,13 @@ mod tests {
 
         // Some(Some(_)) sets, Some(None) clears.
         registry
-            .update_profile_settings("alice", None, None, Some(Some("new prompt".to_string())))
+            .update_profile_settings(
+                "alice",
+                None,
+                None,
+                Some(Some("new prompt".to_string())),
+                None,
+            )
             .expect("set prompt");
         assert_eq!(
             registry
@@ -959,9 +970,16 @@ mod tests {
             Some("new prompt")
         );
         registry
-            .update_profile_settings("alice", None, Some(ThinkingLevel::Low), Some(None))
+            .update_profile_settings(
+                "alice",
+                None,
+                Some(ThinkingLevel::Low),
+                Some(None),
+                Some(Some(0)),
+            )
             .expect("clear prompt");
         let a = registry.get_by_name("alice").unwrap();
+        assert_eq!(a.working_set_size, Some(0));
         assert_eq!(a.system_prompt, None);
         assert_eq!(a.default_thinking_level, ThinkingLevel::Low);
     }

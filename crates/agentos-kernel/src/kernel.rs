@@ -28,6 +28,8 @@ use agentos_hal::drivers::raw_usb::RawUsbDriver;
 use agentos_hal::drivers::usb_storage::UsbStorageDriver;
 #[cfg(all(feature = "webcam", target_os = "linux"))]
 use agentos_hal::drivers::webcam::WebcamDriver;
+#[cfg(all(feature = "wifi", target_os = "linux"))]
+use agentos_hal::drivers::wifi::WifiDriver;
 use agentos_hal::{
     discover_available_devices,
     drivers::{
@@ -74,10 +76,17 @@ fn parse_vid_pid(s: &str) -> Option<(u16, u16)> {
     Some((vid, pid))
 }
 
+/// How long a HAL call parks waiting for the operator to answer its device
+/// escalation. Deliberately under `tool_execution.default_timeout_seconds`
+/// (300s) so a stalled approval surfaces as a typed `DeviceAccessPending`
+/// error the agent can act on, not an opaque tool timeout.
+const DEVICE_APPROVAL_WAIT_SECS: u64 = 240;
+
 struct KernelDeviceAccessGate {
     registry: Arc<HardwareRegistry>,
     escalation_manager: Arc<crate::escalation::EscalationManager>,
     audit: Arc<AuditLog>,
+    approval_wait: std::time::Duration,
 }
 
 impl KernelDeviceAccessGate {
@@ -90,7 +99,14 @@ impl KernelDeviceAccessGate {
             registry,
             escalation_manager,
             audit,
+            approval_wait: std::time::Duration::from_secs(DEVICE_APPROVAL_WAIT_SECS),
         }
+    }
+
+    #[cfg(test)]
+    fn with_approval_wait(mut self, wait: std::time::Duration) -> Self {
+        self.approval_wait = wait;
+        self
     }
 
     fn default_status_for(device_type: &str) -> DeviceStatus {
@@ -533,25 +549,30 @@ impl DeviceAccessGate for KernelDeviceAccessGate {
             )));
         };
 
+        // An operator denial for this agent is checked BEFORE the status
+        // arms: a denial leaves the device `Pending`, so testing `denied_to`
+        // only on `Approved` devices let a denied agent fall through to the
+        // escalation arm and re-prompt the operator on every retry.
+        if device.denied_to.contains(agent_id) {
+            self.audit(
+                agentos_audit::AuditEventType::DeviceAccessDenied,
+                agentos_audit::AuditSeverity::Warn,
+                Some(*agent_id),
+                Some(*task_id),
+                json!({
+                    "device_id": device_id,
+                    "device_type": device.device_type,
+                    "operation": operation.to_string(),
+                    "reason": "agent-specific device denial",
+                }),
+            )?;
+            return Err(AgentOSError::PermissionDenied {
+                resource: device_id.to_string(),
+                operation: "device_access".to_string(),
+            });
+        }
+
         match device.status {
-            DeviceStatus::Approved if device.denied_to.contains(agent_id) => {
-                self.audit(
-                    agentos_audit::AuditEventType::DeviceAccessDenied,
-                    agentos_audit::AuditSeverity::Warn,
-                    Some(*agent_id),
-                    Some(*task_id),
-                    json!({
-                        "device_id": device_id,
-                        "device_type": device.device_type,
-                        "operation": operation.to_string(),
-                        "reason": "agent-specific device denial",
-                    }),
-                )?;
-                Err(AgentOSError::PermissionDenied {
-                    resource: device_id.to_string(),
-                    operation: "device_access".to_string(),
-                })
-            }
             DeviceStatus::Approved
                 if device.granted_to.is_empty() || device.granted_to.contains(agent_id) =>
             {
@@ -593,6 +614,100 @@ impl DeviceAccessGate for KernelDeviceAccessGate {
                             "escalation_id": escalation_id,
                         }),
                     )?;
+                }
+
+                // Park on the operator decision instead of failing the call
+                // outright. The tool-risk gate already parks like this
+                // (`task_executor::enforce_tool_pre`); returning here meant a
+                // device approval could only ever take effect on some *later*
+                // turn, so an operator who approved while the agent was still
+                // waiting changed nothing.
+                //
+                // Only the caller that CREATED the escalation parks. A
+                // `created == false` dedup hit means a concurrent call already
+                // owns the resolution channel, and installing a second one
+                // would drop the first sender — silently un-parking the caller
+                // that is actually waiting. The duplicate fails fast instead,
+                // exactly as it did before this change.
+                let mut denied = false;
+                if created {
+                    self.escalation_manager
+                        .prepare_resolution(escalation_id)
+                        .await;
+                    // The operator can answer between creation and this park.
+                    // Installing the channel first means such a resolution
+                    // still fires it; this check covers the case where it
+                    // landed even earlier.
+                    let already_resolved = self
+                        .escalation_manager
+                        .get(escalation_id)
+                        .await
+                        .map(|escalation| escalation.resolved)
+                        .unwrap_or(false);
+                    if !already_resolved {
+                        if let Some(rx) = self
+                            .escalation_manager
+                            .take_resolution_receiver(escalation_id)
+                            .await
+                        {
+                            denied = matches!(
+                                tokio::time::timeout(self.approval_wait, rx).await,
+                                Ok(Ok(crate::escalation::ResolutionOutcome::Denied))
+                            );
+                        }
+                    }
+                }
+
+                // The registry, not the wake outcome, decides access: `resolve`
+                // applies the grant BEFORE waking us, `agentos hal approve`
+                // grants without waking anyone, and a grant can fail after an
+                // operator said yes (quarantined device).
+                if self.registry.check_access(device_id, agent_id).is_ok() {
+                    self.audit(
+                        agentos_audit::AuditEventType::DeviceAccessGranted,
+                        agentos_audit::AuditSeverity::Info,
+                        Some(*agent_id),
+                        Some(*task_id),
+                        json!({
+                            "device_id": device_id,
+                            "device_type": device.device_type,
+                            "operation": operation.to_string(),
+                            "escalation_id": escalation_id,
+                        }),
+                    )?;
+                    return Ok(());
+                }
+
+                if denied {
+                    // Record the refusal. A denial leaves the device `Pending`,
+                    // so without this the agent's retry raises escalation N+1
+                    // and parks again — an unbounded prompt loop, since the
+                    // device path bypasses `MAX_ESCALATIONS_PER_TASK`. The entry
+                    // is not permanent: `approve_for_agent` clears `denied_to`.
+                    if let Err(error) = self.registry.deny_for_agent(device_id, *agent_id) {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            error = %error,
+                            "Could not record operator denial for this agent"
+                        );
+                    }
+                    self.audit(
+                        agentos_audit::AuditEventType::DeviceAccessDenied,
+                        agentos_audit::AuditSeverity::Warn,
+                        Some(*agent_id),
+                        Some(*task_id),
+                        json!({
+                            "device_id": device_id,
+                            "device_type": device.device_type,
+                            "operation": operation.to_string(),
+                            "escalation_id": escalation_id,
+                            "reason": "operator denied the device escalation",
+                        }),
+                    )?;
+                    return Err(AgentOSError::PermissionDenied {
+                        resource: device_id.to_string(),
+                        operation: "device_access".to_string(),
+                    });
                 }
 
                 Err(AgentOSError::DeviceAccessPending {
@@ -752,6 +867,17 @@ pub struct Kernel {
     /// task-only agent (never drained by chat) can't grow it unbounded.
     pub claude_gateway_tool_calls:
         Arc<RwLock<HashMap<AgentID, crate::claude_mcp_gateway::GatewayToolCallCollector>>>,
+    /// Agents currently taking a turn in a multi-agent conversation.
+    ///
+    /// The chat loop enforces [`ChatTurnScope`] on the tool calls it dispatches
+    /// itself, but a claude-code agent's calls never go through that loop — the
+    /// subprocess invokes them against its own MCP gateway, which then calls
+    /// `ToolRunner` directly. Without this set the whole containment property
+    /// fails open for that adapter class, so the gateway consults it by agent id
+    /// (see `KernelMcpExecutor::execute_with_hooks`).
+    ///
+    /// Maintained by `convo_runner::run_convo` around each turn's inference.
+    pub convo_turn_agents: Arc<RwLock<std::collections::HashSet<AgentID>>>,
     /// Onboarding tasks of newly connected agents that have not been announced
     /// yet, keyed by task ID with the pending `AgentAdded` payload.
     ///
@@ -1002,8 +1128,15 @@ pub struct ChatInferenceResult {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum ChatStreamEvent {
-    /// Inference started — LLM is thinking.
-    Thinking { iteration: u32 },
+    /// Inference started (`text: None`), then one frame per chunk of the model's
+    /// reasoning while the pass runs (`text: Some(delta)`) for providers that
+    /// expose it. `text` is absent on the wire when `None`, so a client written
+    /// against the marker-only shape keeps working unchanged.
+    Thinking {
+        iteration: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
     /// An incremental text chunk from the LLM (one or more tokens).
     TextChunk { text: String },
     /// A tool call was detected; execution is starting.
@@ -1061,11 +1194,146 @@ mod chat_stream_event_tests {
         let v = serde_json::to_value(&ev).expect("serialize");
         assert!(v.get("task_id").is_none());
     }
+
+    /// `text` must stay ABSENT (not `null`) on the pass marker: a client written
+    /// against the marker-only shape has to keep working unchanged, and the
+    /// panel decides "step" vs "reasoning block" purely on the key being there.
+    #[test]
+    fn thinking_marker_omits_text_and_a_delta_carries_it() {
+        let marker = serde_json::to_string(&ChatStreamEvent::Thinking {
+            iteration: 2,
+            text: None,
+        })
+        .unwrap();
+        assert_eq!(marker, r#"{"type":"Thinking","iteration":2}"#);
+
+        let delta = serde_json::to_string(&ChatStreamEvent::Thinking {
+            iteration: 2,
+            text: Some("weigh the options".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            delta,
+            r#"{"type":"Thinking","iteration":2,"text":"weigh the options"}"#
+        );
+    }
 }
 
 /// Fallback chat tool-iteration cap when config is missing. Live config value
 /// is `chat.max_tool_iterations` and is read per-call via `self.config.chat`.
 const CHAT_MAX_TOOL_ITERATIONS_FALLBACK: u32 = 25;
+
+/// Tool-iteration cap for a turn inside a multi-agent conversation.
+///
+/// A conversation turn owes the transcript one utterance. It may want a single
+/// lookup (memory, search, a file read) before speaking; it has no business
+/// grinding. On 2026-09-09 a convo turn ran 20 iterations and raised 12 approval
+/// escalations without producing one word, because the general chat cap (25)
+/// applied to it. See [[Convo Turn Contract Plan]].
+pub const CONVO_TURN_MAX_TOOL_ITERATIONS: u32 = 4;
+
+/// Tools a conversation turn may not call.
+///
+/// The out-of-band egress + orchestration family: everything whose effect is to
+/// reach a person, an agent or a task *outside* the transcript the operator is
+/// watching. Withholding them is a containment property, not a nicety — a convo
+/// turn that can fan messages to arbitrary agents and channels while the
+/// transcript stays empty is exactly the 2026-09-09 incident.
+///
+/// The scheduling primitives are on the list because they are *deferred* egress:
+/// `schedule-once` with `mode = "tool"` re-invokes an arbitrary tool name a
+/// second later, on the scheduler tick, where this scope no longer applies —
+/// and `is_tool_blocked_for_schedule` does not deny `agent-message`,
+/// `notify-user` or `channel-send`. `mode = "task"` is worse still: it runs a
+/// prompt as a *task* on another agent, and the task path has no turn scope at
+/// all. Withholding the schedulers is what makes the direct entries meaningful.
+///
+/// Deliberately NOT withheld: memory, scratchpad, search, file and HAL tools. A
+/// convo turn may look things up; it may not reach out.
+///
+/// KNOWN CEILING: this gates tools by name, so an agent holding `process.exec`
+/// can still reach the outside world through `shell-exec` (curl, mail), and
+/// `http-client` can POST despite its `readonly_external` class. The list stops
+/// the *supported* egress paths and the accidental ones the model reaches for —
+/// it is not a sandbox. Contain exec-capable agents by permission, not by this.
+pub const CONVO_WITHHELD_TOOL_NAMES: &[&str] = &[
+    // Direct agent-to-agent and agent-to-person egress.
+    "agent-message",
+    "agent-call",
+    "a2a-delegate",
+    "notify-user",
+    "channel-send",
+    "ask-user",
+    // Spawning and delegation.
+    "spawn-agent",
+    "spawn-async",
+    "task-delegate",
+    "await-agents",
+    "poll-agent",
+    "cancel-agent",
+    // Deferred egress — see the note above. These re-open every name listed
+    // here on the next scheduler tick, outside this scope.
+    "schedule-once",
+    "schedule-recurring",
+    "schedule-control",
+    "set-timer",
+    "set-cron",
+];
+
+/// What kind of turn the chat loop is running.
+///
+/// The loop is shared by ordinary chat and by multi-agent conversation turns,
+/// but the two have different contracts: a chat turn may act on the world and
+/// its text is optional, a convo turn owes the transcript exactly one utterance.
+/// Encoding that difference here keeps it enforced in the kernel rather than in
+/// prompt wording, which any model is free to ignore.
+///
+/// `Default` is deliberately NOT derived: this is a containment type, and a
+/// derived default would silently hand `Full` to any future struct field or
+/// `..Default::default()`. Every construction site states which it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatTurnScope {
+    /// Ordinary chat: the agent's full permitted tool set.
+    Full,
+    /// One turn of a multi-agent conversation.
+    ConvoTurn,
+}
+
+impl ChatTurnScope {
+    /// True when this scope forbids `tool_name`.
+    ///
+    /// Checked at dispatch, not only when building the manifest list: dropping a
+    /// tool from the offered array is not enforcement, because models routinely
+    /// emit names that were never offered.
+    pub fn withholds(&self, tool_name: &str) -> bool {
+        // Normalized like `is_tool_blocked_for_schedule`: `ToolRunner::execute`
+        // auto-corrects `_` → `-` at dispatch, so matching the raw name alone
+        // would let `agent_message` past this gate and then run `agent-message`.
+        matches!(self, Self::ConvoTurn)
+            && CONVO_WITHHELD_TOOL_NAMES.contains(&tool_name.replace('_', "-").as_str())
+    }
+
+    /// Narrow the configured per-turn iteration cap for this scope. Never widens
+    /// it — an operator who lowers `chat.max_tool_iterations` still wins.
+    pub fn max_tool_iterations(&self, configured: u32) -> u32 {
+        match self {
+            Self::Full => configured,
+            Self::ConvoTurn => configured.min(CONVO_TURN_MAX_TOOL_ITERATIONS),
+        }
+    }
+
+    /// Denial text handed back to the model in place of the tool result.
+    ///
+    /// It has to say what to do *instead*, or the model spends the remaining
+    /// iterations retrying the same call.
+    pub fn withheld_tool_message(&self, tool_name: &str) -> String {
+        format!(
+            "Tool '{tool_name}' is not available inside an agent conversation. \
+             Reply with plain text instead — your reply is delivered to the other \
+             participants automatically."
+        )
+    }
+}
 
 /// TTL of the per-turn capability token minted for chat tool execution (S1).
 /// Bounded to a single chat turn, not a task lifetime — long enough to cover
@@ -1079,6 +1347,23 @@ const CHAT_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// stalled reader pin a permit indefinitely. Generous enough that a merely slow
 /// client is never cut off mid-answer.
 const STREAM_CONSUMER_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Send one event on the browser-facing stream channel, bounded. Returns false
+/// when the reader is gone: the send either timed out (a stalled reader) or the
+/// receiver was dropped (`Ok(Err(SendError))` — what Stop looks like, since
+/// aborting the fetch drops the SSE stream). An unbounded send here parks the
+/// chat loop for as long as a reader refuses to drain, holding the endpoint's
+/// concurrency permit; a plain `.is_err()` on the timeout misses the dropped
+/// receiver entirely, which is how a stopped turn used to generate to the end.
+async fn send_stream_event(
+    tx: &tokio::sync::mpsc::Sender<ChatStreamEvent>,
+    ev: ChatStreamEvent,
+) -> bool {
+    matches!(
+        tokio::time::timeout(STREAM_CONSUMER_SEND_TIMEOUT, tx.send(ev)).await,
+        Ok(Ok(()))
+    )
+}
 
 /// Map an `IntentType` to the `IntentTypeFlag` used in capability-token scoping.
 /// Mirrors the mapping in `CapabilityEngine::validate_intent` so a chat token's
@@ -1099,8 +1384,13 @@ fn chat_intent_flag(t: IntentType) -> IntentTypeFlag {
     }
 }
 
-const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
+pub const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
     "_(no response from model — the provider returned an empty answer; please retry)_";
+
+/// Nudge injected once when the model ends its turn with no text and no
+/// tool calls (seen on gpt-oss / nemotron after tool-result bursts).
+const EMPTY_ANSWER_NUDGE: &str =
+    "Your previous reply was empty. Answer the user now in plain text, using the tool results above.";
 
 /// Max consecutive iterations the model is allowed to spend in
 /// meta-tool calls (any combination) before the chat loop aborts.
@@ -1350,7 +1640,82 @@ async fn persist_session_dedup_cache(
     }
 }
 
+/// How long a resolved escalation stays visible to `escalation-status`.
+///
+/// Long enough that an agent polling after an operator decision still finds it
+/// (escalations themselves expire after 5 minutes), short enough that the
+/// per-tool-call snapshot stays small.
+const ESCALATION_RESOLVED_VISIBILITY: chrono::Duration = chrono::Duration::hours(1);
+
+/// Whether a chat tool result may be held in the per-session dedup cache and
+/// replayed verbatim on an identical later call.
+///
+/// The cache exists to break *loops* — an agent repeating one call forever.
+/// Replaying a stale answer is a different thing, and three kinds of result
+/// must never be replayed:
+///
+/// - **Meta/discovery output** is stateless documentation; replaying it
+///   refloods the context and trips dedup on legitimate re-exploration.
+/// - **Errors** are a moment, not an answer. Caching one makes it permanent
+///   for the session: a `scan` that failed while the radio was rfkill-blocked
+///   was replayed after it was unblocked, and the agent escaped only by
+///   varying an argument by accident (2026-09-08, session `f203e802`).
+/// - **Volatile tools** read hardware and live kernel state, which move
+///   underneath identical calls. `bluetooth list_adapters` kept answering
+///   `powered: false` for 13 minutes after the radio came on.
+fn is_dedup_cacheable(tool_name: &str, result: &serde_json::Value) -> bool {
+    !agentos_tools::META_TOOL_NAMES.contains(&tool_name)
+        && !agentos_tools::VOLATILE_TOOL_NAMES.contains(&tool_name)
+        && !result
+            .as_object()
+            .is_some_and(|obj| obj.contains_key("error"))
+}
+
 impl Kernel {
+    /// Escalations raised for `agent_id`, as an `EscalationQuery` the
+    /// `escalation-status` tool can read.
+    ///
+    /// Call this per tool call, not once per turn. A turn-scoped snapshot
+    /// cannot contain an escalation the same turn just created — which is the
+    /// only escalation an agent has any reason to poll for. On 2026-09-08 an
+    /// agent asked for escalation 377 four seconds after the call that raised
+    /// it and was told `found: false`, then told the operator to "trigger an
+    /// approval" that had already been granted.
+    ///
+    /// Recently-resolved escalations are included for the same reason. The
+    /// question an agent asks is "did my approval land?", and a pending-only
+    /// view answers that with `found: false` — identical to the answer for an
+    /// escalation that never existed. `list_pending_for_agent` on the snapshot
+    /// still filters resolved entries out, so only lookup by id sees them.
+    pub(crate) async fn escalation_snapshot_for(
+        &self,
+        agent_id: AgentID,
+    ) -> Arc<dyn EscalationQuery> {
+        let recent = self
+            .escalation_manager
+            .list_recent_for_agent(&agent_id, ESCALATION_RESOLVED_VISIBILITY)
+            .await;
+        let summaries: Vec<EscalationSummary> = recent
+            .into_iter()
+            .map(|e| EscalationSummary {
+                id: e.id,
+                task_id: e.task_id,
+                agent_id: e.agent_id,
+                reason: format!("{:?}", e.reason),
+                context_summary: e.context_summary,
+                decision_point: e.decision_point,
+                options: e.options,
+                urgency: e.urgency,
+                blocking: e.blocking,
+                created_at: e.created_at,
+                expires_at: e.expires_at,
+                resolved: e.resolved,
+                resolution: e.resolution,
+            })
+            .collect();
+        Arc::new(EscalationSnapshot::new(summaries))
+    }
+
     /// Returns the kernel data directory (used by the web server to co-locate stores).
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
@@ -1471,6 +1836,10 @@ impl Kernel {
     /// active channel in `UserChannelRegistry`, the corresponding delivery adapter is
     /// rebuilt (credentials re-fetched from vault) and its listener task is started.
     async fn restore_channels(&self) {
+        // Snapshot before any listener starts, so a message arriving during boot
+        // cannot be mistaken for one the previous kernel died on.
+        let interrupted = self.interrupted_channel_turns().await;
+
         let channels = match self.channel_registry.list_active().await {
             Ok(c) => c,
             Err(e) => {
@@ -1539,6 +1908,173 @@ impl Kernel {
                 }
             }
         }
+
+        self.notify_interrupted_channel_turns(interrupted).await;
+    }
+
+    /// Channel chat turns that were in flight when the previous kernel exited.
+    ///
+    /// Returns `(session_id, channel_instance_id)`. A chat turn is not
+    /// checkpointed the way an `AgentTask` is, so a restart mid-inference drops
+    /// the reply with no trace and the user waits forever on a message that will
+    /// never be answered.
+    async fn interrupted_channel_turns(&self) -> Vec<(String, ChannelInstanceID)> {
+        // Wide enough to cover an overnight box reboot — the headline case. It
+        // costs at most one notice per stuck session ever, because the notice is
+        // persisted as that session's assistant turn.
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let store = Arc::clone(&self.chat_store);
+        let rows = match tokio::task::spawn_blocking(move || {
+            store.channel_sessions_awaiting_reply(&cutoff)
+        })
+        .await
+        {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "Could not scan for interrupted channel turns");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "spawn_blocking panicked scanning channel turns");
+                return Vec::new();
+            }
+        };
+
+        // `channel:{instance_id}:{agent_name}` — see `channel_chat_bridge::channel_key`.
+        // The instance id is a hyphenated UUID, so an agent name containing ':'
+        // cannot shift the field we want.
+        rows.into_iter()
+            .filter_map(|(session_id, key)| {
+                match key.split(':').nth(1).and_then(|id| id.parse().ok()) {
+                    Some(channel_id) => Some((session_id, channel_id)),
+                    None => {
+                        tracing::warn!(
+                            channel_key = %key,
+                            "Channel session has an unparsable channel_key — its stuck \
+                             turn cannot be answered"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Tell each affected channel its last message went unanswered.
+    ///
+    /// The notice is persisted as the session's assistant turn, which is also
+    /// what makes this idempotent: the next boot no longer sees an unanswered
+    /// trailing row for that session.
+    async fn notify_interrupted_channel_turns(
+        &self,
+        interrupted: Vec<(String, ChannelInstanceID)>,
+    ) {
+        const NOTICE: &str = "I was restarted while working on your last message, so the \
+             reply was lost. Please send it again.";
+        // This runs inline in `boot()`, and channel adapters retry flood control
+        // with sleeps measured in minutes. An unreachable channel must not hold
+        // the bus socket, the API server and the run loop hostage.
+        const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+        // One notice per channel, but the notice is persisted into every stuck
+        // session so none of them is re-announced next boot. Two sessions can
+        // share a channel: `/chat <other-agent>` opens a second one alongside the
+        // channel's bound agent.
+        let mut announced: std::collections::HashSet<ChannelInstanceID> =
+            std::collections::HashSet::new();
+
+        for (session_id, channel_id) in interrupted {
+            let msg = UserMessage {
+                actions: Vec::new(),
+                id: NotificationID::new(),
+                from: NotificationSource::Kernel,
+                task_id: None,
+                trace_id: TraceID::new(),
+                kind: UserMessageKind::Notification,
+                priority: NotificationPriority::Info,
+                subject: "Interrupted".to_string(),
+                body: NOTICE.to_string(),
+                interaction: None,
+                delivery_status: Default::default(),
+                response: None,
+                created_at: chrono::Utc::now(),
+                expires_at: None,
+                read: false,
+                thread_id: Some(format!("channel:{channel_id}")),
+                reply_to_external_id: None,
+                attachment: None,
+            };
+
+            if !announced.contains(&channel_id) {
+                let trace_id = msg.trace_id;
+                let sent = tokio::time::timeout(
+                    SEND_TIMEOUT,
+                    self.notification_router
+                        .send_to_channel(msg, &channel_id.to_string()),
+                )
+                .await;
+                match sent {
+                    Ok(Ok(())) => {
+                        announced.insert(channel_id);
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id,
+                            event_type: agentos_audit::AuditEventType::ChannelMessageSent,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: json!({
+                                "channel_id": channel_id.to_string(),
+                                "source": "restart_interrupted_notice",
+                            }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                    }
+                    // Leave the session's trailing row alone so the next boot
+                    // retries the notice rather than silently swallowing it.
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            channel_id = %channel_id,
+                            error = %e,
+                            "Could not tell channel its last message was interrupted"
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            channel_id = %channel_id,
+                            timeout_secs = SEND_TIMEOUT.as_secs(),
+                            "Timed out telling channel its last message was interrupted"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let store = Arc::clone(&self.chat_store);
+            let sid = session_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                store.add_assistant_message(&sid, NOTICE, None, None)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Failed to persist restart notice")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "spawn_blocking panicked persisting restart notice")
+                }
+            }
+
+            tracing::info!(
+                channel_id = %channel_id,
+                session_id = %session_id,
+                "Told channel its in-flight turn was lost to a kernel restart"
+            );
+        }
     }
 
     /// Install the image resolver used by LLM adapters for [`ImageSource::FileRef`] (e.g. web uploads).
@@ -1602,6 +2138,78 @@ impl Kernel {
         self.channel_aux_secret(channel_id, "verify_token").await
     }
 
+    /// Acknowledge a Telegram inline-keyboard tap (`answerCallbackQuery`).
+    ///
+    /// Until this lands Telegram keeps a spinner on the button, so an operator
+    /// who taps "Approve" on an escalation cannot tell the tap registered. The
+    /// long-poll listener acks inline (`adapters::telegram`); webhook mode has
+    /// no such loop, which is why the webhook handler calls this. Best-effort:
+    /// a failed ack costs a spinner, never the approval itself.
+    pub async fn telegram_ack_callback(&self, channel_id: &str, callback_query_id: &str) {
+        let Ok(cid) = channel_id.parse::<ChannelInstanceID>() else {
+            return;
+        };
+        let cred = match self.channel_registry.get_by_id(&cid).await {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return,
+        };
+        if cred.is_empty() {
+            return;
+        }
+        let Ok(token) = self.vault.get(&cred).await else {
+            return;
+        };
+        // The token must never reach the log, so the URL is never logged.
+        let url = format!(
+            "https://api.telegram.org/bot{}/answerCallbackQuery",
+            token.as_str()
+        );
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "answerCallbackQuery: HTTP client build failed");
+                return;
+            }
+        };
+        match client
+            .post(&url)
+            .json(&serde_json::json!({
+                "callback_query_id": callback_query_id,
+                "cache_time": 0,
+            }))
+            .send()
+            .await
+        {
+            // Telegram reports its own failures in the body with HTTP 200, and a
+            // non-2xx is an `Ok` here too, so check the status explicitly.
+            Ok(r) if r.status().is_success() => {}
+            Ok(r) => tracing::warn!(status = %r.status(), "answerCallbackQuery rejected"),
+            Err(e) => tracing::warn!(error = %e, "answerCallbackQuery failed"),
+        }
+    }
+
+    /// User-role entry pushed once when the model returns a blank final
+    /// answer, so the retry inference has an explicit instruction to answer.
+    fn empty_answer_nudge_entry() -> agentos_types::ContextEntry {
+        agentos_types::ContextEntry {
+            role: agentos_types::ContextRole::User,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: EMPTY_ANSWER_NUDGE.to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: agentos_types::ContextPartition::Active,
+            category: agentos_types::ContextCategory::Task,
+            is_summary: false,
+        }
+    }
+
     fn merge_chat_user_parts(
         new_message: &str,
         user_parts: Option<Vec<agentos_types::ContentPart>>,
@@ -1642,6 +2250,7 @@ impl Kernel {
         &self,
         agent_id: &AgentID,
         session_id: Option<&str>,
+        scope: ChatTurnScope,
     ) -> Vec<ToolManifest> {
         const CHAT_MANIFEST_EXTRA_BUDGET: usize = 25;
         // Floor on usage-rank score to suppress boundary churn at the cap edge.
@@ -1717,6 +2326,11 @@ impl Kernel {
             .list_all()
             .into_iter()
             .filter(|tool| {
+                // Scope first: a withheld tool is not offered even when the
+                // agent holds the permission and the name is MCP-tagged below.
+                if scope.withholds(&tool.manifest.manifest.name) {
+                    return false;
+                }
                 if !agentos_capability::any_permission_granted(
                     &permissions,
                     &tool.manifest.capabilities_required.permissions,
@@ -1744,6 +2358,24 @@ impl Kernel {
             .collect();
         manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
         manifests
+    }
+
+    /// Mark (or unmark) `agent_id` as mid-conversation-turn.
+    ///
+    /// Read by the claude-code MCP gateway, whose tool calls bypass the chat
+    /// loop entirely and therefore cannot see the loop's `ChatTurnScope`.
+    pub async fn set_convo_turn(&self, agent_id: AgentID, active: bool) {
+        let mut guard = self.convo_turn_agents.write().await;
+        if active {
+            guard.insert(agent_id);
+        } else {
+            guard.remove(&agent_id);
+        }
+    }
+
+    /// True while `agent_id` is taking a conversation turn.
+    pub async fn is_in_convo_turn(&self, agent_id: &AgentID) -> bool {
+        self.convo_turn_agents.read().await.contains(agent_id)
     }
 
     /// Reset a claude-code agent's gateway tool-call buffer at the start of a
@@ -1989,6 +2621,32 @@ impl Kernel {
         user_parts: Option<Vec<agentos_types::ContentPart>>,
         session_id: Option<&str>,
     ) -> Result<ChatInferenceResult, String> {
+        self.chat_infer_with_tools_scoped(
+            agent_name,
+            history,
+            new_message,
+            user_parts,
+            session_id,
+            ChatTurnScope::Full,
+        )
+        .await
+    }
+
+    /// [`Self::chat_infer_with_tools`] with an explicit turn scope.
+    ///
+    /// Separate entry point rather than a sixth parameter on the original: the
+    /// unscoped form has ~20 call sites, nearly all tests, and every one of them
+    /// wants `Full`. Only the convo runner passes anything else.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_infer_with_tools_scoped(
+        &self,
+        agent_name: &str,
+        history: &[(String, String)],
+        new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
+        session_id: Option<&str>,
+        scope: ChatTurnScope,
+    ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
             match registry.get_by_name(agent_name) {
@@ -2024,8 +2682,9 @@ impl Kernel {
         };
 
         // Build system prompt from the canonical builder — same structure as task execution.
-        let llm_tool_manifests: Vec<ToolManifest> =
-            self.build_chat_tool_manifests(&agent_id, session_id).await;
+        let llm_tool_manifests: Vec<ToolManifest> = self
+            .build_chat_tool_manifests(&agent_id, session_id, scope)
+            .await;
         let connected_channels: Vec<crate::system_prompt::ChannelHint> =
             match self.channel_registry.list_active().await {
                 Ok(list) => list
@@ -2050,6 +2709,9 @@ impl Kernel {
                 connected_channels,
                 native_tool_calling: llm.supports_native_tool_calling(),
                 uses_tool_gateway: llm.uses_tool_gateway(),
+                granted_folders: crate::system_prompt::GrantedFolders::from_paths(
+                    &self.workspace_paths_for_agent(&agent_id),
+                ),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -2144,11 +2806,12 @@ impl Kernel {
         let mut iterations = 0u32;
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
-        let chat_max_tool_iterations = if self.config.chat.max_tool_iterations == 0 {
-            CHAT_MAX_TOOL_ITERATIONS_FALLBACK
-        } else {
-            self.config.chat.max_tool_iterations
-        };
+        let chat_max_tool_iterations =
+            scope.max_tool_iterations(if self.config.chat.max_tool_iterations == 0 {
+                CHAT_MAX_TOOL_ITERATIONS_FALLBACK
+            } else {
+                self.config.chat.max_tool_iterations
+            });
 
         // Circuit breakers for stuck small-model loops. Reset whenever the
         // model makes progress (different tool / non-empty text / different
@@ -2195,6 +2858,7 @@ impl Kernel {
         // breakers). Such a turn still returns text, but it is not a success —
         // see `chat_turn_end`.
         let mut turn_degraded = false;
+        let mut empty_answer_retried = false;
         // W3: `visible_text` is iteration-scoped, and unlike the streaming path
         // nothing has reached the user yet — the returned `final_answer` is the
         // turn's only output. Keep the last non-empty one so a mid-turn bail
@@ -2593,30 +3257,6 @@ impl Kernel {
                 // fail-closed with "not available in this context".
                 let task_snapshot_for_chat: Arc<dyn TaskQuery> =
                     Arc::new(self.scheduler.snapshot_tasks().await);
-                let escalation_snapshot_for_chat: Arc<dyn EscalationQuery> = {
-                    let pending = self.escalation_manager.list_pending().await;
-                    let summaries: Vec<EscalationSummary> = pending
-                        .into_iter()
-                        // Scoped to the asking agent, same as the task path.
-                        .filter(|e| e.agent_id == agent_id)
-                        .map(|e| EscalationSummary {
-                            id: e.id,
-                            task_id: e.task_id,
-                            agent_id: e.agent_id,
-                            reason: format!("{:?}", e.reason),
-                            context_summary: e.context_summary,
-                            decision_point: e.decision_point,
-                            options: e.options,
-                            urgency: e.urgency,
-                            blocking: e.blocking,
-                            created_at: e.created_at,
-                            expires_at: e.expires_at,
-                            resolved: e.resolved,
-                            resolution: e.resolution,
-                        })
-                        .collect();
-                    Arc::new(EscalationSnapshot::new(summaries))
-                };
 
                 let mut repeat_error_abort: Option<String> = None;
 
@@ -2727,7 +3367,7 @@ impl Kernel {
                         file_lock_registry: None,
                         agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: Some(Arc::clone(&task_snapshot_for_chat)),
-                        escalation_query: Some(Arc::clone(&escalation_snapshot_for_chat)),
+                        escalation_query: Some(self.escalation_snapshot_for(agent_id).await),
                         workspace_paths: ws_chat.read,
                         workspace_paths_writable: ws_chat.writable,
                         workspace_paths_executable: ws_chat.executable,
@@ -2748,7 +3388,39 @@ impl Kernel {
                     };
 
                     let start = std::time::Instant::now();
-                    let mut tool_result = if let Some(prev) = cached.clone() {
+                    // Turn-scope gate FIRST — ahead of the dedup replay as well as
+                    // the capability check. A conversation turn may not reach out
+                    // of band, and it must not be handed a cached success for a
+                    // call it is not allowed to make either. Enforced here and not
+                    // only by omission from the offered manifest list, because
+                    // models emit names that were never offered.
+                    let mut tool_result = if scope.withholds(tool_name) {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            ?scope,
+                            "Chat tool call withheld by turn scope"
+                        );
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: turn_trace_id,
+                            event_type: agentos_audit::AuditEventType::CapabilityDenied,
+                            agent_id: Some(agent_id),
+                            task_id: Some(chat_task_id),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "tool": tool_name,
+                                "reason": "withheld_by_turn_scope",
+                                "scope": format!("{scope:?}"),
+                                "path": "chat",
+                            }),
+                            severity: agentos_audit::AuditSeverity::Warn,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        serde_json::json!({
+                            "error": scope.withheld_tool_message(tool_name)
+                        })
+                    } else if let Some(prev) = cached.clone() {
                         consecutive_dedup_count += 1;
                         let mut wrapped = prev;
                         if let Some(obj) = wrapped.as_object_mut() {
@@ -2811,6 +3483,7 @@ impl Kernel {
                             capability_token: chat_token.clone(),
                             ..Default::default()
                         };
+
                         if let Err(reason) =
                             self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
                         {
@@ -2897,11 +3570,7 @@ impl Kernel {
                                 tool_result = outcome.result;
                             }
                         }
-                        // Don't cache meta/discovery tool results. Their output is
-                        // stateless documentation; caching would freeze stale
-                        // search/manual results across turns and trip dedup on
-                        // legitimate re-exploration in the next chat turn.
-                        if !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str()) {
+                        if is_dedup_cacheable(tool_name, &tool_result) {
                             executed_tool_calls.insert(
                                 dedup_key,
                                 (std::time::Instant::now(), tool_result.clone()),
@@ -3049,6 +3718,26 @@ impl Kernel {
                 }
             } else {
                 // No tool call — this is the final answer.
+                if visible_text.trim().is_empty()
+                    && !empty_answer_retried
+                    && iterations < chat_max_tool_iterations
+                {
+                    // ponytail: one nudge retry — providers (gpt-oss, nemotron)
+                    // occasionally return EndTurn with zero content after a
+                    // tool-result burst. A second call almost always answers.
+                    empty_answer_retried = true;
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        model = %result.model,
+                        stop_reason = ?result.stop_reason,
+                        completion_tokens = result.tokens_used.completion_tokens,
+                        "Chat LLM returned empty final answer; nudging model once"
+                    );
+                    ctx.push(Self::empty_answer_nudge_entry());
+                    continue;
+                }
                 let answer = if visible_text.trim().is_empty() {
                     tracing::warn!(
                         target: "agentos::chat",
@@ -3136,6 +3825,32 @@ impl Kernel {
         tx: tokio::sync::mpsc::Sender<ChatStreamEvent>,
         session_id: Option<&str>,
     ) -> Result<ChatInferenceResult, String> {
+        self.chat_infer_streaming_scoped(
+            agent_name,
+            history,
+            new_message,
+            user_parts,
+            tx,
+            session_id,
+            ChatTurnScope::Full,
+        )
+        .await
+    }
+
+    /// [`Self::chat_infer_streaming`] with an explicit turn scope. See
+    /// [`Self::chat_infer_with_tools_scoped`] for why this is a separate entry
+    /// point rather than an extra parameter.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_infer_streaming_scoped(
+        &self,
+        agent_name: &str,
+        history: &[(String, String)],
+        new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
+        tx: tokio::sync::mpsc::Sender<ChatStreamEvent>,
+        session_id: Option<&str>,
+        scope: ChatTurnScope,
+    ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
             match registry.get_by_name(agent_name) {
@@ -3153,20 +3868,24 @@ impl Kernel {
                 ),
                 Some(_) => {
                     let msg = format!("Agent '{}' is offline", agent_name);
-                    let _ = tx
-                        .send(ChatStreamEvent::Error {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::Error {
                             message: msg.clone(),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     return Err(msg);
                 }
                 None => {
                     let msg = format!("Agent '{}' not found", agent_name);
-                    let _ = tx
-                        .send(ChatStreamEvent::Error {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::Error {
                             message: msg.clone(),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     return Err(msg);
                 }
             }
@@ -3180,17 +3899,20 @@ impl Kernel {
             Some(a) => a,
             None => {
                 let msg = format!("No LLM adapter connected for agent '{}'", agent_name);
-                let _ = tx
-                    .send(ChatStreamEvent::Error {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::Error {
                         message: msg.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 return Err(msg);
             }
         };
 
-        let llm_tool_manifests: Vec<ToolManifest> =
-            self.build_chat_tool_manifests(&agent_id, session_id).await;
+        let llm_tool_manifests: Vec<ToolManifest> = self
+            .build_chat_tool_manifests(&agent_id, session_id, scope)
+            .await;
         let connected_channels: Vec<crate::system_prompt::ChannelHint> =
             match self.channel_registry.list_active().await {
                 Ok(list) => list
@@ -3215,6 +3937,9 @@ impl Kernel {
                 connected_channels,
                 native_tool_calling: llm.supports_native_tool_calling(),
                 uses_tool_gateway: llm.uses_tool_gateway(),
+                granted_folders: crate::system_prompt::GrantedFolders::from_paths(
+                    &self.workspace_paths_for_agent(&agent_id),
+                ),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -3309,11 +4034,12 @@ impl Kernel {
         let mut iterations = 0u32;
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
-        let chat_max_tool_iterations = if self.config.chat.max_tool_iterations == 0 {
-            CHAT_MAX_TOOL_ITERATIONS_FALLBACK
-        } else {
-            self.config.chat.max_tool_iterations
-        };
+        let chat_max_tool_iterations =
+            scope.max_tool_iterations(if self.config.chat.max_tool_iterations == 0 {
+                CHAT_MAX_TOOL_ITERATIONS_FALLBACK
+            } else {
+                self.config.chat.max_tool_iterations
+            });
 
         // Circuit breakers for stuck small-model loops. Reset whenever the
         // model makes progress (different tool / non-empty text / different
@@ -3351,6 +4077,7 @@ impl Kernel {
         // breakers). Such a turn still returns text, but it is not a success —
         // see `chat_turn_end`.
         let mut turn_degraded = false;
+        let mut empty_answer_retried = false;
         if let Err(msg) = self
             .chat_turn_begin(
                 agent_id,
@@ -3361,15 +4088,66 @@ impl Kernel {
             )
             .await
         {
-            let _ = tx
-                .send(ChatStreamEvent::Error {
+            let _ = send_stream_event(
+                &tx,
+                ChatStreamEvent::Error {
                     message: msg.clone(),
-                })
-                .await;
+                },
+            )
+            .await;
             return Err(msg);
         }
 
+        // Everything the reader was sent this turn. Only used when the reader
+        // disappears mid-answer: `result.text` never arrives in that case, so
+        // this is the only copy of the partial reply. Turn-scoped, so a turn
+        // stopped in iteration 3 still keeps what iterations 1-2 streamed.
+        let mut streamed_visible = String::new();
+        let mut reader_gone = false;
+
         let final_answer = loop {
+            // The reader left mid-answer — the browser Stop button aborts the
+            // fetch, which drops the SSE stream. That is the end of the turn,
+            // not a failure: returning `Err` made both callers treat the turn as
+            // "nothing to persist", so the half-answer the user watched arrive
+            // vanished from the transcript on the next refetch. Close the turn
+            // with the text already streamed, like the other degraded exits.
+            //
+            // Deliberately NOT flushed from the sanitizer: its pending buffer is
+            // text the reader never saw, and mid-stream it is most likely the
+            // inside of an unclosed fence, whose `flush()` contract is to emit
+            // it raw — i.e. a leaked tool-intent payload straight into the
+            // persisted transcript.
+            if reader_gone {
+                turn_degraded = true;
+                let partial = streamed_visible.trim();
+                let answer = if partial.is_empty() {
+                    format!(
+                        "{}\n\n[Note: stopped before the reply started.]",
+                        EMPTY_LLM_ANSWER_PLACEHOLDER
+                    )
+                } else {
+                    format!("{}\n\n[Note: stopped — reply cut short.]", partial)
+                };
+                // Non-blocking: a reader that merely stalled is still connected
+                // and needs a terminal frame (its "generating" state and its
+                // refetch hang off it), while a reader that is truly gone costs
+                // nothing here — unlike a second 30s bounded send.
+                let _ = tx.try_send(ChatStreamEvent::Done {
+                    answer: answer.clone(),
+                    tool_calls: tool_calls.clone(),
+                    iterations,
+                    tokens_used: total_tokens_used,
+                    cost_usd: total_cost_usd,
+                });
+                // Calls the claude-code subprocess made during the abandoned
+                // iteration are still buffered. Left there, they replay into the
+                // NEXT turn's transcript and cost accounting under the wrong
+                // task id.
+                self.clear_gateway_tool_calls(agent_id).await;
+                break answer;
+            }
+
             iterations += 1;
 
             // MA-02: model allowlist + hard-limit gate BEFORE the adapter call,
@@ -3388,22 +4166,26 @@ impl Kernel {
                 if iterations > 1 {
                     turn_degraded = true;
                     let answer = format!("{}\n\n[Note: {}]", EMPTY_LLM_ANSWER_PLACEHOLDER, msg);
-                    let _ = tx
-                        .send(ChatStreamEvent::Done {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::Done {
                             answer: answer.clone(),
                             tool_calls: tool_calls.clone(),
                             iterations,
                             tokens_used: total_tokens_used,
                             cost_usd: total_cost_usd,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     break answer;
                 }
-                let _ = tx
-                    .send(ChatStreamEvent::Error {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::Error {
                         message: msg.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 self.chat_turn_failed(
                     agent_id,
                     turn_task_id,
@@ -3434,11 +4216,25 @@ impl Kernel {
                 .filter(|p| matches!(p, agentos_types::ContentPart::Image { .. }))
                 .count();
 
-            let _ = tx
-                .send(ChatStreamEvent::Thinking {
+            // Bounded like the chunk sends below: this rides a 64-slot channel that
+            // reasoning traffic now fills far more readily, and a client that stops
+            // reading before the first token would otherwise park the chat loop here.
+            if !send_stream_event(
+                &tx,
+                ChatStreamEvent::Thinking {
                     iteration: iterations,
-                })
-                .await;
+                    text: None,
+                },
+            )
+            .await
+            {
+                // Cheapest possible detection point: the first send of every
+                // iteration, and the only one that runs before a fresh (paid)
+                // inference starts. Without it, Stop pressed during a long tool
+                // call is not noticed until well into the next provider call.
+                reader_gone = true;
+                continue;
+            }
 
             // Use infer_stream_with_tools to get real token-level streaming.
             // Spawn it in a separate task so we can read tokens concurrently.
@@ -3447,7 +4243,7 @@ impl Kernel {
             let llm_clone = llm.clone();
             let ctx_clone = ctx.clone();
             let manifests_clone = llm_tool_manifests.clone();
-            tokio::spawn(async move {
+            let adapter_task = tokio::spawn(async move {
                 let inner_tx = inner_tx;
                 if let Err(e) = llm_clone
                     .infer_stream_with_tools(&ctx_clone, &manifests_clone, inner_tx.clone())
@@ -3477,6 +4273,13 @@ impl Kernel {
             // `result.tool_calls` so the leaked intents actually execute.
             let mut sanitizer =
                 crate::output_sanitizer::ChatOutputFilter::new(self.config.chat.enforce_final_tag);
+            // `enforce_final_tag` means the operator wants ONLY the vetted
+            // `<final>` block on the wire — a kiosk or shared browser. Reasoning
+            // is by definition unvetted (it quotes tool output verbatim), so the
+            // out-of-band channel honours that switch instead of routing around
+            // it. Under the default config reasoning streams, labelled as its own
+            // step; it is the in-band `<think>` tags that stay stripped.
+            let stream_reasoning = !self.config.chat.enforce_final_tag;
             let mut inference_result: Option<agentos_llm::InferenceResult> = None;
             let mut stream_error: Option<String> = None;
             let mut stream_suppressed_count: usize = 0;
@@ -3489,6 +4292,7 @@ impl Kernel {
                         let cleaned = sanitizer.push(&chunk);
                         if !cleaned.is_empty() {
                             streamed_token_events += 1;
+                            streamed_visible.push_str(&cleaned);
                             // Bounded: this channel backs up when the HTTP client
                             // stops reading (paused tab, stalled radio, a peer that
                             // vanished without RST — hyper needs ~15min of TCP
@@ -3498,15 +4302,10 @@ impl Kernel {
                             // handful of stalled readers would freeze every other
                             // caller on that endpoint. Treat a stalled consumer as
                             // a dropped client instead.
-                            if tokio::time::timeout(
-                                STREAM_CONSUMER_SEND_TIMEOUT,
-                                tx.send(ChatStreamEvent::TextChunk { text: cleaned }),
-                            )
-                            .await
-                            .is_err()
+                            if !send_stream_event(&tx, ChatStreamEvent::TextChunk { text: cleaned })
+                                .await
                             {
-                                stream_error =
-                                    Some("client stopped reading the stream".to_string());
+                                reader_gone = true;
                                 break;
                             }
                         }
@@ -3521,6 +4320,27 @@ impl Kernel {
                         stream_error = Some(msg);
                         break;
                     }
+                    agentos_llm::InferenceEvent::Thinking(chunk) if stream_reasoning => {
+                        // Reasoning is its own channel and deliberately does NOT go
+                        // through `sanitizer`: that filter is a state machine over the
+                        // answer text (fenced tool intents, `<final>`/`<think>` tags),
+                        // and interleaving a second stream through it would corrupt
+                        // both. Same bounded send as tokens — a stalled reader must
+                        // not park the adapter task, which holds the endpoint's
+                        // concurrency permit for the whole generation.
+                        if !send_stream_event(
+                            &tx,
+                            ChatStreamEvent::Thinking {
+                                iteration: iterations,
+                                text: Some(chunk),
+                            },
+                        )
+                        .await
+                        {
+                            reader_gone = true;
+                            break;
+                        }
+                    }
                     // ToolCallStart, ToolCallDelta, ToolCallComplete, Usage — collected
                     // implicitly via the Done event's InferenceResult which carries all
                     // assembled tool_calls.
@@ -3528,12 +4348,22 @@ impl Kernel {
                 }
             }
 
+            if reader_gone {
+                // Stop means stop. Every adapter ignores its own send errors and
+                // keeps draining the provider's stream, so without this the
+                // tokens — and the bill — keep coming after the reader left.
+                adapter_task.abort();
+                continue;
+            }
+
             if let Some(err_msg) = stream_error {
-                let _ = tx
-                    .send(ChatStreamEvent::Error {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::Error {
                         message: format!("Inference failed: {}", err_msg),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 self.chat_turn_failed(
                     agent_id,
                     turn_task_id,
@@ -3561,11 +4391,13 @@ impl Kernel {
                 Some(r) => r,
                 None => {
                     let msg = "Stream ended without a Done event".to_string();
-                    let _ = tx
-                        .send(ChatStreamEvent::Error {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::Error {
                             message: msg.clone(),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     self.chat_turn_failed(
                         agent_id,
                         turn_task_id,
@@ -3624,27 +4456,31 @@ impl Kernel {
                 // start, the live stream drops the result (the card only exists if
                 // a start created it). The call already ran in the subprocess, so
                 // start + result are emitted back-to-back here.
-                let _ = tx
-                    .send(ChatStreamEvent::ToolStart {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::ToolStart {
                         tool_name: gc.tool_name.clone(),
                         iteration: iterations,
                         task_id: None,
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 let success = gc.result.get("error").is_none();
                 let result_preview = serde_json::to_string(&gc.result)
                     .unwrap_or_default()
                     .chars()
                     .take(200)
                     .collect::<String>();
-                let _ = tx
-                    .send(ChatStreamEvent::ToolResult {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::ToolResult {
                         tool_name: gc.tool_name.clone(),
                         result_preview,
                         duration_ms: gc.duration_ms,
                         success,
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 // Also record it episodically: subprocess calls are real tool use
                 // by this agent, and without them a gateway agent's timeline has
                 // no tool_call rows for consolidation to build steps from.
@@ -3681,7 +4517,8 @@ impl Kernel {
                     while idx < chars.len() {
                         let end = (idx + FALLBACK_CHUNK_CHARS).min(chars.len());
                         let chunk: String = chars[idx..end].iter().collect();
-                        let _ = tx.send(ChatStreamEvent::TextChunk { text: chunk }).await;
+                        let _ = send_stream_event(&tx, ChatStreamEvent::TextChunk { text: chunk })
+                            .await;
                         idx = end;
                         if idx < chars.len() {
                             tokio::time::sleep(std::time::Duration::from_millis(
@@ -3692,9 +4529,8 @@ impl Kernel {
                     }
                 }
             } else if !pending_tail.is_empty() {
-                let _ = tx
-                    .send(ChatStreamEvent::TextChunk { text: pending_tail })
-                    .await;
+                let _ =
+                    send_stream_event(&tx, ChatStreamEvent::TextChunk { text: pending_tail }).await;
             }
             if stream_suppressed_count > 0 {
                 tracing::info!(
@@ -3760,15 +4596,17 @@ impl Kernel {
                         visible_text
                     )
                 };
-                let _ = tx
-                    .send(ChatStreamEvent::Done {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::Done {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
                         tokens_used: total_tokens_used,
                         cost_usd: total_cost_usd,
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 break answer;
             }
 
@@ -3838,15 +4676,17 @@ impl Kernel {
                             signature,
                             empty_text_streak_count,
                         );
-                        let _ = tx
-                            .send(ChatStreamEvent::Done {
+                        let _ = send_stream_event(
+                            &tx,
+                            ChatStreamEvent::Done {
                                 answer: answer.clone(),
                                 tool_calls: tool_calls.clone(),
                                 iterations,
                                 tokens_used: total_tokens_used,
                                 cost_usd: total_cost_usd,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         break answer;
                     }
                 } else {
@@ -3877,15 +4717,17 @@ impl Kernel {
                             EMPTY_LLM_ANSWER_PLACEHOLDER,
                             meta_tool_streak_count,
                         );
-                        let _ = tx
-                            .send(ChatStreamEvent::Done {
+                        let _ = send_stream_event(
+                            &tx,
+                            ChatStreamEvent::Done {
                                 answer: answer.clone(),
                                 tool_calls: tool_calls.clone(),
                                 iterations,
                                 tokens_used: total_tokens_used,
                                 cost_usd: total_cost_usd,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         break answer;
                     }
                 } else {
@@ -3985,30 +4827,6 @@ impl Kernel {
                 // fail-closed with "not available in this context".
                 let task_snapshot_for_chat: Arc<dyn TaskQuery> =
                     Arc::new(self.scheduler.snapshot_tasks().await);
-                let escalation_snapshot_for_chat: Arc<dyn EscalationQuery> = {
-                    let pending = self.escalation_manager.list_pending().await;
-                    let summaries: Vec<EscalationSummary> = pending
-                        .into_iter()
-                        // Scoped to the asking agent, same as the task path.
-                        .filter(|e| e.agent_id == agent_id)
-                        .map(|e| EscalationSummary {
-                            id: e.id,
-                            task_id: e.task_id,
-                            agent_id: e.agent_id,
-                            reason: format!("{:?}", e.reason),
-                            context_summary: e.context_summary,
-                            decision_point: e.decision_point,
-                            options: e.options,
-                            urgency: e.urgency,
-                            blocking: e.blocking,
-                            created_at: e.created_at,
-                            expires_at: e.expires_at,
-                            resolved: e.resolved,
-                            resolution: e.resolution,
-                        })
-                        .collect();
-                    Arc::new(EscalationSnapshot::new(summaries))
-                };
 
                 let mut repeat_error_abort: Option<String> = None;
 
@@ -4096,13 +4914,21 @@ impl Kernel {
                         }
                     }
 
-                    let _ = tx
-                        .send(ChatStreamEvent::ToolStart {
-                            tool_name: tool_name.clone(),
-                            iteration: iterations,
-                            task_id: Some(chat_task_id.to_string()),
-                        })
+                    // A call that will not run is never announced to the
+                    // client (see the invariant above) — a withheld tool would
+                    // otherwise render a tool card that resolves straight to an
+                    // error. The scope gate below produces the denial result.
+                    if !scope.withholds(tool_name) {
+                        let _ = send_stream_event(
+                            &tx,
+                            ChatStreamEvent::ToolStart {
+                                tool_name: tool_name.clone(),
+                                iteration: iterations,
+                                task_id: Some(chat_task_id.to_string()),
+                            },
+                        )
                         .await;
+                    }
 
                     let chat_trace_id = TraceID::new();
                     let ws_chat = self.workspace_paths_for_agent(&agent_id);
@@ -4122,7 +4948,7 @@ impl Kernel {
                         file_lock_registry: None,
                         agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: Some(Arc::clone(&task_snapshot_for_chat)),
-                        escalation_query: Some(Arc::clone(&escalation_snapshot_for_chat)),
+                        escalation_query: Some(self.escalation_snapshot_for(agent_id).await),
                         workspace_paths: ws_chat.read,
                         workspace_paths_writable: ws_chat.writable,
                         workspace_paths_executable: ws_chat.executable,
@@ -4143,7 +4969,39 @@ impl Kernel {
                     };
 
                     let start = std::time::Instant::now();
-                    let mut tool_result = if let Some(prev) = cached.clone() {
+                    // Turn-scope gate FIRST — ahead of the dedup replay as well as
+                    // the capability check. A conversation turn may not reach out
+                    // of band, and it must not be handed a cached success for a
+                    // call it is not allowed to make either. Enforced here and not
+                    // only by omission from the offered manifest list, because
+                    // models emit names that were never offered.
+                    let mut tool_result = if scope.withholds(tool_name) {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            ?scope,
+                            "Chat tool call withheld by turn scope"
+                        );
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: turn_trace_id,
+                            event_type: agentos_audit::AuditEventType::CapabilityDenied,
+                            agent_id: Some(agent_id),
+                            task_id: Some(chat_task_id),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "tool": tool_name,
+                                "reason": "withheld_by_turn_scope",
+                                "scope": format!("{scope:?}"),
+                                "path": "chat_stream",
+                            }),
+                            severity: agentos_audit::AuditSeverity::Warn,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        serde_json::json!({
+                            "error": scope.withheld_tool_message(tool_name)
+                        })
+                    } else if let Some(prev) = cached.clone() {
                         consecutive_dedup_count += 1;
                         let mut wrapped = prev;
                         if let Some(obj) = wrapped.as_object_mut() {
@@ -4203,6 +5061,7 @@ impl Kernel {
                             capability_token: chat_token.clone(),
                             ..Default::default()
                         };
+
                         if let Err(reason) =
                             self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
                         {
@@ -4289,11 +5148,7 @@ impl Kernel {
                                 tool_result = outcome.result;
                             }
                         }
-                        // Don't cache meta/discovery tool results. Their output is
-                        // stateless documentation; caching would freeze stale
-                        // search/manual results across turns and trip dedup on
-                        // legitimate re-exploration in the next chat turn.
-                        if !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str()) {
+                        if is_dedup_cacheable(tool_name, &tool_result) {
                             executed_tool_calls.insert(
                                 dedup_key,
                                 (std::time::Instant::now(), tool_result.clone()),
@@ -4379,14 +5234,16 @@ impl Kernel {
                         }
                     }
 
-                    let _ = tx
-                        .send(ChatStreamEvent::ToolResult {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::ToolResult {
                             tool_name: tool_name.clone(),
                             result_preview,
                             duration_ms,
                             success,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
 
                     tool_calls.push(ChatToolCallRecord {
                         tool_name: tool_name.clone(),
@@ -4446,18 +5303,39 @@ impl Kernel {
                     );
                     turn_degraded = true;
                     let answer = format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
-                    let _ = tx
-                        .send(ChatStreamEvent::Done {
+                    let _ = send_stream_event(
+                        &tx,
+                        ChatStreamEvent::Done {
                             answer: answer.clone(),
                             tool_calls: tool_calls.clone(),
                             iterations,
                             tokens_used: total_tokens_used,
                             cost_usd: total_cost_usd,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     break answer;
                 }
             } else {
+                if visible_text.trim().is_empty()
+                    && !empty_answer_retried
+                    && iterations < chat_max_tool_iterations
+                {
+                    // See the non-streaming path: one nudge retry on a blank
+                    // EndTurn before giving the user the placeholder.
+                    empty_answer_retried = true;
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        model = %result.model,
+                        stop_reason = ?result.stop_reason,
+                        completion_tokens = result.tokens_used.completion_tokens,
+                        "Chat streaming LLM returned empty final answer; nudging model once"
+                    );
+                    ctx.push(Self::empty_answer_nudge_entry());
+                    continue;
+                }
                 let answer = if visible_text.trim().is_empty() {
                     tracing::warn!(
                         target: "agentos::chat",
@@ -4487,15 +5365,17 @@ impl Kernel {
                     answer_len = answer.len(),
                     "Chat streaming inference complete"
                 );
-                let _ = tx
-                    .send(ChatStreamEvent::Done {
+                let _ = send_stream_event(
+                    &tx,
+                    ChatStreamEvent::Done {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
                         tokens_used: total_tokens_used,
                         cost_usd: total_cost_usd,
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 break answer;
             }
         };
@@ -4949,6 +5829,8 @@ impl Kernel {
         hal.register(Box::new(WebcamDriver::with_consent_store(Arc::clone(
             &capture_consent,
         ))));
+        #[cfg(all(feature = "wifi", target_os = "linux"))]
+        hal.register(Box::new(WifiDriver::new()));
 
         // Register log reader with app logs only - audit log is not exposed to agents
         let app_logs = HashMap::new();
@@ -5861,6 +6743,7 @@ impl Kernel {
                                         // to ExecCapable so approval is required unless the
                                         // operator has an explicit auto-approve rule.
                                         risk_class: agentos_types::RiskClass::ExecCapable,
+                                        risk_class_by_action: Default::default(),
                                         usage_hints: None,
                                         tags: vec![],
                                     };
@@ -6080,6 +6963,19 @@ impl Kernel {
         // 7. Start bus server
         let bus = Arc::new(BusServer::bind(Path::new(&config.bus.socket_path)).await?);
 
+        // Past the single-instance guard: `BusServer::bind` fails if another
+        // kernel holds the socket, so from here we know no other process owns
+        // this data dir. Only now is it safe to settle conversations left
+        // `running` by a previous process — doing it at `ConvoStore::open` would
+        // let a second boot (`agentos web serve` boots its own Kernel) wipe every
+        // live conversation before failing this bind and exiting.
+        {
+            let store = Arc::clone(&convo_store);
+            if let Err(e) = tokio::task::spawn_blocking(move || store.reconcile_orphaned()).await? {
+                tracing::error!(error = %e, "Failed to reconcile orphaned conversations");
+            }
+        }
+
         let identity_manager = Arc::new(crate::identity::IdentityManager::new(vault.clone()));
 
         let checkpoint_store = Arc::new(
@@ -6164,6 +7060,7 @@ impl Kernel {
         // Per-agent gateway tool-call buffers (populated when a claude-code agent
         // connects and its MCP gateway starts).
         let claude_gateway_tool_calls = Arc::new(RwLock::new(HashMap::new()));
+        let convo_turn_agents = Arc::new(RwLock::new(std::collections::HashSet::new()));
         let pending_agent_announce = Arc::new(RwLock::new(HashMap::new()));
 
         // User filesystem grants: durable, runtime-mutable list of host directories
@@ -6232,6 +7129,12 @@ impl Kernel {
             Some(state_store.clone()),
         ));
         escalation_manager.set_audit_log(Arc::clone(&audit)).await;
+        // So that approving a `device_access` escalation actually grants the
+        // device. Before this the decision was recorded and dropped, and every
+        // retry raised a fresh escalation.
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&hardware_registry))
+            .await;
         let cost_tracker = Arc::new(crate::cost_tracker::CostTracker::with_state_store(Some(
             state_store.clone(),
         )));
@@ -6588,6 +7491,12 @@ impl Kernel {
             ))
             .await;
 
+        // Push escalation create/resolve/expiry straight to the control panel's
+        // WebSocket. The channel sink above already reaches phones instantly, so
+        // without this the operator got the push notification and then watched an
+        // empty approval queue until the panel's next poll.
+        escalation_manager.set_realtime_sender(realtime_event_sender.clone());
+
         // Attach the notification router to every sink AT BOOT, not lazily on
         // the first channel connect. `build_channel_adapter` also attaches it,
         // but that runs only when a channel exists — so a panel-only operator
@@ -6732,9 +7641,25 @@ impl Kernel {
             sandbox,
             router,
             active_llms,
-            image_resolver: std::sync::RwLock::new(Arc::new(NoopImageResolver)),
+            // Both media slots are backed by the kernel's own FileStore. They
+            // used to be installed only by `WebServer::new`, so `agentos start`
+            // and `agentos gateway run` ran with the no-op defaults and dropped
+            // every inbound channel attachment. `set_image_resolver` /
+            // `set_attachment_sink` still exist for tests and overrides.
+            image_resolver: std::sync::RwLock::new(
+                match crate::file_bindings::FileStoreImageResolver::new(file_store.clone()) {
+                    Ok(r) => Arc::new(r) as Arc<dyn agentos_llm::ImageResolver>,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Could not canonicalize uploads dir — FileRef images disabled"
+                        );
+                        Arc::new(NoopImageResolver)
+                    }
+                },
+            ),
             attachment_sink: Arc::new(std::sync::RwLock::new(Arc::new(
-                crate::attachment_sink::NoopAttachmentSink,
+                crate::file_bindings::FileStoreAttachmentSink::new(file_store.clone()),
             ))),
             message_bus,
             profile_manager,
@@ -6783,6 +7708,7 @@ impl Kernel {
             task_checkout_store,
             claude_session_lookup,
             claude_gateway_tool_calls,
+            convo_turn_agents,
             pending_agent_announce,
             approval_mode_resolver: None,
             approval_policy_matcher: None,
@@ -6887,6 +7813,19 @@ impl Kernel {
 
         // Register built-in capability providers (KMC).
         let zone_table = kernel.zone_table.clone();
+        // Storage zones were in-memory only: every kernel restart silently
+        // revoked them. Write-through to SQLite; a failed open degrades to the
+        // old in-memory behaviour with a warning rather than blocking boot.
+        {
+            let zones_db =
+                std::path::PathBuf::from(&kernel.config.tools.data_dir).join("storage_zones.db");
+            match zone_table.attach_store(zones_db).await {
+                Ok(n) => tracing::info!(restored = n, "storage zones restored from disk"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "storage zones will not persist across restarts")
+                }
+            }
+        }
         {
             // Open the workspace persistence store. Failures fall back to an
             // in-memory provider so the kernel still boots — operators get a
@@ -6926,8 +7865,10 @@ impl Kernel {
                     ))
                 }
             };
-            let storage_provider =
-                crate::managed_storage::StorageProvider::with_defaults(zone_table.clone());
+            let storage_provider = crate::managed_storage::StorageProvider::new(
+                kernel.config.storage.clone(),
+                zone_table.clone(),
+            );
             let mut reg = kernel.capability_registry.write().await;
             if let Err(e) = reg.register(env_provider.clone()) {
                 tracing::warn!("Failed to register env capability provider: {e}");
@@ -7001,6 +7942,7 @@ impl Kernel {
                 Arc::clone(&mode_resolver),
                 policy_matcher.clone(),
                 Some(Arc::clone(&kernel.connector_registry)),
+                Some(Arc::clone(&kernel.scheduler)),
             );
             kernel.hook_registry.register(approval_hook).await;
         }
@@ -7020,8 +7962,12 @@ impl Kernel {
                 cfg.enabled,
                 Arc::clone(&kernel.scheduler),
                 Arc::clone(&kernel.context_manager),
+                Arc::clone(&kernel.episodic_memory),
                 Arc::clone(&kernel.user_pref_proposal_store),
                 Arc::clone(&kernel.active_llms),
+                Arc::clone(&kernel.claude_gateway_tool_calls),
+                Arc::clone(&kernel.injection_scanner),
+                kernel.cancellation_token.clone(),
                 Arc::clone(&kernel.audit),
                 cfg.min_confidence,
                 cfg.max_proposals_per_task,
@@ -7523,6 +8469,7 @@ impl Kernel {
         description: Option<String>,
         default_thinking_level: Option<ThinkingLevel>,
         system_prompt: Option<Option<String>>,
+        working_set_size: Option<Option<usize>>,
     ) -> Result<(), String> {
         let mut registry = self.agent_registry.write().await;
         registry
@@ -7531,6 +8478,7 @@ impl Kernel {
                 description,
                 default_thinking_level,
                 system_prompt,
+                working_set_size,
             )
             .map(|_| ())
     }
@@ -7925,6 +8873,7 @@ mod preflight_tests {
             user_adaptation: Default::default(),
             env: Default::default(),
             gateway: Default::default(),
+            storage: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
             agent_heartbeat: Default::default(),
@@ -8243,6 +9192,7 @@ mod vault_bootstrap_tests {
             user_adaptation: Default::default(),
             env: Default::default(),
             gateway: Default::default(),
+            storage: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
             agent_heartbeat: Default::default(),
@@ -8341,7 +9291,10 @@ mod hal_device_access_gate_tests {
         std::mem::forget(dir);
 
         (
-            KernelDeviceAccessGate::new(registry.clone(), escalation_manager.clone(), audit),
+            // Short wait: these tests exercise the no-operator path, and the
+            // production 240s park would just stall the suite.
+            KernelDeviceAccessGate::new(registry.clone(), escalation_manager.clone(), audit)
+                .with_approval_wait(std::time::Duration::from_millis(50)),
             registry,
             escalation_manager,
         )
@@ -8361,6 +9314,384 @@ mod hal_device_access_gate_tests {
 
         assert!(matches!(err, AgentOSError::DeviceAccessPending { .. }));
         assert_eq!(escalation_manager.list_pending().await.len(), 1);
+    }
+
+    /// The whole 2026-09-08 failure in one test: the gate raises an escalation,
+    /// the operator approves *that escalation* (not via `agentos hal approve`),
+    /// and the next call must get through. Before the fix the approval was
+    /// recorded and dropped, so this second `check` raised escalation #2 — and
+    /// #3, and #4, for as long as the operator kept saying yes.
+    #[tokio::test]
+    async fn approving_the_escalation_grants_the_device() {
+        let (gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("bluetooth:AA:BB:CC:DD:EE:FF", "bluetooth-device");
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "bluetooth:AA:BB:CC:DD:EE:FF",
+            "bluetooth-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect_err("first contact should escalate");
+
+        let pending = escalation_manager.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        escalation_manager
+            .resolve(pending[0].id, "approve".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        assert_eq!(
+            registry
+                .get_device_status("bluetooth:AA:BB:CC:DD:EE:FF")
+                .expect("device registered"),
+            DeviceStatus::Approved
+        );
+        gate.check(
+            &agent_id,
+            &task_id,
+            "bluetooth:AA:BB:CC:DD:EE:FF",
+            "bluetooth-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect("approved device should pass on the retry");
+    }
+
+    /// The 2026-09-09 failure: the agent asked to set the volume, the gate
+    /// raised escalation 430 and returned immediately, the model gave up, and
+    /// the operator's approval 5s later changed nothing. The call must park
+    /// on the decision and go through on approval, inside one tool call.
+    #[tokio::test]
+    async fn check_parks_until_the_operator_approves() {
+        let (gate, registry, escalation_manager) = make_gate();
+        let gate = gate.with_approval_wait(std::time::Duration::from_secs(10));
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("audio:49", "audio-device");
+
+        let approver = {
+            let escalation_manager = Arc::clone(&escalation_manager);
+            tokio::spawn(async move {
+                let id = loop {
+                    let pending = escalation_manager.list_pending().await;
+                    if let Some(escalation) = pending.first() {
+                        break escalation.id;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                };
+                escalation_manager.resolve(id, "approve".to_string()).await
+            })
+        };
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "audio:49",
+            "audio-device",
+            HalOperation::Write,
+        )
+        .await
+        .expect("approval landing mid-call must let the same call through");
+        approver.await.expect("approver task").expect("resolved");
+    }
+
+    /// `agentos hal approve` grants through `auto_resolve_device_escalation`,
+    /// which marked the escalation resolved but fired no resolution channel —
+    /// so a parked caller sat there until its window expired even though the
+    /// device was already approved.
+    #[tokio::test]
+    async fn check_wakes_on_operator_device_approval() {
+        let (gate, registry, escalation_manager) = make_gate();
+        let gate = gate.with_approval_wait(std::time::Duration::from_secs(10));
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("webcam:video0", "webcam-device");
+
+        let approver = {
+            let escalation_manager = Arc::clone(&escalation_manager);
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                while escalation_manager.list_pending().await.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                registry
+                    .approve_for_agent("webcam:video0", agent_id)
+                    .expect("operator approval");
+                escalation_manager
+                    .auto_resolve_device_escalation("webcam:video0", Some(&agent_id), true)
+                    .await
+            })
+        };
+
+        // The elapsed bound is what makes this a test of the WAKE. Without it
+        // the gate times out after 10s, re-reads `check_access` — already
+        // granted by the approver — and returns `Ok` anyway, so the test would
+        // pass with `auto_resolve_device_escalation`'s wake reverted.
+        let started = std::time::Instant::now();
+        gate.check(
+            &agent_id,
+            &task_id,
+            "webcam:video0",
+            "webcam-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect("operator device approval must wake the parked call");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "approval must arrive on the wake, not on the timeout"
+        );
+        assert_eq!(approver.await.expect("approver task"), 1);
+    }
+
+    /// A denial must come back promptly, as a typed `PermissionDenied` (so the
+    /// agent stops retrying) and recorded on the device, so a retry cannot
+    /// raise escalation N+1 — the device path has no per-task escalation cap.
+    /// Note this also passes on pre-park code, which returned instantly: it
+    /// guards the stall and the denial semantics, not the park itself.
+    #[tokio::test]
+    async fn check_returns_on_denial_without_waiting_out_the_window() {
+        let (gate, registry, escalation_manager) = make_gate();
+        let gate = gate.with_approval_wait(std::time::Duration::from_secs(10));
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("bluetooth:AA:BB:CC:DD:EE:02", "bluetooth-device");
+
+        let denier = {
+            let escalation_manager = Arc::clone(&escalation_manager);
+            tokio::spawn(async move {
+                let id = loop {
+                    if let Some(escalation) = escalation_manager.list_pending().await.first() {
+                        break escalation.id;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                };
+                escalation_manager.resolve(id, "deny".to_string()).await
+            })
+        };
+
+        let started = std::time::Instant::now();
+        let err = gate
+            .check(
+                &agent_id,
+                &task_id,
+                "bluetooth:AA:BB:CC:DD:EE:02",
+                "bluetooth-device",
+                HalOperation::Execute,
+            )
+            .await
+            .expect_err("a denied device must not be granted");
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "denial should return on the wake, not on the timeout"
+        );
+        denier.await.expect("denier task").expect("resolved");
+
+        // The denial is recorded on the device, so the retry is rejected
+        // outright instead of raising another escalation and parking again.
+        let before = escalation_manager.list_all().await.len();
+        let err = gate
+            .check(
+                &agent_id,
+                &task_id,
+                "bluetooth:AA:BB:CC:DD:EE:02",
+                "bluetooth-device",
+                HalOperation::Execute,
+            )
+            .await
+            .expect_err("a denied agent must stay denied");
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+        assert_eq!(
+            escalation_manager.list_all().await.len(),
+            before,
+            "a retry after denial must not raise a fresh escalation"
+        );
+    }
+
+    /// A quarantined device cannot be approved. Before this the operator saw
+    /// "resolved: approve" on every surface, the woken executor was told
+    /// `Approved`, and the retry failed anyway — the original symptom, one
+    /// step later. A device reaches this state whenever an earlier escalation
+    /// for it expired.
+    #[tokio::test]
+    async fn a_failed_grant_does_not_report_approval() {
+        let (gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("bluetooth:DE:AD:BE:EF:00:01", "bluetooth-device");
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "bluetooth:DE:AD:BE:EF:00:01",
+            "bluetooth-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect_err("first contact should escalate");
+        let id = escalation_manager.list_pending().await[0].id;
+
+        // An earlier escalation for this device expired while the operator was away.
+        registry
+            .set_device_status("bluetooth:DE:AD:BE:EF:00:01", DeviceStatus::Quarantined)
+            .expect("quarantine should succeed");
+
+        escalation_manager.prepare_resolution(id).await;
+        let rx = escalation_manager
+            .take_resolution_receiver(id)
+            .await
+            .expect("receiver should be installed");
+        escalation_manager
+            .resolve(id, "approve".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        assert_eq!(
+            rx.await.expect("resolution should be delivered"),
+            crate::escalation::ResolutionOutcome::Denied,
+            "a grant that could not be applied must not wake the executor as approved"
+        );
+        assert_eq!(
+            registry
+                .get_device_status("bluetooth:DE:AD:BE:EF:00:01")
+                .expect("device registered"),
+            DeviceStatus::Quarantined
+        );
+    }
+
+    /// The agent's actual question is "did my approval land?". A pending-only
+    /// view answers `found: false`, which is the same answer it gives for an
+    /// escalation that never existed — so the agent cannot tell them apart.
+    #[tokio::test]
+    async fn a_resolved_escalation_stays_visible_to_the_agent() {
+        let (gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("bluetooth:DE:AD:BE:EF:00:02", "bluetooth-device");
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "bluetooth:DE:AD:BE:EF:00:02",
+            "bluetooth-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect_err("first contact should escalate");
+        let id = escalation_manager.list_pending().await[0].id;
+        escalation_manager
+            .resolve(id, "approve".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        let recent = escalation_manager
+            .list_recent_for_agent(&agent_id, chrono::Duration::hours(1))
+            .await;
+        let found = recent
+            .iter()
+            .find(|e| e.id == id)
+            .expect("a just-resolved escalation must still be answerable by id");
+        assert!(found.resolved);
+        assert_eq!(found.resolution.as_deref(), Some("approve"));
+
+        // Long-settled escalations still fall out, so the per-tool-call clone
+        // stays bounded by the escalation rate rather than by uptime.
+        assert!(escalation_manager
+            .list_recent_for_agent(&agent_id, chrono::Duration::zero())
+            .await
+            .iter()
+            .all(|e| e.id != id));
+    }
+
+    /// Denial leaves the device `Pending`, not quarantined — the operator said
+    /// "not now", not "never". The expiry sweeper still quarantines on timeout.
+    #[tokio::test]
+    async fn denying_the_escalation_leaves_the_device_pending() {
+        let (gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("bluetooth:11:22:33:44:55:66", "bluetooth-device");
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "bluetooth:11:22:33:44:55:66",
+            "bluetooth-device",
+            HalOperation::Execute,
+        )
+        .await
+        .expect_err("first contact should escalate");
+
+        let pending = escalation_manager.list_pending().await;
+        escalation_manager
+            .resolve(pending[0].id, "deny".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        assert_eq!(
+            registry
+                .get_device_status("bluetooth:11:22:33:44:55:66")
+                .expect("device registered"),
+            DeviceStatus::Pending
+        );
+    }
+
+    /// A non-device escalation must not touch the hardware registry at all.
+    #[tokio::test]
+    async fn approving_a_non_device_escalation_grants_nothing() {
+        let (_gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        registry.register_pending_device("gpu:0", "gpu");
+
+        let id = escalation_manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                crate::kernel_action::EscalationReason::AuthorizationRequired,
+                "unrelated".to_string(),
+                "Approve something else".to_string(),
+                vec!["approve".to_string(), "deny".to_string()],
+                "normal".to_string(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        escalation_manager
+            .resolve(id, "approve".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        assert_eq!(
+            registry.get_device_status("gpu:0").expect("registered"),
+            DeviceStatus::Pending
+        );
     }
 
     #[tokio::test]
@@ -8430,5 +9761,45 @@ mod hal_device_access_gate_tests {
             .expect_err("denied agent should be blocked");
 
         assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+    }
+}
+
+#[cfg(test)]
+mod dedup_cache_tests {
+    use super::is_dedup_cacheable;
+    use serde_json::json;
+
+    #[test]
+    fn errors_are_never_cached() {
+        // The 2026-09-08 lock-in: a `scan` failure recorded while the radio was
+        // rfkill-blocked was replayed after it was unblocked.
+        assert!(!is_dedup_cacheable(
+            "shell-exec",
+            &json!({"error": "HAL error: Failed to power adapter: ... Busy"})
+        ));
+    }
+
+    #[test]
+    fn volatile_tools_are_never_cached() {
+        assert!(!is_dedup_cacheable(
+            "bluetooth",
+            &json!({"adapters": [{"name": "hci0", "powered": false}]})
+        ));
+        assert!(!is_dedup_cacheable("datetime", &json!({"iso8601": "now"})));
+        assert!(!is_dedup_cacheable("task-list", &json!({"tasks": []})));
+    }
+
+    #[test]
+    fn meta_tools_are_never_cached() {
+        assert!(!is_dedup_cacheable("search-tools", &json!({"results": []})));
+    }
+
+    #[test]
+    fn stable_successful_results_still_cache() {
+        // Loop-breaking must keep working, or an agent can spin forever.
+        assert!(is_dedup_cacheable(
+            "file-reader",
+            &json!({"content": "hello"})
+        ));
     }
 }

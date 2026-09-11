@@ -825,14 +825,21 @@ impl LLMCore for OpenAICore {
                     }
                 }
 
-                // Reasoning content from OpenAI reasoning models (o1, o3, o4).
-                // Not streamed to the user directly, but used as fallback text
-                // if `content` is empty.
+                // `reasoning_content` is the DeepSeek/vLLM/Qwen convention, which
+                // this OpenAI-compatible path also serves; OpenAI's own o-series
+                // never emits it on /v1/chat/completions.
+                // Streamed on its own channel AND kept, because it is still the
+                // fallback answer when `content` comes back empty AND there are no
+                // tool calls (below) — in that one case a client sees the same text
+                // twice, which beats the empty reply the fallback exists to prevent.
                 if let Some(reasoning) =
                     chunk_json["choices"][0]["delta"]["reasoning_content"].as_str()
                 {
                     if !reasoning.is_empty() {
                         reasoning_text.push_str(reasoning);
+                        let _ = tx
+                            .send(InferenceEvent::Thinking(reasoning.to_string()))
+                            .await;
                     }
                 }
 
@@ -1101,6 +1108,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         }
@@ -1654,6 +1662,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

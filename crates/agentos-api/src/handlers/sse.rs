@@ -22,8 +22,8 @@ use crate::service::KernelService;
 #[into_params(parameter_in = Query)]
 pub struct EventStreamQuery {
     /// Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,
-    /// `system`, or `events`). Subscribing requires the matching `<channel>:r`
-    /// scope on the API key.
+    /// `system`, `escalations`, or `events`). Subscribing requires the matching
+    /// `<channel>:r` scope on the API key.
     pub channel: String,
 }
 

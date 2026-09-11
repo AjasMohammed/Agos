@@ -91,12 +91,7 @@ impl ChannelAdapter for SlackAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text: String = msg
-            .content
-            .render_for_delivery()
-            .chars()
-            .take(40_000)
-            .collect();
+        let text: String = msg.text_with_actions().chars().take(40_000).collect();
         let thread_ts = msg.thread_id.clone();
         let client = &self.client;
         let token = self.bot_token.as_str();

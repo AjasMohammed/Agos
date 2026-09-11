@@ -40,8 +40,8 @@ maximum     = 86400
 
 [payload_schema.properties.priority]
 type        = "string"
-enum        = ["info", "warning", "urgent", "critical"]
-description = "Notification importance level (default: info)"
+enum        = ["info", "warning", "urgent", "critical", "low", "medium", "high"]
+description = "Notification importance level (default: info). low/medium/high are accepted aliases for info/warning/urgent."
 
 [payload_schema.properties.auto_action]
 type        = "string"

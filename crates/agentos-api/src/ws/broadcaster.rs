@@ -135,7 +135,7 @@ impl WsBroadcaster {
 
     /// Start a background task that reads coarse `RealtimeEvent`s from the kernel
     /// and fans them out to their channel (`agents`/`audit`/`schedules`/`system`/
-    /// `events`, plus `tasks` from non-status sources). Complements
+    /// `escalations`/`events`, plus `tasks` from non-status sources). Complements
     /// [`Self::start_status_relay`], which carries the richer task-status stream.
     pub fn start_realtime_relay(
         self,

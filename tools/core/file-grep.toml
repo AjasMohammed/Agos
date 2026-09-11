@@ -4,14 +4,14 @@ risk_class = "readonly_scoped"
 [manifest]
 name        = "file-grep"
 version     = "1.0.0"
-description = "Recursively searches files within data_dir for a regex pattern. Supports optional filename glob filter, context lines, three output modes (content, files_with_matches, count), max_results cap, and case-insensitive matching."
+description = "Recursively searches files under a root directory for a regex pattern. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Supports optional filename glob filter, context lines, three output modes (content, files_with_matches, count), max_results cap, and case-insensitive matching. The walk does not follow symlinked directories and skips node_modules, .git, target and .venv (name one as 'path' to search inside it); symlinked files are still read. It stops early at 10000 files, 200000 entries scanned, depth 12, or 20 seconds shared across walking and searching, and then sets \"truncated\": true with a \"note\" naming the limit that was hit."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 search_hints = ["search text inside files", "grep for a string", "find where something is defined"]
 
 [capabilities_required]
-permissions = ["fs.user_data:r"]
+permissions = ["fs.user_data:r", "fs.workspace:r"]
 
 [capabilities_provided]
 outputs = ["search_results"]
@@ -31,11 +31,11 @@ description = "Regular expression to search for"
 [payload_schema.properties.path]
 type = "string"
 default = "."
-description = "Search root relative to data_dir"
+description = "Search root: relative (under your home dir) or absolute inside a granted folder"
 
 [payload_schema.properties.glob]
 type = "string"
-description = "Optional filename glob filter, e.g. *.rs"
+description = "Optional filename glob filter (matched against the file name only, not the path), e.g. *.rs or *.{rs,toml}"
 
 [payload_schema.properties.context_lines]
 type = "integer"

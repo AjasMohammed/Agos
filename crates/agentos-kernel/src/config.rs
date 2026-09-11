@@ -100,6 +100,10 @@ pub struct KernelConfig {
     /// Controls which packages agents may install into per-agent workspaces.
     #[serde(default)]
     pub env: EnvSettings,
+    /// `[storage]` — managed storage zone policy (allow/deny path patterns,
+    /// per-agent zone cap). Defaults match `StorageConfig::default()`.
+    #[serde(default)]
+    pub storage: crate::managed_storage::StorageConfig,
     /// Gateway ("run as a bot") config — channels connected automatically at
     /// `agentos gateway run` boot. See `GatewaySettings`.
     #[serde(default)]

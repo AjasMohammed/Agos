@@ -1,0 +1,33 @@
+{% if escalations|length == 0 %}
+<article><p class="muted">No escalations to show.</p></article>
+{% else %}
+{% for e in escalations %}
+<article>
+    <header>
+        <strong>Escalation #{{ e.id }}</strong>
+        <small class="muted">task {{ e.task_id }} · urgency {{ e.urgency }} · {% if e.resolved %}resolved{% else %}pending{% endif %}</small>
+    </header>
+    <p><strong>Reason:</strong> {{ e.reason }}</p>
+    <p><strong>Decision Point:</strong> {{ e.decision_point }}</p>
+    <p>{{ e.context_summary }}</p>
+    <details>
+        <summary>Metadata</summary>
+        <div class="data-panel">{{ e.metadata|structured_data_html }}</div>
+    </details>
+    {% if not e.resolved %}
+    <form method="post" action="/escalations/{{ e.id }}/resolve" class="grid">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label>Decision
+            <select name="decision">
+                {% for opt in e.options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                <option value="deny">deny</option>
+            </select>
+        </label>
+        <button type="submit">Resolve</button>
+    </form>
+    {% else %}
+    <p class="muted">Resolution: {{ e.resolution }}</p>
+    {% endif %}
+</article>
+{% endfor %}
+{% endif %}
