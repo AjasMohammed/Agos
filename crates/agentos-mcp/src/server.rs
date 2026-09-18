@@ -125,24 +125,25 @@ impl McpServer {
         Self { executor, auth }
     }
 
-    /// Validate a bearer token. Returns an error response if invalid.
-    pub async fn authenticate(&self, token: Option<&str>) -> Result<(), JsonRpcResponse> {
+    /// Validate a bearer token. Returns an error response if invalid (boxed: the
+    /// response is ~150 bytes and would bloat every `Result` on the happy path).
+    pub async fn authenticate(&self, token: Option<&str>) -> Result<(), Box<JsonRpcResponse>> {
         if let Some(t) = token {
             self.auth.validate_token(t).await.map_err(|e| {
-                JsonRpcResponse::err(
+                Box::new(JsonRpcResponse::err(
                     serde_json::Value::Null,
                     -32000,
                     format!("Unauthorized: {}", e),
-                )
+                ))
             })
         } else {
             // No token provided — only allowed for NoAuth (stdio)
             self.auth.validate_token("").await.map_err(|e| {
-                JsonRpcResponse::err(
+                Box::new(JsonRpcResponse::err(
                     serde_json::Value::Null,
                     -32000,
                     format!("Unauthorized: {}", e),
-                )
+                ))
             })
         }
     }

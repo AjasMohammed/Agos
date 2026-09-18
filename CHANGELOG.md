@@ -40,6 +40,17 @@ content as the 1.0.0 section below plus the release-readiness work from
 - `embeddings` is a cargo feature (default on in `agentos-cli` only);
   `Embedder::new()` failure falls back to no-op instead of aborting boot.
 
+### Security
+- Dependency advisories cleared (`cargo audit`: 12 → 0): wasmtime / wasmtime-wasi
+  44.0.2 → 47.0.4 (filesystem sandbox escape, WASI `FilePerms` bypass, type-index
+  mix-up, `fd_renumber` leak), rustls → 0.23.45 (TLS 1.3 handshake messages
+  accepted across encryption levels), h2 → 0.4.19, quinn-proto → 0.11.18,
+  crossbeam-epoch → 0.9.21, quick-xml → 0.41 (quadratic attribute check,
+  unbounded namespace allocation; reachable through the `data-parser` tool).
+- `data-parser` XML: ported to quick-xml 0.41 entity events. Character
+  references and the five predefined entities resolve; DTD-declared entities
+  are never expanded.
+
 ### Fixed
 - SSRF guard: cloud metadata hostnames, trailing-dot hosts, dotted-octal /
   hex / short-form IPv4 encodings, and IPv4-mapped IPv6 are now blocked.

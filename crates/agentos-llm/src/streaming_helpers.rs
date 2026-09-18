@@ -17,11 +17,15 @@ pub async fn simulate_token_stream(
     text: &str,
     chunk_chars: usize,
     delay: Duration,
-) -> Result<(), mpsc::error::SendError<InferenceEvent>> {
+) -> Result<(), mpsc::error::SendError<()>> {
+    // The undelivered event is dropped from the error: callers only need to know
+    // the receiver is gone, and carrying an `InferenceEvent` makes `Err` 224 bytes.
     let chars: Vec<char> = text.chars().collect();
     for window in chars.chunks(chunk_chars) {
         let chunk: String = window.iter().collect();
-        tx.send(InferenceEvent::Token(chunk)).await?;
+        tx.send(InferenceEvent::Token(chunk))
+            .await
+            .map_err(|_| mpsc::error::SendError(()))?;
         if delay > Duration::ZERO {
             tokio::time::sleep(delay).await;
         }

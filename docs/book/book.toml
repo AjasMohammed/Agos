@@ -10,7 +10,7 @@ git-repository-url = "https://github.com/AjasMohammed/Agos"
 edit-url-template = "https://github.com/AjasMohammed/Agos/edit/main/docs/book/{path}"
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-icon = "fa-github"
+git-repository-icon = "fab-github"
 
 [output.html.fold]
 enable = true

@@ -300,9 +300,9 @@ impl SemanticStore {
                     crate::lifecycle::lifecycle_from_row(row, 12)?;
 
                 let mut embedding = Vec::with_capacity(blob.len() / 4);
-                for bytes in blob.chunks_exact(4) {
-                    embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                }
+                for bytes in blob.as_chunks::<4>().0 {
+    embedding.push(f32::from_le_bytes(*bytes));
+}
 
                 let parsed_agent_id =
                     a_id.map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default()));
