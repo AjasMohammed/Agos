@@ -5119,6 +5119,15 @@ impl Kernel {
                     }
                 }
             }
+            for tc in &mut parsed_tool_calls {
+                let name = self
+                    .tool_runner
+                    .resolve_tool_name(&tc.tool_name)
+                    .unwrap_or_else(|| tc.tool_name.clone());
+                tc.payload = self
+                    .schema_registry
+                    .drop_rejected_nulls(&name, std::mem::take(&mut tc.payload));
+            }
             if parsed_tool_calls.len() > 1 {
                 if self.config.kernel.tool_calls.allow_parallel {
                     self.execute_parallel_tool_calls(
@@ -7752,7 +7761,7 @@ impl Kernel {
 /// (e.g. allowlist-hidden → `ToolNotFound`) never reaches here, so it can
 /// never re-arm. Names not parked in the scoped-out pool are dropped by the
 /// caller, so already-armed or unknown names are harmless.
-fn rearm_tool_names(
+pub(crate) fn rearm_tool_names(
     tool_name: &str,
     payload: &serde_json::Value,
     result: &serde_json::Value,

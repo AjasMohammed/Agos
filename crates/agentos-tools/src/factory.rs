@@ -547,9 +547,13 @@ fn init_embedder(model_cache_dir: &Path) -> Result<Arc<Embedder>, AgentOSError> 
                 cache_dir = %model_cache_dir.display(),
                 "Failed to initialize sandbox embedder with configured cache dir; falling back to default cache"
             );
-            Ok(Arc::new(Embedder::new().map_err(|e| {
-                AgentOSError::StorageError(format!("Failed to initialize embedding model: {}", e))
-            })?))
+            // Mirrors the kernel's boot policy: never fail on the embedder.
+            // Vector retrieval degrades to FTS5 lexical search (also the
+            // behaviour of a build without the `embeddings` feature).
+            Ok(Arc::new(Embedder::new().unwrap_or_else(|e| {
+                warn!(error = %e, "Embedding model unavailable; using zero-vector embedder");
+                Embedder::noop()
+            })))
         }
     }
 }

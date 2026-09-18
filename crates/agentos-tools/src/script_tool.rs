@@ -1,34 +1,15 @@
+use crate::sandbox_fs;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 
 /// Maximum permitted @timeout value (seconds). Prevents runaway scripts from
 /// holding a tool slot indefinitely.
 const MAX_SCRIPT_TIMEOUT_SECS: u64 = 3600;
-
-/// Cached result of the `bwrap --version` availability check.
-/// Avoids re-spawning a probe process on every script tool invocation.
-static BWRAP_AVAILABLE: OnceLock<bool> = OnceLock::new();
-
-async fn is_bwrap_available() -> bool {
-    if let Some(&cached) = BWRAP_AVAILABLE.get() {
-        return cached;
-    }
-    let available = Command::new("bwrap")
-        .arg("--version")
-        .output()
-        .await
-        .is_ok();
-    // OnceLock::set may fail on a race (two concurrent first calls) — that's fine;
-    // the winning value is whichever was set first, and both paths agree.
-    let _ = BWRAP_AVAILABLE.set(available);
-    available
-}
 
 // ---------------------------------------------------------------------------
 // ScriptAnnotations
@@ -314,34 +295,47 @@ impl AgentTool for ScriptTool {
         let tool_name = self.annotations.name.clone();
 
         // bwrap is required — check once and cache the result.
-        if !is_bwrap_available().await {
+        if !sandbox_fs::bwrap_usable().await {
             return Err(AgentOSError::ToolExecutionFailed {
                 tool_name,
-                reason: "bwrap (bubblewrap) is not installed. Script tools require sandbox \
-                         isolation. Install bwrap to enable script tool execution."
+                reason: "bwrap (bubblewrap) is not installed or cannot create namespaces on \
+                         this host. Script tools require sandbox isolation. Install bubblewrap \
+                         and allow unprivileged user namespaces."
                     .into(),
             });
         }
 
         let mut cmd = Command::new("bwrap");
 
-        // --unshare-all must come first so all subsequent namespace operations
-        // (--proc, --dev, --tmpfs, --bind) act inside the new namespaces.
-        cmd.arg("--unshare-all");
+        cmd.arg("--unshare-all")
+            // No controlling terminal (TIOCSTI injection), and no orphaned
+            // sandbox when the kernel is SIGKILLed — `kill_on_drop` only runs
+            // on an orderly drop.
+            .arg("--new-session")
+            .arg("--die-with-parent");
 
         // Re-share network only when explicitly requested by the annotation.
         if self.annotations.allow_network {
             cmd.arg("--share-net");
         }
 
-        // Bind standard system directories read-only.
-        // Guard each optional path — on UsrMerge distros /bin, /sbin, /lib
-        // may not exist as real directories (symlinked to /usr/*).
-        cmd.arg("--ro-bind").arg("/usr").arg("/usr");
-        for path in ["/bin", "/sbin", "/lib", "/lib64"] {
-            if Path::new(path).exists() {
-                cmd.arg("--ro-bind").arg(path).arg(path);
-            }
+        // Bind standard system directories read-only (only those that exist).
+        cmd.args(sandbox_fs::ro_bind_existing(sandbox_fs::SYSTEM_RO_DIRS));
+
+        // Cover sensitive directories with empty tmpfs mounts. bwrap applies
+        // mount operations in argument order, so every bind that lives under
+        // one of these (data_dir under /home, a tempdir under /tmp, /etc
+        // entries) must come AFTER its tmpfs or the tmpfs shadows it.
+        // /tmp is writable (in-memory tmpfs — scripts may use it freely).
+        for dir in ["/root", "/etc", "/var", "/home", "/tmp"] {
+            cmd.arg("--tmpfs").arg(dir);
+        }
+
+        // Restore the non-secret /etc entries interpreters need to start, and
+        // DNS/CA files only when the network is shared.
+        cmd.args(sandbox_fs::ro_bind_existing(sandbox_fs::ETC_RUNTIME));
+        if self.annotations.allow_network {
+            cmd.args(sandbox_fs::ro_bind_existing(sandbox_fs::ETC_NETWORK));
         }
 
         // Bind the script to a fixed path OUTSIDE data_dir so the subsequent
@@ -357,39 +351,10 @@ impl AgentTool for ScriptTool {
             .arg("--bind")
             .arg(&data_dir_str)
             .arg(&data_dir_str)
-            // Cover sensitive directories with empty tmpfs mounts.
-            // /tmp is writable (in-memory tmpfs — scripts may use it freely).
-            .arg("--tmpfs")
-            .arg("/root")
-            .arg("--tmpfs")
-            .arg("/etc")
-            .arg("--tmpfs")
-            .arg("/var")
-            .arg("--tmpfs")
-            .arg("/home")
-            .arg("--tmpfs")
-            .arg("/tmp")
             .arg("--dev")
             .arg("/dev")
             .arg("--proc")
             .arg("/proc");
-
-        // When network access is enabled, restore the files DNS resolution needs.
-        // /etc was masked with an empty tmpfs above — overlay just the required files.
-        // Without these, any HTTPS/DNS call inside the sandbox fails with opaque errors.
-        if self.annotations.allow_network {
-            for path in [
-                "/etc/resolv.conf",
-                "/etc/hosts",
-                "/etc/ssl/certs",
-                "/etc/ca-certificates",
-                "/etc/pki",
-            ] {
-                if Path::new(path).exists() {
-                    cmd.arg("--ro-bind").arg(path).arg(path);
-                }
-            }
-        }
 
         cmd.arg("--chdir")
             .arg(&data_dir_str)
@@ -806,5 +771,71 @@ print('{}')
             ann.permissions.contains(&"network.outbound:x".to_string()),
             "declared permission should also be present"
         );
+    }
+
+    /// Scripts must actually run. The sandbox used to bind the agent home and
+    /// only then mask `/home` and `/tmp` with tmpfs, which shadowed the bind —
+    /// every script died with `bwrap: Can't chdir`. The temp dirs here live
+    /// under `/tmp`, so the same shadowing would reproduce.
+    #[tokio::test]
+    async fn script_runs_in_the_agent_home_with_system_etc() {
+        use crate::traits::ToolExecutionContext;
+        use agentos_types::{AgentID, PermissionSet, TaskID, TraceID};
+        use std::os::unix::fs::PermissionsExt;
+
+        if !sandbox_fs::bwrap_usable().await {
+            return;
+        }
+        let data = tempfile::tempdir().unwrap();
+        let scripts = tempfile::tempdir().unwrap();
+        let script = scripts.path().join("probe.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             # @agentos tool: sandbox-probe\n\
+             echo written > out.txt\n\
+             [ -e /usr/bin/awk ] && awk_ok=true || awk_ok=false\n\
+             printf '{\"cwd\":\"%s\",\"awk_resolves\":%s}' \"$PWD\" \"$awk_ok\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ann = ScriptParser::parse(&script).unwrap().unwrap();
+        let tool = ScriptTool::new(script, ann).unwrap();
+        let ctx = ToolExecutionContext {
+            data_dir: data.path().to_path_buf(),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
+        };
+        let home = ctx.agent_files_dir().unwrap();
+
+        let result = tool.execute(serde_json::json!({}), ctx).await.unwrap();
+
+        assert_eq!(result["cwd"], home.to_string_lossy().as_ref());
+        assert_eq!(
+            std::fs::read_to_string(home.join("out.txt")).unwrap(),
+            "written\n",
+            "the agent home must be the real, writable host directory"
+        );
+        // `/usr/bin/awk` is an alternatives symlink on Debian/Ubuntu.
+        if Path::new("/usr/bin/awk").exists() {
+            assert_eq!(result["awk_resolves"], true);
+        }
     }
 }

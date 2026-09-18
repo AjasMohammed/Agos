@@ -112,15 +112,31 @@ impl ToolExecutionContext {
             .agent_registry
             .as_ref()
             .and_then(|r| r.get_agent(&self.agent_id))
-            .map(|a| a.name)
-            .unwrap_or_else(|| self.agent_id.to_string());
-        let dir = self.data_dir.join("agents").join(name);
+            .map(|a| a.name);
+        let dir = agent_home_dir(&self.data_dir, name.as_deref(), &self.agent_id);
         std::fs::create_dir_all(&dir).map_err(|e| AgentOSError::ToolExecutionFailed {
             tool_name: "file".into(),
             reason: format!("Agent home directory error: {} ({})", dir.display(), e),
         })?;
         Ok(dir)
     }
+}
+
+/// `data_dir/agents/<name>/` — the one definition of an agent home, shared by
+/// the tool context and kernel-side re-checks so the two cannot drift. A name
+/// is one path segment; anything else falls back to the id so the home can
+/// never leave `data_dir/agents/`. Does not create the directory.
+pub fn agent_home_dir(
+    data_dir: &std::path::Path,
+    name: Option<&str>,
+    agent_id: &agentos_types::AgentID,
+) -> PathBuf {
+    let segment = name
+        // `.` would make `agents/.` — every agent's home.
+        .filter(|n| !n.is_empty() && *n != "." && !n.contains(['/', '\\']) && !n.contains(".."))
+        .map(str::to_string)
+        .unwrap_or_else(|| agent_id.to_string());
+    data_dir.join("agents").join(segment)
 }
 
 /// Percent-decode ASCII bytes in a path string (e.g. `%2e%2e` → `..`, `%2f` → `/`).

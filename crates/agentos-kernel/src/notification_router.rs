@@ -127,6 +127,22 @@ pub trait DeliveryAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Whether this adapter delivers to a one-to-one chat with the operator,
+    /// so it may receive the full approval request (task text, target,
+    /// redacted payload). Defaults to `false`: a push service, webhook,
+    /// desktop banner or group chat gets only the summary.
+    async fn is_private_chat(&self) -> bool {
+        false
+    }
+
+    /// Strip the interactive controls from every message this adapter sent
+    /// under `thread_id`, because the decision they offered was already made
+    /// (possibly on another surface). Defaults to a no-op; a late tap on a
+    /// control left in place is still answered "already resolved".
+    async fn retract_actions(&self, _thread_id: &str) -> Result<(), DeliveryError> {
+        Ok(())
+    }
+
     /// Start the background listener.
     ///
     /// The adapter spawns a task that forwards every inbound message to `tx`
@@ -471,6 +487,14 @@ impl NotificationRouter {
             });
         }
 
+        // An expired question's asker has already taken its auto_action; storing
+        // a late answer would report "sent" for a reply no agent will read.
+        if msg.expires_at.is_some_and(|at| at < Utc::now()) {
+            return Err(AgentOSError::KernelError {
+                reason: format!("Question {notification_id} has expired"),
+            });
+        }
+
         // Atomically persist — set_response returns an error if already responded.
         self.inbox.set_response(&notification_id, &response).await?;
 
@@ -489,6 +513,48 @@ impl NotificationRouter {
     /// dead `oneshot::Sender`s do not accumulate in the map between sweep cycles.
     pub async fn remove_waiting_task(&self, id: &NotificationID) {
         self.waiting_tasks.write().await.remove(id);
+    }
+
+    /// Drop an `ask-user` waiter that timed out on the asker's side, with the
+    /// same audit row the periodic sweep writes.
+    pub async fn expire_waiter(
+        &self,
+        id: &NotificationID,
+        task_id: Option<agentos_types::TaskID>,
+        auto_action: &str,
+    ) {
+        if self.waiting_tasks.write().await.remove(id).is_none() {
+            return;
+        }
+        let _ = self.audit.append(AuditEntry {
+            timestamp: Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::NotificationAutoActioned,
+            agent_id: None,
+            task_id,
+            tool_id: None,
+            details: serde_json::json!({
+                "notification_id": id.to_string(),
+                "auto_action": auto_action,
+            }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+    }
+
+    /// Drop every waiter belonging to `task_id`. Called on task cancel: the
+    /// asker wakes with its fallback and aborts on the terminal state, and the
+    /// question stops counting as open for inbound channel replies.
+    pub async fn drop_waiters_for_task(&self, task_id: &agentos_types::TaskID) {
+        let ids: Vec<NotificationID> = self.waiting_tasks.read().await.keys().cloned().collect();
+        for id in ids {
+            let owned =
+                matches!(self.inbox.get(&id).await, Ok(Some(msg)) if msg.task_id == Some(*task_id));
+            if owned {
+                self.waiting_tasks.write().await.remove(&id);
+            }
+        }
     }
 
     /// Return the notification IDs of all blocking questions currently awaiting a response.
@@ -665,6 +731,56 @@ impl NotificationRouter {
             .await
     }
 
+    /// Split registered adapters for an escalation fan-out:
+    /// `(private chat instance ids, filter sets for everything else)`. The
+    /// second part is shaped for [`Self::deliver_filtered`] — instance ids for
+    /// instance-registered adapters, kinds for built-ins that have none.
+    pub async fn split_private_chats(
+        &self,
+    ) -> (
+        std::collections::HashSet<String>,
+        (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ),
+    ) {
+        let adapters = self.adapters.read().await.clone();
+        let mut private = std::collections::HashSet::new();
+        let mut others = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashSet::new();
+        for adapter in adapters {
+            match adapter.adapter_instance_id() {
+                Some(id) if adapter.is_private_chat().await => {
+                    private.insert(id);
+                }
+                Some(id) => {
+                    others.insert(id);
+                }
+                None => {
+                    kinds.insert(adapter.channel_id().as_str().to_string());
+                }
+            }
+        }
+        (private, (others, kinds))
+    }
+
+    /// Ask every adapter to strip the controls it sent under `thread_id`.
+    ///
+    /// Best-effort and bounded per adapter: the decision is already recorded,
+    /// so a failure here only leaves a stale button whose tap is answered
+    /// "already resolved".
+    pub async fn retract_actions(&self, thread_id: &str) {
+        const RETRACT_TIMEOUT: Duration = Duration::from_secs(10);
+        let adapters = self.adapters.read().await.clone();
+        for adapter in adapters {
+            match tokio::time::timeout(RETRACT_TIMEOUT, adapter.retract_actions(thread_id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!(thread_id, error = %e, "retract_actions failed"),
+                Err(_) => tracing::debug!(thread_id, "retract_actions timed out"),
+            }
+        }
+    }
+
     /// The `DeliveryAdapter` registered for `instance_id`, if this router owns it.
     async fn adapter_for(&self, instance_id: &str) -> Option<Arc<dyn DeliveryAdapter>> {
         self.adapters
@@ -695,10 +811,10 @@ impl NotificationRouter {
         //
         // ponytail: suppresses on *any* outstanding blocking interaction rather
         // than one scoped to this channel, because `waiting_tasks` is keyed by
-        // NotificationID and holds no channel. Safe today only because
-        // `InboundRouter::run` is strictly serial, so at most one channel turn is
-        // ever in flight. If channel turns ever run concurrently, key this by
-        // channel — otherwise one parked turn mutes every other channel.
+        // NotificationID and holds no channel. `InboundRouter::run` serializes
+        // turns per channel only, so with two channels mid-turn one parked turn
+        // mutes the other's indicator. Cosmetic; key this by channel if
+        // multi-channel operators notice.
         if !self.waiting_tasks.read().await.is_empty() {
             return true;
         }

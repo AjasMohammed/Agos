@@ -1,11 +1,66 @@
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+/// Speaker name for rows the human operator posts into a conversation. `@` is not
+/// a legal agent name (`commands::agent::is_valid_agent_name`), so no participant
+/// can produce a row that reads as the operator.
+pub const USER_SPEAKER: &str = "@user";
 
 /// SQLite-backed store for multi-agent conversations.
 pub struct ConvoStore {
     conn: Mutex<Connection>,
+    /// Convo ids with a live runner in this process. See [`ConvoStore::begin_run`].
+    live_runs: Mutex<HashSet<String>>,
+}
+
+/// Why [`ConvoStore::claim_resume`] refused.
+#[derive(Debug)]
+pub enum ResumeError {
+    NotFound,
+    /// A runner is still live (or the convo is `running`) — resuming now would
+    /// start a second loop over the same transcript.
+    Busy,
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for ResumeError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Held by a running conversation loop; releases the convo id on drop, including
+/// when the runner future is dropped mid-turn or panics.
+pub struct RunGuard {
+    store: Arc<ConvoStore>,
+    id: String,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        // Every normal exit has already written a terminal status. Still
+        // `running` here means a panic or abort — settle it, or Continue would
+        // refuse a conversation nothing is running.
+        // ponytail: one sync SQLite write on the dropping thread; it only
+        // matters on the abnormal path.
+        {
+            let conn = self.store.conn.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = conn.execute(
+                "UPDATE agent_convos SET status = 'error' WHERE id = ?1 AND status = 'running'",
+                params![self.id],
+            ) {
+                tracing::error!(convo_id = %self.id, error = %e, "Failed to settle abandoned convo run");
+            }
+        }
+        self.store
+            .live_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
 }
 
 /// Drop `<user_data>` framing a model mirrored back from the transcript it was
@@ -95,6 +150,7 @@ impl ConvoStore {
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
+            live_runs: Mutex::new(HashSet::new()),
         })
     }
 
@@ -206,18 +262,26 @@ impl ConvoStore {
         rows.collect()
     }
 
+    /// Append a row and return its turn number. The number is assigned here
+    /// (`MAX + 1` under the connection lock) rather than by the caller, so an
+    /// operator message posted while an agent's turn is in flight cannot collide
+    /// with that turn's row.
     pub fn add_turn(
         &self,
         convo_id: &str,
-        turn_number: u32,
         agent_name: &str,
         content: &str,
         tool_call_count: u32,
-    ) -> Result<(), rusqlite::Error> {
+    ) -> Result<u32, rusqlite::Error> {
         let now = chrono::Utc::now().to_rfc3339();
         let content = strip_user_data_tags(content);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.unchecked_transaction()?;
+        let turn_number: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM convo_turns WHERE convo_id = ?1",
+            params![convo_id],
+            |r| r.get(0),
+        )?;
         tx.execute(
             "INSERT INTO convo_turns (convo_id, turn_number, agent_name, content, tool_call_count, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -228,6 +292,71 @@ impl ConvoStore {
             params![now, convo_id],
         )?;
         tx.commit()?;
+        Ok(turn_number as u32)
+    }
+
+    /// Register a live runner for `convo_id`. `None` if one is already running in
+    /// this process.
+    pub fn begin_run(self: &Arc<Self>, convo_id: &str) -> Option<RunGuard> {
+        let mut runs = self.live_runs.lock().unwrap_or_else(|e| e.into_inner());
+        runs.insert(convo_id.to_string()).then(|| RunGuard {
+            store: Arc::clone(self),
+            id: convo_id.to_string(),
+        })
+    }
+
+    /// Reopen a finished conversation for `extra_turns` more agent turns: sets
+    /// `running` and `max_turns = agent turns so far + extra_turns`, returning the
+    /// new ceiling. Refuses while a runner is live — a stopped convo's runner
+    /// finishes its in-flight turn first, and resuming under it would put two
+    /// loops on one transcript.
+    pub fn claim_resume(&self, convo_id: &str, extra_turns: u32) -> Result<u32, ResumeError> {
+        // Checked and released before touching SQLite. Safe: a new runner only
+        // starts after a create or claim wrote `running`, which the conditional
+        // UPDATE below refuses.
+        if self
+            .live_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(convo_id)
+        {
+            return Err(ResumeError::Busy);
+        }
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE agent_convos
+             SET status = 'running',
+                 max_turns = ?1 + (SELECT COUNT(*) FROM convo_turns
+                                   WHERE convo_id = ?2 AND agent_name != ?3),
+                 updated_at = ?4
+             WHERE id = ?2 AND status != 'running'",
+            params![
+                extra_turns,
+                convo_id,
+                USER_SPEAKER,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        match conn.query_row(
+            "SELECT max_turns FROM agent_convos WHERE id = ?1",
+            params![convo_id],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(ceiling) if changed == 1 => Ok(ceiling as u32),
+            Ok(_) => Err(ResumeError::Busy),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(ResumeError::NotFound),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Raise a conversation's turn ceiling (the runner grants a round to an
+    /// operator message that arrives as the budget runs out).
+    pub fn set_max_turns(&self, convo_id: &str, max_turns: u32) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE agent_convos SET max_turns = ?1 WHERE id = ?2",
+            params![max_turns, convo_id],
+        )?;
         Ok(())
     }
 
@@ -357,5 +486,58 @@ mod reconcile_tests {
             store.get_convo(&stopped).unwrap().unwrap().status,
             "stopped"
         );
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn claim_resume_extends_budget_and_refuses_live_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(ConvoStore::open(&dir.path().join("c.db")).expect("open"));
+        let id = store
+            .create_convo("t", &["A".to_string(), "B".to_string()], 2)
+            .expect("create");
+
+        assert_eq!(store.add_turn(&id, "A", "one", 0).unwrap(), 1);
+        assert_eq!(store.add_turn(&id, USER_SPEAKER, "steer", 0).unwrap(), 2);
+        assert_eq!(store.add_turn(&id, "B", "two", 0).unwrap(), 3);
+
+        // Still `running` from creation: a second loop must not start.
+        assert!(matches!(store.claim_resume(&id, 4), Err(ResumeError::Busy)));
+        store.set_status(&id, "complete").unwrap();
+
+        // A live runner (e.g. a stopped run finishing its turn) also blocks.
+        let guard = store.begin_run(&id).expect("first runner");
+        assert!(store.begin_run(&id).is_none());
+        assert!(matches!(store.claim_resume(&id, 4), Err(ResumeError::Busy)));
+        drop(guard);
+        assert_eq!(store.get_convo(&id).unwrap().unwrap().status, "complete");
+
+        // Operator rows don't count: 2 agent turns + 4.
+        assert_eq!(store.claim_resume(&id, 4).unwrap(), 6);
+        let convo = store.get_convo(&id).unwrap().unwrap();
+        assert_eq!((convo.status.as_str(), convo.max_turns), ("running", 6));
+
+        assert!(matches!(
+            store.claim_resume("nope", 4),
+            Err(ResumeError::NotFound)
+        ));
+    }
+
+    /// A runner that dies without writing a terminal status (panic, abort) must
+    /// not leave the convo `running` — Continue would refuse it forever.
+    #[test]
+    fn dropped_runner_settles_running_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(ConvoStore::open(&dir.path().join("c.db")).expect("open"));
+        let id = store
+            .create_convo("t", &["A".to_string(), "B".to_string()], 2)
+            .expect("create");
+        drop(store.begin_run(&id).expect("runner"));
+        assert_eq!(store.get_convo(&id).unwrap().unwrap().status, "error");
+        assert_eq!(store.claim_resume(&id, 2).unwrap(), 2);
     }
 }

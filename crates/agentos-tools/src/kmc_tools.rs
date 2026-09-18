@@ -56,6 +56,8 @@ macro_rules! kmc_tool {
                     data_dir: context.data_dir.clone(),
                     permissions: context.permissions.clone(),
                     workspace_paths: context.workspace_paths.clone(),
+                    agent_home: context.agent_files_dir()?,
+                    workspace_paths_executable: context.workspace_paths_executable.clone(),
                 }).await
             }
         }

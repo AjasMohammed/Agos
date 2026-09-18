@@ -152,6 +152,30 @@ pub fn admit(
     (native, by_name)
 }
 
+/// Move `names` a successful `search-tools`/`describe-tool` surfaced out of a
+/// chat turn's deferred `pool` into the `native` array, so the model can call
+/// them next iteration. Names not pooled (already native, unknown, withheld)
+/// are ignored. Stops once `armed` reaches `cap` for the turn — the chat pool
+/// is rebuilt every turn, so there is no LRU eviction like the task path's.
+pub(crate) fn arm_discovered(
+    names: Vec<String>,
+    native: &mut Vec<ToolManifest>,
+    pool: &mut HashMap<String, ToolManifest>,
+    armed: &mut usize,
+    cap: usize,
+) {
+    for name in names {
+        if *armed >= cap.max(1) {
+            break;
+        }
+        if let Some(m) = pool.remove(&name) {
+            tracing::info!(tool_name = %name, "Armed deferred chat tool after discovery");
+            native.push(m);
+            *armed += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod admit_tests {
     use super::*;
@@ -196,6 +220,26 @@ mod admit_tests {
         let mut pooled: Vec<&String> = pool.keys().collect();
         pooled.sort();
         assert_eq!(pooled, vec!["audio", "zeta"]);
+    }
+
+    #[test]
+    fn arm_discovered_moves_pooled_hits_up_to_cap() {
+        let mut native = vec![manifest("search-tools", &["meta"])];
+        let mut pool: HashMap<String, ToolManifest> = ["a", "b", "c"]
+            .iter()
+            .map(|n| (n.to_string(), manifest(n, &[])))
+            .collect();
+        let mut armed = 0;
+        let hits = ["search-tools", "missing", "a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        arm_discovered(hits, &mut native, &mut pool, &mut armed, 2);
+        let names: Vec<&str> = native.iter().map(|m| m.manifest.name.as_str()).collect();
+        // already-native and unknown names ignored; cap stops before "c"
+        assert_eq!(names, vec!["search-tools", "a", "b"]);
+        assert_eq!(armed, 2);
+        assert!(pool.contains_key("c") && pool.len() == 1);
     }
 
     #[test]

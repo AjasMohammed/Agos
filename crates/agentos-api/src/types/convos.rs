@@ -1,9 +1,6 @@
-//! DTOs for the agent-conversation (multi-agent convo) read-only REST surface.
+//! DTOs for the agent-conversation (multi-agent convo) REST surface.
 //!
-//! These mirror `agentos_kernel::convo_store::{AgentConvo, ConvoTurn}`. Only
-//! read endpoints are exposed here — convo *creation* and the orchestration loop
-//! are web-only application logic and require an in-flight registry, so they are
-//! deferred to a later pass.
+//! These mirror `agentos_kernel::convo_store::{AgentConvo, ConvoTurn}`.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -32,7 +29,7 @@ pub struct ApiConvoSummary {
 pub struct ApiConvoTurn {
     /// 1-based turn ordering within the conversation.
     pub turn_number: u32,
-    /// Agent that produced this turn.
+    /// Agent that produced this turn, or `@user` for an operator message.
     pub agent_name: String,
     /// Turn content.
     pub content: String,
@@ -69,4 +66,19 @@ pub struct CreateConvoRequest {
     /// Number of turns to run (clamped to 2..=50; default 8).
     #[serde(default)]
     pub max_turns: Option<u32>,
+}
+
+/// Request body for continuing a finished conversation in place.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContinueConvoRequest {
+    /// Additional agent turns to run (clamped to 1..=50; default 8).
+    #[serde(default)]
+    pub turns: Option<u32>,
+}
+
+/// Request body for posting an operator message into a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PostConvoMessageRequest {
+    /// Message text (max 4000 chars).
+    pub content: String,
 }

@@ -28,6 +28,10 @@ const MAX_PLAYBACK_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_PLAYBACK_SECONDS: u64 = 300;
 const MAX_PLAYBACK_SECONDS: u64 = 3_600;
 const AUDIO_DEVICE_PREFIX: &str = "audio:";
+/// wpctl's alias for the current default output. `volume`/`mute` without a
+/// target use it, like `playback` does — "mute the audio" should not need a
+/// `list` round-trip first. Gated as `audio:default` (see `device_key`).
+const DEFAULT_SINK: &str = "@DEFAULT_AUDIO_SINK@";
 /// GNU `timeout` reports 124 whenever it had to fire, regardless of how the
 /// child then exited — so 124 means "we stopped it", never "it failed".
 const TIMEOUT_FIRED_EXIT_CODE: i32 = 124;
@@ -236,6 +240,18 @@ impl AudioDriver {
         keys: &[&str],
         field_name: &str,
     ) -> Result<Option<&'a str>, AgentOSError> {
+        // A present non-string target (models often emit `"node_id": 50`)
+        // must not read as "missing": volume/mute/playback would then drive
+        // the default sink under the `audio:default` grant instead.
+        if keys.iter().any(|key| {
+            params
+                .get(*key)
+                .is_some_and(|v| !v.is_string() && !v.is_null())
+        }) {
+            return Err(AgentOSError::HalError(format!(
+                "Invalid '{field_name}' param: must be a string"
+            )));
+        }
         let value = keys
             .iter()
             .find_map(|key| params.get(*key).and_then(Value::as_str));
@@ -306,7 +322,14 @@ impl AudioDriver {
             return Ok(path.to_path_buf());
         }
 
-        Ok(std::env::temp_dir().join(format!("agentos-audio-{}.wav", Uuid::new_v4())))
+        // The tool wrapper stamps the agent's own `captures/` dir under
+        // `__output_dir`; `/tmp` only when driven without the wrapper (tests).
+        let dir = params
+            .get("__output_dir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        Ok(dir.join(format!("agentos-audio-{}.wav", Uuid::new_v4())))
     }
 
     async fn playback_path_from_params(&self, params: &Value) -> Result<PathBuf, AgentOSError> {
@@ -925,7 +948,7 @@ impl AudioDriver {
     async fn get_volume(&self, params: &Value) -> Result<Value, AgentOSError> {
         let node_id = self
             .sanitize_audio_target(params, &["node_id", "sink", "source"], "node_id")?
-            .ok_or_else(|| AgentOSError::HalError("Missing 'node_id' param".into()))?;
+            .unwrap_or(DEFAULT_SINK);
         let args = vec![
             "get-volume".to_string(),
             Self::normalize_device_key(node_id),
@@ -957,7 +980,7 @@ impl AudioDriver {
     async fn set_volume(&self, params: &Value) -> Result<Value, AgentOSError> {
         let node_id = self
             .sanitize_audio_target(params, &["node_id", "sink", "source"], "node_id")?
-            .ok_or_else(|| AgentOSError::HalError("Missing 'node_id' param".into()))?;
+            .unwrap_or(DEFAULT_SINK);
         let volume = self.volume_from_params(params)?;
         let args = vec![
             "set-volume".to_string(),
@@ -987,7 +1010,7 @@ impl AudioDriver {
     async fn mute(&self, params: &Value) -> Result<Value, AgentOSError> {
         let node_id = self
             .sanitize_audio_target(params, &["node_id", "sink", "source"], "node_id")?
-            .ok_or_else(|| AgentOSError::HalError("Missing 'node_id' param".into()))?;
+            .unwrap_or(DEFAULT_SINK);
 
         let Some(desired) = params.get("muted") else {
             return self.get_volume(params).await;
@@ -1068,27 +1091,16 @@ impl HalDriver for AudioDriver {
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("list");
-        let keys: &[&str] = match action {
+        // `missing_is_default`: `playback`, `volume` and `mute` treat the
+        // target as OPTIONAL and fall back to the PipeWire default sink, so a
+        // missing target must still produce a key — otherwise driving the
+        // default speakers skipped the approval gate entirely.
+        let (keys, missing_is_default): (&[&str], bool) = match action {
             "capture" | "grant_capture_consent" | "revoke_capture_consent" => {
-                &["source", "node_id"]
+                (&["source", "node_id"], false)
             }
-            // `playback_audio` treats the sink as OPTIONAL and falls back to
-            // the PipeWire default sink, so a missing sink must still produce
-            // a key — otherwise playing audio out of the default speakers
-            // skipped the approval gate entirely.
-            "playback" => {
-                let sink = self
-                    .sanitize_audio_target(params, &["sink", "node_id"], "device_key")
-                    .ok()
-                    .flatten();
-                return Some(match sink {
-                    Some(sink) => {
-                        format!("{AUDIO_DEVICE_PREFIX}{}", Self::normalize_device_key(sink))
-                    }
-                    None => format!("{AUDIO_DEVICE_PREFIX}default"),
-                });
-            }
-            "volume" | "mute" => &["node_id", "sink", "source"],
+            "playback" => (&["sink", "node_id"], true),
+            "volume" | "mute" => (&["node_id", "sink", "source"], true),
             // Lifecycle actions address a session handle, never a device: the
             // sink was gated when `playback` started it, and the caller must
             // already own the session. Returning a key here would demand
@@ -1099,11 +1111,18 @@ impl HalDriver for AudioDriver {
             _ => return None,
         };
         // Use sanitize_audio_target so device_key matches what query() validates
-        self.sanitize_audio_target(params, keys, "device_key")
+        match self
+            .sanitize_audio_target(params, keys, "device_key")
             .ok()
             .flatten()
-            .map(Self::normalize_device_key)
-            .map(|target| format!("{AUDIO_DEVICE_PREFIX}{target}"))
+        {
+            Some(target) => Some(format!(
+                "{AUDIO_DEVICE_PREFIX}{}",
+                Self::normalize_device_key(target)
+            )),
+            None if missing_is_default => Some(format!("{AUDIO_DEVICE_PREFIX}default")),
+            None => None,
+        }
     }
 
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
@@ -2382,6 +2401,49 @@ mod tests {
             driver.device_key(&json!({ "action": "playback", "audio_path": "/tmp/a.wav" })),
             Some("audio:default".to_string())
         );
+        // Volume/mute without a target drive the default sink — still gated.
+        assert_eq!(
+            driver.device_key(&json!({ "action": "mute", "muted": true })),
+            Some("audio:default".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn volume_set_without_target_uses_default_sink() {
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::from([(
+            "wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.00".to_string(),
+            success(""),
+        )]))));
+
+        let result = driver
+            .set_volume(&json!({ "volume": 1.0 }))
+            .await
+            .expect("default-sink volume set should succeed");
+        assert_eq!(result["node_id"], "@DEFAULT_AUDIO_SINK@");
+    }
+
+    #[tokio::test]
+    async fn mute_without_target_uses_default_sink() {
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::from([(
+            "wpctl set-mute @DEFAULT_AUDIO_SINK@ 1".to_string(),
+            success(""),
+        )]))));
+
+        let result = driver
+            .mute(&json!({ "muted": true }))
+            .await
+            .expect("default-sink mute should succeed");
+        assert_eq!(result["node_id"], "@DEFAULT_AUDIO_SINK@");
+    }
+
+    #[tokio::test]
+    async fn numeric_target_is_rejected_not_defaulted() {
+        let driver = AudioDriver::new();
+        let err = driver
+            .mute(&json!({ "node_id": 50, "muted": true }))
+            .await
+            .expect_err("numeric node_id must not fall back to the default sink");
+        assert!(err.to_string().contains("must be a string"), "{err}");
     }
 
     #[tokio::test]

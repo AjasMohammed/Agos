@@ -13,6 +13,7 @@
 //! scoping is a follow-up (track `task_owner` against a paired user_id).
 
 use crate::escalation::{BroadcastSink, PendingEscalation};
+use crate::escalation_card::EscalationCard;
 use crate::notification_router::NotificationRouter;
 use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_channels::manager::ChannelManager;
@@ -82,16 +83,6 @@ impl RateBucket {
 /// channel sink — operators only see the first prompt.
 fn dedupe_key(esc: &PendingEscalation) -> String {
     format!("{}|{}|{}", esc.task_id, esc.agent_id, esc.decision_point)
-}
-
-/// Truncate to `max` characters, marking the cut with an ellipsis.
-fn truncate(s: &str, max: usize) -> String {
-    let head: String = s.chars().take(max).collect();
-    if s.chars().count() > max {
-        format!("{head}…")
-    } else {
-        head
-    }
 }
 
 /// Broadcasts every new `PendingEscalation` to all paired DM channels.
@@ -292,69 +283,25 @@ impl ChannelBroadcastSink {
         }
     }
 
-    /// Render the redacted variant sent through `NotificationRouter`.
+    /// The redacted card: what third-party delivery targets (ntfy, webhook,
+    /// desktop) and the inbox receive.
     ///
-    /// The full prompt from [`Self::render`] embeds up to 280 characters of
-    /// `context_summary`, which `ApprovalHook` builds as
-    /// `"… Input preview: <raw tool input JSON>"` — for an `env-*` or
-    /// secret-bearing call that is a plaintext credential. The router fans out
-    /// to operator-configured third-party endpoints (webhook POST, Slack
-    /// incoming webhook, desktop DBus), a target set that never saw escalation
-    /// content before. So the router path names *what* is being approved —
-    /// `decision_point`, which the kernel builds as "Tool 'x' (risk: y) awaiting
-    /// approval" and which carries no tool input — but withholds
-    /// `context_summary`; the payload preview stays on the explicitly paired DM
-    /// channels. Without the decision point the prompt said only "urgent",
-    /// which is unactionable: every adapter registered with the router (Telegram,
-    /// ntfy, desktop, email, webhook) is marked `covered_by_router` and so never
-    /// receives the full [`Self::render`] body.
-    ///
-    /// The body no longer spells out the `/approve` reply instructions: the
-    /// controls ride along as `UserMessage.actions`, so an adapter with an
-    /// interactive primitive draws buttons and one without appends the shared
-    /// text fallback. That closes the gap where a router-only recipient (ntfy,
-    /// webhook, desktop) was told a decision was needed but given no way to
-    /// make it.
+    /// `context_summary` embeds the redacted tool payload and the task text,
+    /// and these targets are operator-configured third-party endpoints, so the
+    /// summary names *what* is being approved — question, agent, tool, risk —
+    /// and withholds the rest. See [`EscalationCard::to_summary_markdown`].
     fn render_summary(esc: &PendingEscalation) -> String {
-        let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
-        format!(
-            "🛂 AgentOS approval needed (#{id})\n\
-             Urgency: {urgency}\n\
-             Decision: {decision}\n\
-             Open the escalation queue for the full context \
-             (auto-denies in ~{exp}s).",
-            id = esc.id,
-            urgency = esc.urgency,
-            decision = truncate(&esc.decision_point, 240),
-            exp = expires_in_secs,
-        )
+        EscalationCard::from_escalation(esc).to_summary_markdown()
     }
 
-    /// Render a human-readable approval prompt for the given escalation.
-    /// Includes the escalation id, urgency, decision_point and context.
+    /// The full card, for chats paired to the operator: a Telegram private
+    /// chat or a paired DM. See [`EscalationCard::to_markdown`].
     ///
     /// The `/approve` and `/deny` instructions are deliberately absent: they
     /// come from `UserMessage.actions` at the adapter, either as native
-    /// controls or via `render_actions_fallback`. Spelling them out here too
-    /// would print them twice on every text-only channel.
+    /// controls or via `render_actions_fallback`.
     fn render(esc: &PendingEscalation) -> String {
-        // 700, not 280: `context_summary` is now a labelled Who/What/Where/Why
-        // block rather than a JSON blob, and clipping at 280 cut it mid-"Why".
-        let preview = truncate(&esc.context_summary, 700);
-        let decision = truncate(&esc.decision_point, 240);
-        let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
-        format!(
-            "🛂 AgentOS approval needed (#{id})\n\
-             Urgency: {urgency}\n\
-             Decision: {decision}\n\
-             Context: {preview}\n\n\
-             Expires in ~{exp}s.",
-            id = esc.id,
-            urgency = esc.urgency,
-            decision = decision,
-            preview = preview,
-            exp = expires_in_secs,
-        )
+        EscalationCard::from_escalation(esc).to_markdown()
     }
 }
 
@@ -378,20 +325,33 @@ impl BroadcastSink for ChannelBroadcastSink {
         }
 
         let body = Self::render(escalation);
+        let summary = Self::render_summary(escalation);
 
         // Channels already registered as delivery adapters are reached by the
         // router fan-out below; their paired senders must be skipped or the
         // operator gets the same prompt twice on the same channel. Populated
-        // only once `deliver` actually succeeded — on failure the paired-DM
-        // loop is the fallback and must not be suppressed.
+        // only once a send actually succeeded — on failure the paired-DM loop
+        // is the fallback and must not be suppressed.
         let mut covered_by_router = std::collections::HashSet::new();
 
-        // Fan out through the notification router FIRST. `deliver` persists to
-        // `UserInbox` (so the prompt shows up in the panel's notification bell,
-        // not only on the escalation page) and reaches every registered
-        // delivery adapter — desktop, ntfy, email, webhook. Without this the
-        // only delivery path was a paired DM, so an operator running panel-only
-        // had to sit on the escalation page to notice that a task was parked.
+        // Who may see the full card. Router adapters answer for themselves
+        // (`is_private_chat`: a Telegram 1:1 chat yes, a group or ntfy topic
+        // no). ChannelManager channels are not router adapters; reaching them
+        // at all takes an operator-approved DM pairing, which is the trust
+        // this sink has always extended to them.
+        // ponytail: a manager-stack pairing on a guild channel still gets the
+        // full card — add `is_private_chat` to `ChannelAdapter` if that bites.
+        let (private_chats, (other_ids, other_kinds)) = match self.notification_router.get() {
+            Some(router) => router.split_private_chats().await,
+            None => Default::default(),
+        };
+
+        // Fan out through the notification router FIRST. `deliver_filtered`
+        // persists to `UserInbox` (so the prompt shows up in the panel's
+        // notification bell, not only on the escalation page) and reaches every
+        // non-private delivery adapter — desktop, ntfy, email, webhook — with
+        // the summary. It runs before the private-chat sends so a slow chat
+        // cannot push the inbox write past the sink's 30s budget.
         // `from: Kernel` keeps it out of the per-agent 10/min cap, so the
         // sink's own limiter is applied here instead.
         if let Some(router) = self.notification_router.get() {
@@ -403,22 +363,22 @@ impl BroadcastSink for ChannelBroadcastSink {
                 );
                 self.audit_suppressed(escalation, "rate_limited", Some("router"), None);
             } else {
-                let ids = router.adapter_instance_ids().await;
                 // Bound the fan-out. `EscalationManager` wraps this whole
                 // broadcast in a 30s timeout and `WebhookDeliveryAdapter`
                 // retries with backoff — one misconfigured webhook URL would
-                // otherwise burn the entire budget and the paired-DM loop
-                // below would never run.
+                // otherwise burn the entire budget and the sends below would
+                // never run.
                 let sent = tokio::time::timeout(
                     ROUTER_FANOUT_TIMEOUT,
-                    router.deliver(Self::as_user_message(
-                        escalation,
-                        Self::render_summary(escalation),
-                    )),
+                    router.deliver_filtered(
+                        Self::as_user_message(escalation, summary.clone()),
+                        &other_ids,
+                        &other_kinds,
+                    ),
                 )
                 .await;
                 match sent {
-                    Ok(Ok(_)) => covered_by_router = ids,
+                    Ok(Ok(())) => covered_by_router.extend(other_ids.iter().cloned()),
                     Ok(Err(e)) => tracing::warn!(
                         escalation_id = escalation.id,
                         error = %e,
@@ -428,6 +388,33 @@ impl BroadcastSink for ChannelBroadcastSink {
                         escalation_id = escalation.id,
                         "Escalation fan-out timed out — falling back to paired DMs"
                     ),
+                }
+
+                // Operator private chats get the full card. One router
+                // `deliver` used to send the summary everywhere, so a Telegram
+                // DM never saw what it was approving.
+                for id in &private_chats {
+                    let sent = tokio::time::timeout(
+                        ROUTER_FANOUT_TIMEOUT,
+                        router.send_to_channel(Self::as_user_message(escalation, body.clone()), id),
+                    )
+                    .await;
+                    match sent {
+                        Ok(Ok(())) => {
+                            covered_by_router.insert(id.clone());
+                        }
+                        Ok(Err(e)) => tracing::warn!(
+                            escalation_id = escalation.id,
+                            channel = %id,
+                            error = %e,
+                            "Escalation prompt to private chat failed — falling back to paired DMs"
+                        ),
+                        Err(_) => tracing::warn!(
+                            escalation_id = escalation.id,
+                            channel = %id,
+                            "Escalation prompt to private chat timed out — falling back to paired DMs"
+                        ),
+                    }
                 }
             }
         }
@@ -485,23 +472,44 @@ impl BroadcastSink for ChannelBroadcastSink {
             // direct-manager path stays as a fallback for the (boot-order)
             // case where no channel has been connected yet — which also means
             // there are no paired senders, so it is effectively unreachable.
-            let send_result = match self.notification_router.get() {
-                Some(router) => {
-                    router
-                        .send_to_channel(
-                            Self::as_user_message(escalation, body.clone()),
-                            &sender.channel_id,
-                        )
-                        .await
+            // The fallback must not widen the audience: a router adapter that
+            // is not a private chat (a Telegram group whose summary send failed)
+            // gets the summary here too, never the full card.
+            let text = if other_ids.contains(&sender.channel_id) {
+                &summary
+            } else {
+                &body
+            };
+            let send = async {
+                match self.notification_router.get() {
+                    Some(router) => {
+                        router
+                            .send_to_channel(
+                                Self::as_user_message(escalation, text.clone()),
+                                &sender.channel_id,
+                            )
+                            .await
+                    }
+                    None => {
+                        let msg = OutboundMessage {
+                            actions: crate::escalation_prompt::escalation_actions(escalation),
+                            channel_instance_id: sender.channel_id.clone(),
+                            content: MessageContent::Markdown(text.clone()),
+                            thread_id: None,
+                        };
+                        self.channels.send(&sender.channel_id, msg).await
+                    }
                 }
-                None => {
-                    let msg = OutboundMessage {
-                        actions: crate::escalation_prompt::escalation_actions(escalation),
-                        channel_instance_id: sender.channel_id.clone(),
-                        content: MessageContent::Markdown(body.clone()),
-                        thread_id: None,
-                    };
-                    self.channels.send(&sender.channel_id, msg).await
+            };
+            let send_result = match tokio::time::timeout(ROUTER_FANOUT_TIMEOUT, send).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!(
+                        escalation_id = escalation.id,
+                        channel = %sender.channel_id,
+                        "ChannelBroadcastSink: paired send timed out"
+                    );
+                    continue;
                 }
             };
             if let Err(e) = send_result {
@@ -518,6 +526,14 @@ impl BroadcastSink for ChannelBroadcastSink {
 
     fn name(&self) -> &'static str {
         "channel"
+    }
+
+    async fn resolved(&self, escalation_id: u64) {
+        if let Some(router) = self.notification_router.get() {
+            router
+                .retract_actions(&format!("escalation:{escalation_id}"))
+                .await;
+        }
     }
 
     fn attach_notification_router(&self, router: &Arc<NotificationRouter>) {
@@ -766,8 +782,8 @@ mod tests {
         // Truncated preview should not exceed the 700-char clip plus formatting.
         let preview_line = body
             .lines()
-            .find(|l| l.starts_with("Context:"))
-            .expect("Context line present");
+            .find(|l| l.starts_with("xxx"))
+            .expect("context line present");
         assert!(preview_line.chars().count() < 750);
     }
 

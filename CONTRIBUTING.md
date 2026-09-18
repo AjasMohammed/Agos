@@ -11,6 +11,33 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Your First 30 Minutes
+
+The full workspace is ~300k lines across 29 crates. You do not need to build all of it to land a fix.
+
+```bash
+# 1. Build just the CLI binary (pulls in the kernel). ~13 GB RAM is enough with -j 4.
+cargo build -p agentos-cli -j 4
+
+# 2. Run one small crate's tests to confirm the toolchain works.
+cargo test -p agentos-types
+
+# 3. See what tools exist: one TOML manifest per built-in tool.
+ls tools/core
+
+# 4. See how integration tests are laid out. Security regressions live in
+#    tests/security_*.rs (one file per public vulnerability class).
+ls crates/agentos-kernel/tests/
+
+# 5. Run the security suite on its own.
+cargo test -p agentos-kernel --test security_acceptance_test --test security_ssrf_metadata_blocked \
+  --test security_injected_config_write_requires_approval --test security_file_tools_reject_traversal
+```
+
+Adding a security test: copy the smallest existing `security_*.rs`, name the file after the attack class, include one negative case and one positive control, and add a row to the "Threat Classes We Test Against" table in `docs/guide/06-security.md`.
+
+Scope freeze: until `v1.0.0` is tagged we accept bug fixes, security fixes, tests, and docs. New channels, providers, tools, or endpoints wait; open an issue first so the idea is not lost.
+
 ## Before You Submit
 
 Every PR must pass:

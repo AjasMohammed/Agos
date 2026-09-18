@@ -29,10 +29,12 @@ pub fn markdown_to_telegram_html(input: &str) -> String {
     let mut placeholders: Vec<String> = Vec::new();
     let with_pre = extract_fenced_blocks(&escaped, &mut placeholders);
     let with_code = extract_inline_code(&with_pre, &mut placeholders);
+    // After code extraction, so a `\*` inside a code span stays verbatim.
+    let with_escapes = extract_escapes(&with_code, &mut placeholders);
 
     // Block-level transforms (headers, bullets, blockquotes, rules) run before
     // inline ones so the inline passes still see their markers inside the line.
-    let with_blocks = apply_block_formatting(&with_code);
+    let with_blocks = apply_block_formatting(&with_escapes);
 
     let with_bold = replace_paired(&with_blocks, "**", "<b>", "</b>");
     let with_strike = replace_paired(&with_bold, "~~", "<s>", "</s>");
@@ -173,6 +175,33 @@ fn extract_fenced_blocks(input: &str, placeholders: &mut Vec<String>) -> String 
         let ch = input[i..].chars().next().unwrap_or(' ');
         out.push(ch);
         i += ch.len_utf8();
+    }
+    out
+}
+
+/// Markdown backslash escapes for the inline markers this converter acts on —
+/// `\*`, `\_`, `\~`, `\[`, `\]` — become the literal character, hidden from
+/// the inline passes. This is how generated text (a file name like
+/// `a_b_c.mp3`) opts out of italics.
+///
+/// Deliberately narrow: `\\` and `` \` `` stay literal, so a UNC path, a
+/// regex, or LaTeX in an agent reply keeps its backslashes, and a backtick is
+/// never escapable (code spans are extracted before this pass).
+fn extract_escapes(input: &str, placeholders: &mut Vec<String>) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if matches!(next, '*' | '_' | '~' | '[' | ']') {
+                    chars.next();
+                    placeholders.push(next.to_string());
+                    out.push_str(&make_placeholder(placeholders.len() - 1));
+                    continue;
+                }
+            }
+        }
+        out.push(c);
     }
     out
 }
@@ -391,6 +420,19 @@ fn restore_placeholders(input: &str, placeholders: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backslash_escapes_suppress_markers_but_not_inside_code() {
+        assert_eq!(
+            markdown_to_telegram_html(r"\\server\share"),
+            r"\\server\share"
+        );
+        assert_eq!(
+            markdown_to_telegram_html(r"Ennavale\_ennai\_song.mp3 \*not bold\*"),
+            "Ennavale_ennai_song.mp3 *not bold*"
+        );
+        assert_eq!(markdown_to_telegram_html(r"`a\_b`"), r"<code>a\_b</code>");
+    }
 
     #[test]
     fn plain_text_is_escaped_only() {

@@ -169,6 +169,14 @@ pub fn build_router(
         )
         .route("/api/v1/agent-chats/{id}", get(agent_chats::get))
         .route("/api/v1/agent-chats/{id}/stop", post(agent_chats::stop))
+        .route(
+            "/api/v1/agent-chats/{id}/continue",
+            post(agent_chats::continue_chat),
+        )
+        .route(
+            "/api/v1/agent-chats/{id}/messages",
+            post(agent_chats::post_message),
+        )
         // Agents
         .route("/api/v1/agents", get(agents::list).post(agents::connect))
         .route(

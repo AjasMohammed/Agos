@@ -28,15 +28,6 @@ fn agent_color(agent_name: &str, participants: &[String]) -> &'static str {
     AGENT_COLORS[idx % AGENT_COLORS.len()]
 }
 
-/// Validate an agent name: alphanumeric, hyphen, underscore, dot; 1–64 chars.
-/// Rejects anything that could distort prompt framing (newlines, angle brackets, colon).
-fn valid_agent_name(n: &str) -> bool {
-    !n.is_empty()
-        && n.len() <= 64
-        && n.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-}
-
 #[derive(Deserialize)]
 pub struct NewConvoForm {
     pub topic: String,
@@ -108,103 +99,37 @@ pub async fn list(State(state): State<AppState>, jar: CookieJar) -> Response {
 
 /// POST /agent-chat/new — create and start a conversation.
 pub async fn new_convo(State(state): State<AppState>, Form(form): Form<NewConvoForm>) -> Response {
-    let topic = form.topic.trim().to_string();
-    if topic.is_empty() || topic.len() > 1000 {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Topic is required (max 1000 chars)",
-        )
-            .into_response();
-    }
-
     let participants: Vec<String> = form
         .participants
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    let max_turns = form.max_turns.unwrap_or(8).clamp(2, 50);
 
-    if participants.len() < 2 {
-        return (
-            StatusCode::BAD_REQUEST,
-            "At least 2 participants are required",
-        )
-            .into_response();
-    }
-    if participants.len() > 8 {
-        return (StatusCode::BAD_REQUEST, "Maximum 8 participants").into_response();
-    }
-
-    // Validate names are safe (no prompt-injection chars, no duplicates).
-    for name in &participants {
-        if !valid_agent_name(name) {
+    // Topic, name, duplicate and online checks live in the service so the REST
+    // and web paths cannot drift apart.
+    let summary = match state
+        .service
+        .create_agent_chat(form.topic, participants, max_turns)
+        .await
+    {
+        Ok(s) => s,
+        Err(agentos_api::ApiError::BadRequest(msg)) => {
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to create convo: {e}");
             return (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid agent name: '{name}'"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create conversation",
             )
                 .into_response();
         }
-    }
-    let mut sorted = participants.clone();
-    sorted.sort();
-    sorted.dedup();
-    if sorted.len() != participants.len() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Duplicate participants are not allowed",
-        )
-            .into_response();
-    }
-
-    let max_turns = form.max_turns.unwrap_or(8).clamp(2, 50);
-
-    // Validate all agents exist and are online.
-    {
-        let agents = match state.service.list_agents().await {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Failed to list agents: {e}");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
-            }
-        };
-        for name in &participants {
-            match agents.iter().find(|a| &a.name == name) {
-                Some(a) if a.status != "offline" => {}
-                Some(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        format!("Agent '{name}' is offline"),
-                    )
-                        .into_response();
-                }
-                None => {
-                    return (StatusCode::BAD_REQUEST, format!("Agent '{name}' not found"))
-                        .into_response();
-                }
-            }
-        }
-    }
-
-    let convo_id = {
-        let store = Arc::clone(&state.convo_store);
-        let t = topic.clone();
-        let p = participants.clone();
-        match tokio::task::spawn_blocking(move || store.create_convo(&t, &p, max_turns)).await {
-            Ok(Ok(id)) => id,
-            Ok(Err(e)) => {
-                tracing::error!("Failed to create convo: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to create conversation",
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("spawn_blocking panicked: {e}");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
-            }
-        }
     };
+    let convo_id = summary.id;
+    let topic = summary.topic;
+    let participants = summary.participants;
 
     let inflight = match state.inflight_convos.try_start(&convo_id) {
         Some(h) => h,
@@ -291,8 +216,13 @@ pub async fn detail(
         .iter()
         .map(|t| {
             let color = agent_color(&t.agent_name, &convo.participants);
-            let initial = t
-                .agent_name
+            // Operator rows posted through the REST API / panel.
+            let agent_name = if t.agent_name == agentos_kernel::convo_store::USER_SPEAKER {
+                "You"
+            } else {
+                t.agent_name.as_str()
+            };
+            let initial = agent_name
                 .chars()
                 .next()
                 .unwrap_or('?')
@@ -300,7 +230,7 @@ pub async fn detail(
                 .to_string();
             context! {
                 turn_number => t.turn_number,
-                agent_name => t.agent_name.clone(),
+                agent_name,
                 content => t.content.clone(),
                 tool_call_count => t.tool_call_count,
                 color,

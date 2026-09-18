@@ -113,6 +113,17 @@ impl WebcamDriver {
         Ok(path.to_path_buf())
     }
 
+    /// Where generated frame names go: the tool wrapper stamps the agent's
+    /// own `captures/` dir under `__output_dir`; `/tmp` only when the driver
+    /// is driven without the wrapper (tests).
+    fn output_dir(params: &Value) -> PathBuf {
+        params
+            .get("__output_dir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn parse_output_path(&self, params: &Value) -> Result<Option<PathBuf>, AgentOSError> {
         let Some(raw) = params.get("output_path").and_then(Value::as_str) else {
             return Ok(None);
@@ -326,6 +337,7 @@ impl WebcamDriver {
         height: u32,
         buffers: u32,
         output_path_override: Option<PathBuf>,
+        output_dir: PathBuf,
     ) -> Result<Value, AgentOSError> {
         let dev = Device::with_path(&device_path).map_err(|error| {
             AgentOSError::HalError(format!(
@@ -359,7 +371,7 @@ impl WebcamDriver {
 
         let output_path = output_path_override.unwrap_or_else(|| {
             let ext = Self::frame_extension(&format_tag);
-            std::env::temp_dir().join(format!("agentos-webcam-{}.{}", Uuid::new_v4(), ext))
+            output_dir.join(format!("agentos-webcam-{}.{}", Uuid::new_v4(), ext))
         });
 
         let byte_count = buf.len();
@@ -387,12 +399,20 @@ impl WebcamDriver {
     async fn capture_frame(&self, params: &Value) -> Result<Value, AgentOSError> {
         let device_path = self.parse_device_path(params)?;
         let output_path = self.parse_output_path(params)?;
+        let output_dir = Self::output_dir(params);
         let (width, height) = self.parse_width_height(params)?;
         let buffers = self.parse_buffers(params)?;
         self.ensure_capture_consent(params, &device_path)?;
 
         tokio::task::spawn_blocking(move || {
-            Self::capture_once_blocking(device_path, width, height, buffers, output_path)
+            Self::capture_once_blocking(
+                device_path,
+                width,
+                height,
+                buffers,
+                output_path,
+                output_dir,
+            )
         })
         .await
         .map_err(|error| AgentOSError::HalError(format!("webcam capture task panicked: {error}")))?
@@ -405,6 +425,7 @@ impl WebcamDriver {
         buffers: u32,
         count: u64,
         interval: Duration,
+        output_dir: PathBuf,
     ) -> Result<(Vec<Value>, String), AgentOSError> {
         let dev = Device::with_path(&device_path).map_err(|error| {
             AgentOSError::HalError(format!(
@@ -440,8 +461,7 @@ impl WebcamDriver {
             }
 
             let ext = Self::frame_extension(&format_tag);
-            let output_path =
-                std::env::temp_dir().join(format!("agentos-webcam-{}.{}", Uuid::new_v4(), ext));
+            let output_path = output_dir.join(format!("agentos-webcam-{}.{}", Uuid::new_v4(), ext));
 
             let byte_count = buf.len();
             std::fs::write(&output_path, buf).map_err(|error| {
@@ -474,11 +494,20 @@ impl WebcamDriver {
         let (width, height) = self.parse_width_height(params)?;
         let buffers = self.parse_buffers(params)?;
         let (count, interval_ms) = self.parse_burst_params(params)?;
+        let output_dir = Self::output_dir(params);
         self.ensure_capture_consent(params, &device_path)?;
 
         let interval = Duration::from_millis(interval_ms);
         let (frames, device_display) = tokio::task::spawn_blocking(move || {
-            Self::capture_burst_blocking(device_path, width, height, buffers, count, interval)
+            Self::capture_burst_blocking(
+                device_path,
+                width,
+                height,
+                buffers,
+                count,
+                interval,
+                output_dir,
+            )
         })
         .await
         .map_err(|error| {

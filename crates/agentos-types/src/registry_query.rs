@@ -255,6 +255,12 @@ pub struct CapabilityDispatchRequest {
     pub data_dir: std::path::PathBuf,
     pub permissions: crate::capability::PermissionSet,
     pub workspace_paths: Vec<std::path::PathBuf>,
+    /// The agent's home (`data_dir/agents/<name>/`): writable inside
+    /// sandboxed build/process commands.
+    pub agent_home: std::path::PathBuf,
+    /// Workspace grants with `--mode rwx`: the only user folders sandboxed
+    /// build/process commands may write or run in.
+    pub workspace_paths_executable: Vec<std::path::PathBuf>,
 }
 
 #[async_trait::async_trait]

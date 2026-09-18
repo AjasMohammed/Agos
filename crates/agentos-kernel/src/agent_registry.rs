@@ -280,6 +280,7 @@ impl AgentRegistry {
         default_thinking_level: Option<ThinkingLevel>,
         system_prompt: Option<Option<String>>,
         working_set_size: Option<Option<usize>>,
+        avatar: Option<Option<String>>,
     ) -> Result<AgentID, String> {
         let id = *self
             .name_index
@@ -297,6 +298,9 @@ impl AgentRegistry {
             }
             if let Some(w) = working_set_size {
                 agent.working_set_size = w;
+            }
+            if let Some(a) = avatar {
+                agent.avatar = a;
             }
             self.save_to_disk();
             Ok(id)
@@ -740,6 +744,7 @@ mod tests {
             system_prompt: None,
             manually_offline: false,
             working_set_size: None,
+            avatar: None,
         }
     }
 
@@ -935,19 +940,27 @@ mod tests {
         // All-None = touch nothing. This is the case that used to erase a system
         // prompt when an operator edited only the description.
         registry
-            .update_profile_settings("alice", None, None, None, None)
+            .update_profile_settings("alice", None, None, None, None, None)
             .expect("partial update");
         let a = registry.get_by_name("alice").unwrap();
         assert_eq!(a.description, "original");
         assert_eq!(a.default_thinking_level, ThinkingLevel::Max);
         assert_eq!(a.system_prompt.as_deref(), Some("you are careful"));
 
-        // Description only: the other two survive.
+        // Description (and avatar): the other fields survive.
         registry
-            .update_profile_settings("alice", Some("edited".to_string()), None, None, None)
+            .update_profile_settings(
+                "alice",
+                Some("edited".to_string()),
+                None,
+                None,
+                None,
+                Some(Some("data:image/png;base64,AA==".to_string())),
+            )
             .expect("description-only update");
         let a = registry.get_by_name("alice").unwrap();
         assert_eq!(a.description, "edited");
+        assert_eq!(a.avatar.as_deref(), Some("data:image/png;base64,AA=="));
         assert_eq!(a.default_thinking_level, ThinkingLevel::Max);
         assert_eq!(a.system_prompt.as_deref(), Some("you are careful"));
 
@@ -959,8 +972,14 @@ mod tests {
                 None,
                 Some(Some("new prompt".to_string())),
                 None,
+                None,
             )
             .expect("set prompt");
+        // Absent avatar = unchanged.
+        assert_eq!(
+            registry.get_by_name("alice").unwrap().avatar.as_deref(),
+            Some("data:image/png;base64,AA==")
+        );
         assert_eq!(
             registry
                 .get_by_name("alice")
@@ -976,9 +995,11 @@ mod tests {
                 Some(ThinkingLevel::Low),
                 Some(None),
                 Some(Some(0)),
+                Some(None),
             )
             .expect("clear prompt");
         let a = registry.get_by_name("alice").unwrap();
+        assert_eq!(a.avatar, None);
         assert_eq!(a.working_set_size, Some(0));
         assert_eq!(a.system_prompt, None);
         assert_eq!(a.default_thinking_level, ThinkingLevel::Low);

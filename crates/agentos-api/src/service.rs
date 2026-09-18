@@ -753,6 +753,24 @@ pub trait KernelService: Send + Sync {
     /// Request a running conversation to stop after its current turn.
     async fn stop_agent_chat(&self, id: &str) -> Result<(), ApiError>;
 
+    /// Reopen a finished conversation for `turns` more agent turns. Returns its
+    /// summary and the new turn ceiling to pass to [`Self::run_agent_chat`].
+    /// `Conflict` while it is still running (or finishing a stopped turn).
+    async fn continue_agent_chat(
+        &self,
+        id: &str,
+        turns: u32,
+    ) -> Result<(ApiConvoSummary, u32), ApiError>;
+
+    /// Post an operator message into a conversation. A running conversation
+    /// answers it on its next turn (returns `None`); a finished one is reopened
+    /// for one round and the new ceiling is returned for the caller to run.
+    async fn post_agent_chat_message(
+        &self,
+        id: &str,
+        content: String,
+    ) -> Result<(ApiConvoSummary, Option<u32>), ApiError>;
+
     // ── Realtime (Phase 08) ───────────────────────────────────────────────────
 
     /// Subscribe to the kernel's coarse realtime event broadcast (for SSE fan-out).

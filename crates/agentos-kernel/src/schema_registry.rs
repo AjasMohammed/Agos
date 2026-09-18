@@ -16,7 +16,6 @@ pub struct SchemaRegistry {
 }
 
 struct SchemaEntry {
-    #[allow(dead_code)]
     raw: Value,
     compiled: jsonschema::Validator,
     trust_tier: TrustTier,
@@ -156,6 +155,50 @@ impl SchemaRegistry {
         }
     }
 
+    /// Remove top-level `null` values the schema rejects on optional properties.
+    ///
+    /// gpt-oss sends `"key": null` for fields it means to omit; strict validation
+    /// then refuses the whole call. Nulls the schema accepts, and nulls on
+    /// `required` properties, are left for validation to judge.
+    ///
+    /// ponytail: top level only, unescaped keys — nested optional nulls still
+    /// fail validation; recurse if a model starts doing that.
+    pub fn drop_rejected_nulls(&self, tool_name: &str, mut payload: Value) -> Value {
+        // Community schemas may not match the tool (see `validate_for_dispatch`),
+        // where null can mean "clear this field"; only trust audited schemas.
+        let Some(entry) = self
+            .schemas
+            .get(tool_name)
+            .filter(|e| matches!(e.trust_tier, TrustTier::Core | TrustTier::Verified))
+        else {
+            return payload;
+        };
+        let required: Vec<&str> = entry
+            .raw
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let doomed: Vec<String> = entry
+            .compiled
+            .iter_errors(&payload)
+            .filter_map(|e| {
+                let path = e.instance_path.to_string();
+                let key = path.strip_prefix('/')?;
+                (!key.contains('/')
+                    && payload.get(key) == Some(&Value::Null)
+                    && !required.contains(&key))
+                .then(|| key.to_string())
+            })
+            .collect();
+        if let Some(obj) = payload.as_object_mut() {
+            for key in doomed {
+                obj.remove(&key);
+            }
+        }
+        payload
+    }
+
     /// Check if a schema is registered for the given name.
     pub fn has_schema(&self, name: &str) -> bool {
         self.schemas.contains_key(name)
@@ -239,6 +282,46 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejected_optional_nulls_are_dropped() {
+        let mut registry = SchemaRegistry::new();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string" },
+                "key": { "type": "string" },
+                "note": { "type": ["string", "null"] }
+            },
+            "required": ["content"]
+        });
+        registry
+            .register_with_tier("memory-write", schema, TrustTier::Core, &[])
+            .unwrap();
+
+        let fixed = registry.drop_rejected_nulls(
+            "memory-write",
+            json!({"content": "x", "key": null, "note": null}),
+        );
+        assert_eq!(fixed, json!({"content": "x", "note": null}));
+        assert!(registry.validate("memory-write", &fixed).is_ok());
+
+        // A required null stays, so validation still names it.
+        let kept = registry.drop_rejected_nulls("memory-write", json!({"content": null}));
+        assert_eq!(kept, json!({"content": null}));
+
+        // Community schemas are not trusted to decide what null means.
+        registry
+            .register_with_tier(
+                "rando-tool",
+                json!({"type": "object", "properties": {"key": {"type": "string"}}}),
+                TrustTier::Community,
+                &[],
+            )
+            .unwrap();
+        let untouched = registry.drop_rejected_nulls("rando-tool", json!({"key": null}));
+        assert_eq!(untouched, json!({"key": null}));
     }
 
     #[test]

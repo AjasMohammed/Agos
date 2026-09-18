@@ -132,12 +132,13 @@ impl ToolRunner {
                     cache_dir = %model_cache_dir.display(),
                     "Failed to initialize embedder with configured cache dir; falling back to default cache"
                 );
-                Embedder::new().map_err(|e| {
-                    AgentOSError::StorageError(format!(
-                        "Failed to initialize embedding model: {}",
-                        e
-                    ))
-                })?
+                // Never fail tool-runner construction on the embedder; degrade
+                // to FTS5 lexical search like the kernel boot path and like a
+                // build without the `embeddings` feature.
+                Embedder::new().unwrap_or_else(|e| {
+                    warn!(error = %e, "Embedding model unavailable; using zero-vector embedder");
+                    Embedder::noop()
+                })
             }
         });
         let semantic = Arc::new(SemanticStore::open_with_embedder(

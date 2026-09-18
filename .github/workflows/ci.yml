@@ -36,6 +36,9 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
+      - name: ToolPre hook guard on every tool execution path
+        run: bash scripts/check-toolpre-guard.sh
+
       - name: Run tests
         run: cargo test --workspace
 

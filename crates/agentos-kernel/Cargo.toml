@@ -67,6 +67,8 @@ tracing-opentelemetry = { version = "0.29", optional = true }
 
 [features]
 default = ["usb-storage", "printer"]
+# ONNX vector embeddings. Not in `default` here: agentos-cli owns the switch.
+embeddings = ["agentos-memory/embeddings", "agentos-tools/embeddings"]
 all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam", "wifi", "mqtt", "homeassistant"]
 audio = ["agentos-hal/audio"]
 usb-storage = ["agentos-hal/usb-storage"]

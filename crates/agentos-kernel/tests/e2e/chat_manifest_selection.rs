@@ -298,3 +298,96 @@ async fn convo_scope_withholds_out_of_band_tools() {
     kernel.shutdown();
     handle.await.unwrap();
 }
+
+/// Chat turns ship a working set, not the whole candidate set. "hey" in a fresh
+/// panel session cost 17.7k tokens on 2026-09-17 because all ~70 chat defaults
+/// went natively; the rest must sit in the pool, reachable via discovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_working_set_partitions_candidates() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+    let agent_id = common::register_mock_agent(&kernel, "selector-agent", vec![]).await;
+
+    let candidates = kernel
+        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .await;
+    let all = names(&candidates);
+    let (native, pool) = kernel
+        .chat_working_set(&agent_id, None, "hey", candidates)
+        .await;
+    let native_names = names(&native);
+    let pool_names: HashSet<String> = pool.keys().cloned().collect();
+
+    assert!(
+        native.len() <= 21,
+        "chat native array must be a working set, got {}",
+        native.len()
+    );
+    assert!(
+        !pool.is_empty(),
+        "the rest of the candidates must be deferred"
+    );
+    assert!(native_names.is_disjoint(&pool_names));
+    assert_eq!(
+        native_names
+            .union(&pool_names)
+            .cloned()
+            .collect::<HashSet<_>>(),
+        all,
+        "every candidate lands on exactly one side"
+    );
+    for n in ["search-tools", "describe-tool"] {
+        assert!(
+            native_names.contains(n),
+            "{n} must stay native for discovery"
+        );
+    }
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// A tool the model already ran this session is pinned native, so a follow-up
+/// ("do that again") doesn't need a search hop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_working_set_pins_session_recent_tools() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+    let agent_id = common::register_mock_agent(&kernel, "selector-agent", vec![]).await;
+
+    let session_id = "test-session-working-set".to_string();
+    {
+        let mut guard = kernel.chat_session_dedup.write().await;
+        let now = std::time::Instant::now();
+        let mut inner = std::collections::HashMap::new();
+        inner.insert(
+            ("file-diff".to_string(), "{}".to_string()),
+            (now, serde_json::json!({"ok": true})),
+        );
+        guard.insert(session_id.clone(), (now, inner));
+    }
+
+    let candidates = kernel
+        .build_chat_tool_manifests(&agent_id, Some(&session_id), ChatTurnScope::Full)
+        .await;
+    assert!(names(&candidates).contains("file-diff"));
+    let (native, pool) = kernel
+        .chat_working_set(&agent_id, Some(&session_id), "hey", candidates)
+        .await;
+    assert!(names(&native).contains("file-diff"));
+    assert!(!pool.contains_key("file-diff"));
+
+    // Contrast: without the session, "hey" does not retrieve file-diff — so the
+    // assertion above proves the pin, not a lucky T1 hit.
+    let candidates = kernel
+        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .await;
+    let (native, pool) = kernel
+        .chat_working_set(&agent_id, None, "hey", candidates)
+        .await;
+    assert!(!names(&native).contains("file-diff"));
+    assert!(pool.contains_key("file-diff"));
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}

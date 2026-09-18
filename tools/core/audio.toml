@@ -54,7 +54,7 @@ description = "Audio operation request"
 
 [payload_schema.properties.action]
 type = "string"
-enum = ["list", "capture", "playback", "playback_pause", "playback_resume", "playback_stop", "playback_status", "volume", "mute", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
+enum = ["list", "capture", "playback", "playback_pause", "playback_resume", "playback_stop", "playback_status", "volume", "mute", "list_capture_consents"]
 default = "list"
 description = "Audio action to execute."
 
@@ -68,7 +68,7 @@ description = "Playback sink id (optional for playback)."
 
 [payload_schema.properties.node_id]
 type = "string"
-description = "Alternative audio node id for volume or playback/capture targeting."
+description = "Audio node id for volume/mute (omit to target the default output) or playback/capture targeting."
 
 [payload_schema.properties.duration_seconds]
 type = "integer"
@@ -78,11 +78,11 @@ description = "Capture duration in seconds."
 
 [payload_schema.properties.output_path]
 type = "string"
-description = "Absolute output path for captured audio."
+description = "Where to save the recording. Relative paths land in your own files directory (e.g. captures/clip.wav); absolute paths must be inside a granted folder. Omit for an automatic name under captures/."
 
 [payload_schema.properties.audio_path]
 type = "string"
-description = "Absolute path to an audio file for playback. WAV/FLAC/OGG play directly; other containers (MP3, M4A, AAC) are transcoded via ffmpeg first, which must be installed."
+description = "Audio file to play — relative to your own files directory (e.g. inbox/<id>/song.mp3) or an absolute path inside a granted folder. WAV/FLAC/OGG play directly; other containers (MP3, M4A, AAC) are transcoded via ffmpeg first, which must be installed."
 
 [payload_schema.properties.max_seconds]
 type = "integer"
@@ -109,12 +109,6 @@ description = "Volume level between 0.0 and 1.0. Omit to read current level."
 type = "boolean"
 description = "Mute (true) or unmute (false) the node. Omit to read current mute state."
 
-[payload_schema.properties.ttl_seconds]
-type = "integer"
-minimum = 1
-maximum = 3600
-description = "Consent TTL in seconds for capture permission grants."
-
 [sandbox]
 network       = false
 fs_write      = false
@@ -129,11 +123,11 @@ payload = { action = "list" }
 
 [[examples]]
 description = "Capture 10 seconds from source audio:47"
-payload = { action = "capture", source = "<source device_id from action=list>", duration_seconds = 10, output_path = "/tmp/agentos-capture.wav" }
+payload = { action = "capture", source = "<source device_id from action=list>", duration_seconds = 10, output_path = "captures/clip.wav" }
 
 [[examples]]
 description = "Start playback; returns a playback_id immediately, the track keeps playing"
-payload = { action = "playback", audio_path = "/tmp/alert.wav", sink = "<sink device_id from action=list>" }
+payload = { action = "playback", audio_path = "inbox/<file id>/alert.wav", sink = "<sink device_id from action=list>" }
 
 [[examples]]
 description = "Pause, then resume, a running track"

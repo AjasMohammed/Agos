@@ -241,6 +241,30 @@ impl Kernel {
         }
     }
 
+    /// Pause a subscription and cancel the live tasks it already spawned.
+    ///
+    /// Flipping `enabled` alone only stops *new* tasks: on 2026-09-17 three
+    /// memory-pressure tasks kept re-prompting the operator for up to an hour
+    /// after the subscription was paused. Returns false when the id is unknown.
+    pub async fn disable_event_subscription(&self, id: &SubscriptionID) -> bool {
+        if !self.event_bus.disable_subscription(id).await {
+            return false;
+        }
+        for task_id in self.scheduler.non_terminal_task_ids().await {
+            let spawned_by_sub = self
+                .scheduler
+                .get_task(&task_id)
+                .await
+                .and_then(|t| t.trigger_source)
+                .is_some_and(|src| src.subscription_id == *id);
+            if spawned_by_sub {
+                tracing::info!(%task_id, subscription_id = %id, "cancelling task of paused subscription");
+                self.cmd_cancel_task(task_id).await;
+            }
+        }
+        true
+    }
+
     pub(crate) async fn cmd_event_disable_subscription(
         &self,
         subscription_id: String,
@@ -254,7 +278,7 @@ impl Kernel {
             }
         };
 
-        if self.event_bus.disable_subscription(&id).await {
+        if self.disable_event_subscription(&id).await {
             KernelResponse::Success { data: None }
         } else {
             KernelResponse::Error {

@@ -106,12 +106,6 @@ impl AgentTool for MemoryRead {
                     });
                 }
 
-                let key = payload.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AgentOSError::SchemaValidation(
-                        "memory-read requires 'key' field for semantic scope".into(),
-                    )
-                })?;
-
                 // Agent-scoped: a bare `get_by_key` is a global lookup, so any
                 // agent that guessed a key could read another agent's private
                 // fact (the episodic branch above already checks ownership).
@@ -119,14 +113,33 @@ impl AgentTool for MemoryRead {
                 // rows that carry no agent (still reachable via `memory-search`,
                 // whose predicate is `agent_id IS NULL OR agent_id = ?`); widen
                 // this lookup the same way if such shared rows ever matter.
-                let entry = self
-                    .semantic
-                    .get_by_key_scoped(key, Some(&context.agent_id))
-                    .await
-                    .map_err(|e| AgentOSError::ToolExecutionFailed {
-                        tool_name: "memory-read".into(),
-                        reason: format!("Read failed: {}", e),
-                    })?;
+                //
+                // `id` (the UUID `memory-write`/`memory-search` return) wins
+                // over `key`: the UUID is unique, a key is not.
+                let id = payload.get("id").and_then(|v| v.as_str());
+                let key = payload.get("key").and_then(|v| v.as_str());
+                let (entry, lookup) = match (id, key) {
+                    (Some(id), _) => (
+                        self.semantic
+                            .get_by_id_scoped(id, Some(&context.agent_id))
+                            .await,
+                        format!("id '{}'", id),
+                    ),
+                    (None, Some(key)) => (
+                        self.semantic
+                            .get_by_key_scoped(key, Some(&context.agent_id))
+                            .await,
+                        format!("key '{}'", key),
+                    ),
+                    (None, None) => return Err(AgentOSError::SchemaValidation(
+                        "memory-read with scope='semantic' requires 'id' (UUID string) or 'key'"
+                            .into(),
+                    )),
+                };
+                let entry = entry.map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "memory-read".into(),
+                    reason: format!("Read failed: {}", e),
+                })?;
 
                 match entry {
                     Some(e) => Ok(serde_json::json!({
@@ -142,8 +155,9 @@ impl AgentTool for MemoryRead {
                     None => Ok(serde_json::json!({
                         "found": false,
                         "scope": "semantic",
+                        "id": id,
                         "key": key,
-                        "message": format!("No semantic memory entry found for key '{}'", key),
+                        "message": format!("No semantic memory entry found for {}", lookup),
                     })),
                 }
             }
@@ -217,5 +231,40 @@ mod tests {
         // Another agent guessing the key gets nothing.
         let other = tool.execute(payload, ctx(dir.path(), bob)).await.unwrap();
         assert_eq!(other["found"], false);
+    }
+
+    #[tokio::test]
+    async fn semantic_read_by_uuid_id() {
+        let dir = TempDir::new().unwrap();
+        let semantic = Arc::new(
+            SemanticStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap(),
+        );
+        let episodic = Arc::new(EpisodicStore::open(dir.path()).unwrap());
+        let (alice, bob) = (AgentID::new(), AgentID::new());
+        let id = semantic
+            .write("seed", "alice fact", Some(&alice), &["bridge"])
+            .await
+            .unwrap();
+
+        let tool = MemoryRead::new(semantic, episodic);
+        let payload = serde_json::json!({"scope": "semantic", "id": id});
+
+        let own = tool
+            .execute(payload.clone(), ctx(dir.path(), alice))
+            .await
+            .unwrap();
+        assert_eq!(own["found"], true);
+        assert_eq!(own["key"], "seed");
+
+        let other = tool.execute(payload, ctx(dir.path(), bob)).await.unwrap();
+        assert_eq!(other["found"], false);
+
+        let neither = tool
+            .execute(
+                serde_json::json!({"scope": "semantic"}),
+                ctx(dir.path(), alice),
+            )
+            .await;
+        assert!(matches!(neither, Err(AgentOSError::SchemaValidation(_))));
     }
 }

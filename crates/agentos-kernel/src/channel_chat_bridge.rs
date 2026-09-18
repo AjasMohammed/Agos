@@ -149,10 +149,14 @@ impl KernelChatBridge {
             .map_err(|e| e.to_string())?;
 
         // Tool rows are machine payloads and blank turns are rejected by several
-        // providers, so neither is replayed.
+        // providers, so neither is replayed; nor are stored non-answers.
         let mut history: Vec<(String, String)> = prior
             .into_iter()
-            .filter(|m| (m.role == "user" || m.role == "assistant") && !m.content.trim().is_empty())
+            .filter(|m| match m.role.as_str() {
+                "user" => !m.content.trim().is_empty(),
+                "assistant" => !crate::kernel::is_unreplayable_assistant_turn(&m.content),
+                _ => false,
+            })
             .map(|m| (m.role, m.content))
             .collect();
         let cap = MAX_HISTORY_ROUNDS * 2;
@@ -207,9 +211,12 @@ impl KernelChatBridge {
             return;
         };
         let store = Arc::clone(&k.chat_store);
-        let (sid, text) = (sid.to_string(), format!("(turn failed: {error})"));
+        let (sid_owned, text) = (
+            sid.to_string(),
+            format!("{} {error})", crate::kernel::FAILED_TURN_PREFIX),
+        );
         match tokio::task::spawn_blocking(move || {
-            store.add_assistant_message(&sid, &text, None, None)
+            store.add_assistant_message(&sid_owned, &text, None, None)
         })
         .await
         {
@@ -217,6 +224,24 @@ impl KernelChatBridge {
             Ok(Err(e)) => tracing::warn!(error = %e, "Failed to persist channel turn failure"),
             Err(e) => tracing::warn!(error = %e, "spawn_blocking panicked persisting turn failure"),
         }
+        Self::notify_panel(k, Some(sid), "assistant").await;
+    }
+
+    /// Wake open panel tabs on the `chat` realtime channel. The panel refetches
+    /// the transcript on this event; the API path already emits it, and without
+    /// the same call here a channel turn only showed up after a reload.
+    async fn notify_panel(k: &Arc<Kernel>, session_id: Option<&str>, role: &str) {
+        let Some(session_id) = session_id else {
+            return;
+        };
+        k.emit_event(
+            agentos_types::EventType::ChatMessageAdded,
+            agentos_types::EventSource::AgentMessageBus,
+            agentos_types::EventSeverity::Info,
+            serde_json::json!({ "session_id": session_id, "role": role }),
+            0,
+        )
+        .await;
     }
 
     /// Run chat inference for a channel message, persisting the turn.
@@ -275,6 +300,7 @@ impl KernelChatBridge {
                     tracing::error!(error = %e, "spawn_blocking panicked persisting user turn")
                 }
             }
+            Self::notify_panel(&k, session_id.as_deref(), "user").await;
         }
 
         let result = match tokio::time::timeout(
@@ -351,6 +377,7 @@ impl KernelChatBridge {
                     tracing::error!(error = %e, "spawn_blocking panicked persisting assistant turn")
                 }
             }
+            Self::notify_panel(&k, session_id.as_deref(), "assistant").await;
         }
 
         Ok(result.answer)
@@ -423,6 +450,23 @@ mod tests {
         assert_ne!(sid2, sid);
         assert_eq!(store.get_messages(&sid).unwrap().len(), 2);
         assert!(store.get_messages(&sid2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stored_non_answers_are_not_replayable() {
+        use crate::kernel::{is_unreplayable_assistant_turn as bad, EMPTY_LLM_ANSWER_PLACEHOLDER};
+        assert!(bad("   "));
+        assert!(bad(EMPTY_LLM_ANSWER_PLACEHOLDER));
+        assert!(bad(&format!(
+            "{EMPTY_LLM_ANSWER_PLACEHOLDER}\n\n[Note: limit]"
+        )));
+        assert!(bad("(turn failed: provider timeout)"));
+        assert!(bad(
+            "analysisUser wants audio.assistantcommentary to=functions.audio json{\"action\":\"list\"}"
+        ));
+        assert!(bad("We need to check.assistantfinalDone!"));
+        assert!(!bad("Hey! What would you like to do next?"));
+        assert!(!bad("The audio file has been played. Enjoy!"));
     }
 
     /// The whole point of the guard: a dropped `JoinHandle` detaches its task,

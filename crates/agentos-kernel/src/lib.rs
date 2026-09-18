@@ -33,6 +33,7 @@ pub mod core_manifests;
 pub mod cost_tracker;
 pub mod delivery_router;
 pub mod escalation;
+pub mod escalation_card;
 pub mod escalation_channel_sink;
 pub mod escalation_prompt;
 pub mod event_bus;
@@ -129,7 +130,9 @@ pub use capability_registry::CapabilityRegistry;
 pub use config::{load_config, KernelConfig};
 pub use context::ContextManager;
 pub use context_compiler::ContextCompiler;
-pub use kernel::{resolve_boot_vault_passphrase, ChatStreamEvent, Kernel};
+pub use kernel::{
+    is_unreplayable_assistant_turn, resolve_boot_vault_passphrase, ChatStreamEvent, Kernel,
+};
 pub use otel_exporter::OtelExporter;
 pub use retrieval_gate::{
     IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,

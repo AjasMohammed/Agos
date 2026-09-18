@@ -1213,6 +1213,20 @@ impl Kernel {
                 return;
             }
         };
+        // Paused or removed while the batch waited: pausing must stop what is
+        // queued behind the in-flight task too, not only future events.
+        let mut live = Vec::with_capacity(items.len());
+        for item in items {
+            if self
+                .event_bus
+                .get_subscription(&item.0.id)
+                .await
+                .is_some_and(|sub| sub.enabled)
+            {
+                live.push(item);
+            }
+        }
+        let items = live;
         let Some((_, first_event)) = items.first() else {
             self.reaction_batcher
                 .in_flight

@@ -47,6 +47,10 @@ pub struct AgentProfile {
     /// `None` = kernel default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_set_size: Option<usize>,
+    /// Profile picture as a small `data:image/...;base64,` URL (validated and
+    /// size-capped at the API). `None` = no picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

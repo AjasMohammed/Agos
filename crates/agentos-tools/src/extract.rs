@@ -13,6 +13,7 @@
 //! binary is never an error — extraction just declines and the caller keeps
 //! its existing binary handling.
 
+use crate::sandbox_fs;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -699,48 +700,6 @@ struct Sandbox<'a> {
     work: Option<&'a Path>,
 }
 
-/// Whether `bwrap` can actually sandbox on this host. Probed once.
-///
-/// The probe creates a namespace rather than asking for `--version`, because
-/// the two answers differ where it matters: Docker's default seccomp profile
-/// and distros with unprivileged user namespaces disabled both ship a working
-/// `bwrap --version` and then fail every real invocation. Believing `--version`
-/// there turns every PDF and office document into "unconvertible" while the
-/// operator-facing warning never fires, since bubblewrap *is* installed.
-async fn have_bwrap() -> bool {
-    static AVAILABLE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    *AVAILABLE
-        .get_or_init(|| async {
-            let ok = tokio::process::Command::new("bwrap")
-                .args([
-                    "--ro-bind",
-                    "/usr",
-                    "/usr",
-                    "--unshare-all",
-                    "--",
-                    "/bin/true",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                tracing::warn!(
-                    "extract: bwrap cannot create a namespace here — document converters will run \
-                     unsandboxed. LibreOffice's own remote fetching is still disabled via its \
-                     profile, but the import filters keep the kernel's network and filesystem \
-                     view. Install bubblewrap, and on a container host allow unprivileged user \
-                     namespaces."
-                );
-            }
-            ok
-        })
-        .await
-}
-
 /// Wrap a converter invocation in `bwrap`, or return it unchanged when bwrap is
 /// not installed.
 ///
@@ -754,24 +713,22 @@ async fn sandbox_command(
     args: &[OsString],
     sb: &Sandbox<'_>,
 ) -> (String, Vec<OsString>) {
-    if !have_bwrap().await {
+    if !sandbox_fs::bwrap_usable().await {
         return (program.to_string(), args.to_vec());
     }
 
     let mut a: Vec<OsString> = Vec::with_capacity(args.len() + 48);
-    let mut flags = |xs: &[&str]| a.extend(xs.iter().map(OsString::from));
-
     // Read-only system. Only what exists: bwrap fails the whole call on a
     // missing bind source, and `/lib64` is absent on some hosts.
     // `/opt` and `/snap`: the upstream LibreOffice .deb/.rpm installs to
     // `/opt/libreofficeX.Y` and only symlinks into `/usr/local/bin`, so without
     // these the symlink resolves to nothing inside the sandbox and office
     // conversion dies on exactly the hosts that installed it from libreoffice.org.
-    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/opt", "/snap"] {
-        if std::path::Path::new(dir).exists() {
-            flags(&["--ro-bind", dir, dir]);
-        }
-    }
+    a.extend(sandbox_fs::ro_bind_existing(sandbox_fs::SYSTEM_RO_DIRS));
+    a.extend(sandbox_fs::ro_bind_existing(&["/opt", "/snap"]));
+
+    let sized_tmp = sandbox_fs::bwrap_supports_tmpfs_size().await;
+    let mut flags = |xs: &[&str]| a.extend(xs.iter().map(OsString::from));
 
     // Blank out everything a converter has no business reading, then bind back
     // only what it needs. Order matters — bwrap applies arguments in sequence,
@@ -783,7 +740,16 @@ async fn sandbox_command(
     // and converters spool there: a 60 MiB spreadsheet whose ZIP members expand
     // a thousandfold would write that expansion into memory, which the input cap
     // and the timeout do not bound.
-    flags(&["--size", TMPFS_BYTES, "--tmpfs", "/tmp"]);
+    //
+    // `--size` needs bubblewrap >= 0.9 (Ubuntu 22.04 ships 0.6.1, which rejects
+    // the whole invocation). Without it `/tmp` is unsized; the spooling
+    // converters are still steered to disk because `TMPDIR` below points at the
+    // work dir, and the stdout-only ones do not spool.
+    if sized_tmp {
+        flags(&["--size", TMPFS_BYTES, "--tmpfs", "/tmp"]);
+    } else {
+        flags(&["--tmpfs", "/tmp"]);
+    }
     // Fontconfig's system cache, masked by the `/var` tmpfs above. Without it
     // every single invocation rescans every font on the host — seconds of CPU
     // per document, and enough on a font-heavy machine to push LibreOffice's
@@ -795,23 +761,14 @@ async fn sandbox_command(
             "/var/cache/fontconfig",
         ]);
     }
-    // The minimum `/etc` LibreOffice needs. An empty `/etc` is not survivable:
-    // it aborts during `SvtSysLocaleOptions` construction with an uncaught
-    // `RuntimeException` (verified — `Fatal exception: Signal 6`). Binding all
-    // of `/etc` read-only also works; this set was narrowed down from it, and
-    // any addition here should be re-verified the same way.
-    for p in [
-        "/etc/fonts",       // fontconfig — poppler and LibreOffice both need it
-        "/etc/passwd",      // getpwuid() during startup
-        "/etc/group",       //
-        "/etc/localtime",   // document timestamps
-        "/etc/ld.so.cache", // dynamic loader
-        "/etc/libreoffice", // distro registry overlays, absent on some hosts
-    ] {
-        if std::path::Path::new(p).exists() {
-            flags(&["--ro-bind", p, p]);
-        }
-    }
+    // `/etc` back. An empty `/etc` is not survivable for LibreOffice: it aborts
+    // during `SvtSysLocaleOptions` construction with an uncaught
+    // `RuntimeException` (verified — `Fatal exception: Signal 6`) without
+    // `passwd`/`fonts`/`localtime`. The shared runtime set covers those plus
+    // the loader cache and alternatives symlinks every sandbox needs; the
+    // distro registry overlay is LibreOffice's own and absent on some hosts.
+    a.extend(sandbox_fs::ro_bind_existing(sandbox_fs::ETC_RUNTIME));
+    a.extend(sandbox_fs::ro_bind_existing(&["/etc/libreoffice"]));
 
     let home = sb.work.unwrap_or(std::path::Path::new("/tmp"));
     let mut binds: Vec<OsString> = Vec::new();

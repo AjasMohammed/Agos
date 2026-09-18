@@ -1,3 +1,5 @@
+//! **Experimental.** Agent scratchpad store. Schema and API may change before v2; not covered by the v1 stability promise.
+
 pub mod error;
 pub mod graph;
 pub mod links;

@@ -37,6 +37,7 @@ async fn register_vision_mock_agent(
         system_prompt: None,
         manually_offline: false,
         working_set_size: None,
+        avatar: None,
     };
     let mock = Arc::new(MockLLMCore::with_responses(responses).enable_vision());
     kernel.agent_registry.write().await.register(profile);

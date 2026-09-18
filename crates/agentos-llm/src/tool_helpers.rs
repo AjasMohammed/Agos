@@ -70,6 +70,65 @@ fn type_richness_rank(t: &str) -> u8 {
 /// dropped to prevent oversized requests from consuming kernel resources.
 pub const MAX_TOOL_PAYLOAD_BYTES: usize = 64 * 1024;
 
+/// Recover gpt-oss "harmony" output that leaked into plain text because the
+/// serving side's harmony parser missed a turn (Ollama cloud,
+/// `gpt-oss:120b-cloud`, 2026-09-11). Two shapes arrive:
+///
+/// - raw tokens: `<|channel|>commentary to=functions.audio <|constrain|>json<|message|>{..}<|call|>`
+/// - tokens dropped: `analysis…assistantcommentary to=functions.audio json{..}`
+///
+/// Returns `None` when `text` has no harmony markers. Otherwise returns the
+/// first `(tool_name, arguments)` call, if any, and the final-channel text
+/// (empty when there is none — everything else is chain-of-thought). Only the
+/// first call: harmony emits one call per message, and anything after it in a
+/// leaked blob was written without seeing its result (the observed second
+/// call was `"audio_path": "<placeholder>"`) — so a recovered call also drops
+/// the final text, which would be a pre-written "done" for a tool not yet run.
+/// Only harmony filler (`json`, `<|constrain|>`, `<|message|>`) may sit
+/// between the name and its `{`, so one call's name never borrows another's
+/// arguments. `split("<|")` truncates final text that itself contains `<|` —
+/// accepted, rare.
+pub fn recover_harmony_leak(text: &str) -> Option<(Option<(String, Value)>, String)> {
+    const MARKERS: [&str; 4] = [
+        "to=functions.",
+        "<|channel|>",
+        "assistantcommentary",
+        "assistantfinal",
+    ];
+    if !MARKERS.iter().any(|m| text.contains(m)) {
+        return None;
+    }
+    let call = text.find("to=functions.").and_then(|at| {
+        let rest = &text[at + "to=functions.".len()..];
+        let name_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(rest.len());
+        let name = &rest[..name_len];
+        let after = &rest[name_len..];
+        let brace = after.find('{')?;
+        let gap = after[..brace]
+            .replace("<|constrain|>", "")
+            .replace("<|message|>", "");
+        if !matches!(gap.trim(), "" | "json") {
+            return None;
+        }
+        let args = serde_json::Deserializer::from_str(&after[brace..])
+            .into_iter::<Value>()
+            .next()?
+            .ok()?;
+        (!name.is_empty() && args.is_object()).then(|| (name.to_string(), args))
+    });
+    if call.is_some() {
+        return Some((call, String::new()));
+    }
+    let final_text = ["<|channel|>final<|message|>", "assistantfinal"]
+        .iter()
+        .find_map(|m| text.rfind(m).map(|at| &text[at + m.len()..]))
+        .unwrap_or("");
+    let final_text = final_text.split("<|").next().unwrap_or("").trim();
+    Some((None, final_text.to_string()))
+}
+
 /// Infer an intent type string from a permission set.
 ///
 /// Scans `ops` suffixes (after the `:`) for `x` (execute), `w` (write),

@@ -1229,8 +1229,11 @@ const CHAT_MAX_TOOL_ITERATIONS_FALLBACK: u32 = 25;
 /// lookup (memory, search, a file read) before speaking; it has no business
 /// grinding. On 2026-09-09 a convo turn ran 20 iterations and raised 12 approval
 /// escalations without producing one word, because the general chat cap (25)
-/// applied to it. See [[Convo Turn Contract Plan]].
-pub const CONVO_TURN_MAX_TOOL_ITERATIONS: u32 = 4;
+/// applied to it. See [[Convo Turn Contract Plan]]. Raised 4 → 8 on 2026-09-17:
+/// four left gpt-oss one real call after tool discovery, so agents asked to
+/// act never did. The last iteration is nudged to speak, so this is 7 tool
+/// rounds plus a reply.
+pub const CONVO_TURN_MAX_TOOL_ITERATIONS: u32 = 8;
 
 /// Tools a conversation turn may not call.
 ///
@@ -1387,10 +1390,34 @@ fn chat_intent_flag(t: IntentType) -> IntentTypeFlag {
 pub const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
     "_(no response from model — the provider returned an empty answer; please retry)_";
 
+/// Prefix of the assistant row `channel_chat_bridge` stores for a failed turn.
+pub const FAILED_TURN_PREFIX: &str = "(turn failed:";
+
+/// Whether a stored assistant row is a non-answer that must not be replayed
+/// into LLM history: blank, the empty-answer placeholder, a failed-turn record,
+/// or leaked gpt-oss harmony markup. Replayed, these teach the model to repeat
+/// them — session `95494f3b` (2026-09-15) returned reasoning-only turns 3/3 with
+/// its history and answered normally without it.
+///
+/// ponytail: marker-based; bare chain-of-thought or raw tool-args JSON saved as
+/// an answer still replays — catch those at persist time if they recur.
+pub fn is_unreplayable_assistant_turn(content: &str) -> bool {
+    let t = content.trim();
+    t.is_empty()
+        || t.starts_with(EMPTY_LLM_ANSWER_PLACEHOLDER)
+        || t.starts_with(FAILED_TURN_PREFIX)
+        || agentos_llm::tool_helpers::recover_harmony_leak(t).is_some()
+}
+
 /// Nudge injected once when the model ends its turn with no text and no
 /// tool calls (seen on gpt-oss / nemotron after tool-result bursts).
 const EMPTY_ANSWER_NUDGE: &str =
     "Your previous reply was empty. Answer the user now in plain text, using the tool results above.";
+
+/// Nudge injected before the last iteration of a chat turn.
+const FINAL_ITERATION_NUDGE: &str =
+    "This is your last step this turn: further tool calls will not run. Reply now in plain text \
+     with what you did, what you found, and what you will do next.";
 
 /// Max consecutive iterations the model is allowed to spend in
 /// meta-tool calls (any combination) before the chat loop aborts.
@@ -1576,40 +1603,6 @@ fn persist_generated_passphrase(path: &Path, passphrase: &str) -> Result<(), any
     }
 }
 
-/// How long a cached tool result may be replayed to the model.
-///
-/// The dedup cache exists to stop a model re-issuing the *same* call it just
-/// made; it is not a result cache. Without an age bound a long-lived session —
-/// a channel conversation is now permanent, and never goes 24h untouched, so
-/// `sweep_chat_session_dedup` never reaps it — would replay a week-old
-/// `web-search` or `read-file` result as if it were fresh.
-const SESSION_DEDUP_ENTRY_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-/// Prime a turn's dedup cache from the kernel's session-keyed map, dropping
-/// entries older than [`SESSION_DEDUP_ENTRY_TTL`].
-async fn load_session_dedup_cache(
-    map: &Arc<RwLock<ChatSessionDedupMap>>,
-    session_id: Option<&str>,
-) -> ChatSessionDedupCache {
-    let Some(sid) = session_id else {
-        return HashMap::new();
-    };
-    let now = std::time::Instant::now();
-    map.read()
-        .await
-        .get(sid)
-        .map(|(_, cache)| {
-            cache
-                .iter()
-                .filter(|(_, (inserted, _))| {
-                    now.duration_since(*inserted) <= SESSION_DEDUP_ENTRY_TTL
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Merge the per-call dedup cache back into the kernel's session-keyed map.
 /// Existing entries for unchanged keys are preserved, new entries override.
 /// When the cap is exceeded, evicts oldest by insertion timestamp (LRU). The
@@ -1666,9 +1659,14 @@ const ESCALATION_RESOLVED_VISIBILITY: chrono::Duration = chrono::Duration::hours
 fn is_dedup_cacheable(tool_name: &str, result: &serde_json::Value) -> bool {
     !agentos_tools::META_TOOL_NAMES.contains(&tool_name)
         && !agentos_tools::VOLATILE_TOOL_NAMES.contains(&tool_name)
-        && !result
-            .as_object()
-            .is_some_and(|obj| obj.contains_key("error"))
+        && !tool_result_is_error(result)
+}
+
+/// A chat tool result failed when it carries a non-null `"error"`. Status
+/// objects such as audio playback state include `"error": null` on success,
+/// so key presence alone marked every pause/resume/stop as failed.
+pub(crate) fn tool_result_is_error(result: &serde_json::Value) -> bool {
+    result.get("error").is_some_and(|e| !e.is_null())
 }
 
 impl Kernel {
@@ -2187,17 +2185,19 @@ impl Kernel {
             // non-2xx is an `Ok` here too, so check the status explicitly.
             Ok(r) if r.status().is_success() => {}
             Ok(r) => tracing::warn!(status = %r.status(), "answerCallbackQuery rejected"),
-            Err(e) => tracing::warn!(error = %e, "answerCallbackQuery failed"),
+            // `e` is a reqwest error whose Display includes the URL — and the
+            // URL carries the bot token. Never format it.
+            Err(_) => tracing::warn!("answerCallbackQuery failed (details redacted)"),
         }
     }
 
-    /// User-role entry pushed once when the model returns a blank final
-    /// answer, so the retry inference has an explicit instruction to answer.
-    fn empty_answer_nudge_entry() -> agentos_types::ContextEntry {
+    /// User-role instruction pushed mid-turn: the blank-answer retry and the
+    /// last-iteration warning.
+    fn nudge_entry(text: &str) -> agentos_types::ContextEntry {
         agentos_types::ContextEntry {
             role: agentos_types::ContextRole::User,
             parts: vec![agentos_types::ContentPart::Text {
-                text: EMPTY_ANSWER_NUDGE.to_string(),
+                text: text.to_string(),
             }],
             timestamp: chrono::Utc::now(),
             metadata: None,
@@ -2237,11 +2237,10 @@ impl Kernel {
     /// once per newly-used tool and stabilize within a few turns.
     ///
     /// Per-turn semantics: this is invoked once at the start of each chat
-    /// inference. The manifest set is FIXED for that turn — a tool first
-    /// invoked at iteration 1 of turn N becomes visible in turn N+1, not
-    /// iteration 2. That's intentional: the LLM's tools= block is a prompt
-    /// cache prefix and changing it mid-loop would invalidate the cache and
-    /// cost a full reprice on every iteration.
+    /// inference and returns the turn's *candidate* set. `chat_working_set`
+    /// splits it into the native array and a deferred pool; the native array
+    /// grows mid-turn only when `search-tools`/`describe-tool` arms a pooled
+    /// tool (`arm_chat_tools`).
     ///
     /// Stability: kept `pub` (not `pub(crate)`) only so integration tests in
     /// `tests/e2e/` can call it. Treat as semver-unstable internal API; do
@@ -2259,28 +2258,7 @@ impl Kernel {
         // of flipping a near-zero name in and out across turns.
         const USAGE_RANK_MIN_SCORE: f64 = 0.1;
 
-        // Names of tools actually executed in this session, most recent first.
-        // `chat_session_dedup` already filters out `META_TOOL_NAMES` at insert
-        // time, so we don't have to filter again here.
-        let session_recent: Vec<String> = if let Some(sid) = session_id {
-            let guard = self.chat_session_dedup.read().await;
-            if let Some((_, inner)) = guard.get(sid) {
-                let mut by_recency: Vec<(String, std::time::Instant)> = inner
-                    .iter()
-                    .map(|((name, _), (ts, _))| (name.clone(), *ts))
-                    .collect();
-                by_recency.sort_by_key(|x| std::cmp::Reverse(x.1));
-                let mut seen = std::collections::HashSet::new();
-                by_recency
-                    .into_iter()
-                    .filter_map(|(n, _)| seen.insert(n.clone()).then_some(n))
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
+        let session_recent = self.session_recent_tools(session_id).await;
 
         // Cross-session usage rank (count * exp(-age/168h)).
         let usage_rank = self.tool_usage.rank_snapshot(&agent_id.to_string()).await;
@@ -2358,6 +2336,175 @@ impl Kernel {
             .collect();
         manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
         manifests
+    }
+
+    /// Names of tools actually executed in this session, most recent first.
+    /// `chat_session_dedup` already filters out `META_TOOL_NAMES` at insert
+    /// time, so callers don't have to filter again.
+    async fn session_recent_tools(&self, session_id: Option<&str>) -> Vec<String> {
+        let Some(sid) = session_id else {
+            return Vec::new();
+        };
+        let guard = self.chat_session_dedup.read().await;
+        let Some((_, inner)) = guard.get(sid) else {
+            return Vec::new();
+        };
+        let mut by_recency: Vec<(String, std::time::Instant)> = inner
+            .iter()
+            .map(|((name, _), (ts, _))| (name.clone(), *ts))
+            .collect();
+        by_recency.sort_by_key(|x| std::cmp::Reverse(x.1));
+        let mut seen = std::collections::HashSet::new();
+        by_recency
+            .into_iter()
+            .filter_map(|(n, _)| seen.insert(n.clone()).then_some(n))
+            .collect()
+    }
+
+    /// Split the chat candidate set (`build_chat_tool_manifests`) into the
+    /// native working set and a per-turn deferred pool — the same
+    /// `tool_scoping::admit` policy the task path uses. Without it every chat
+    /// turn shipped ~70 schemas (~12k tokens) natively, even for "hey".
+    /// Deferred tools stay reachable: a successful `search-tools` /
+    /// `describe-tool` arms them (`tool_scoping::arm_discovered`), and the
+    /// Tier-0 index (`chat_tool_index`) tells the model they exist. Tools
+    /// already called this session are pinned so follow-ups ("do it again")
+    /// don't need a search hop. `tools.discovery.default_scoping = false`
+    /// restores the whole set.
+    pub async fn chat_working_set(
+        &self,
+        agent_id: &AgentID,
+        session_id: Option<&str>,
+        prompt: &str,
+        candidates: Vec<ToolManifest>,
+    ) -> (
+        Vec<ToolManifest>,
+        std::collections::HashMap<String, ToolManifest>,
+    ) {
+        // ponytail: fixed cap; make it a discovery setting if 5 proves wrong.
+        const CHAT_SESSION_PINNED: usize = 5;
+        // Rank on the tail: `rank_working_set` reads 500 chars, and a convo turn
+        // prompt opens with ~600 chars of fixed header — the message being
+        // answered is at the end.
+        const RANK_TAIL_CHARS: usize = 500;
+        let discovery = &self.config.tools.discovery;
+        if !discovery.default_scoping {
+            return (candidates, Default::default());
+        }
+        let base_names: std::collections::HashSet<String> =
+            candidates.iter().map(|m| m.manifest.name.clone()).collect();
+
+        // Session pins: every persisted call (failures, volatile and
+        // approval-gated tools included) ∪ the in-memory dedup cache (covers
+        // calls not yet flushed to the store). Sorted so recency reordering
+        // doesn't churn the tools prefix.
+        let mut session_tools: Vec<String> = match session_id {
+            Some(sid) => {
+                let store = Arc::clone(&self.chat_store);
+                let sid = sid.to_string();
+                match tokio::task::spawn_blocking(move || {
+                    store.recent_tool_names(&sid, CHAT_SESSION_PINNED * 4)
+                })
+                .await
+                {
+                    Ok(Ok(names)) => names,
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Could not read session tool names");
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "spawn_blocking panicked reading session tools");
+                        Vec::new()
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+        session_tools.extend(self.session_recent_tools(session_id).await);
+        let mut seen = std::collections::HashSet::new();
+        let mut session_pins: Vec<String> = session_tools
+            .into_iter()
+            .filter(|n| {
+                base_names.contains(n)
+                    && !agentos_tools::META_TOOL_NAMES.contains(&n.as_str())
+                    && seen.insert(n.clone())
+            })
+            .take(CHAT_SESSION_PINNED)
+            .collect();
+        session_pins.sort();
+        let mut pinned = discovery.pinned_tools.clone();
+        pinned.extend(session_pins);
+
+        let usage = self.tool_usage.rank_snapshot(&agent_id.to_string()).await;
+        let working_set_size = self
+            .agent_registry
+            .read()
+            .await
+            .get_by_id(agent_id)
+            .and_then(|p| p.working_set_size)
+            .unwrap_or(discovery.working_set_size);
+        let char_count = prompt.chars().count();
+        let rank_query: String = prompt
+            .chars()
+            .skip(char_count.saturating_sub(RANK_TAIL_CHARS))
+            .collect();
+        let t1_ranked = self
+            .rank_working_set(&rank_query, working_set_size * 2, Some(&base_names))
+            .await;
+        let policy = crate::tool_scoping::WorkingSetPolicy {
+            pinned_tools: &pinned,
+            pinned_usage_top_n: discovery.pinned_usage_top_n,
+            working_set_size,
+        };
+        let (native, pool) = crate::tool_scoping::admit(candidates, &usage, &t1_ranked, &policy);
+        tracing::info!(
+            agent_id = %agent_id,
+            native = native.len(),
+            deferred = pool.len(),
+            "chat tool working set"
+        );
+        (native, pool)
+    }
+
+    /// Tier-0 tool index for a chat turn whose native array is a working set:
+    /// category counts + top names, so the model knows deferred tools exist
+    /// and reaches for `search-tools` instead of refusing. Same renderer as the
+    /// task path (`setup_task_context`). `None` when nothing is deferred.
+    async fn chat_tool_index(
+        &self,
+        agent_id: &AgentID,
+        permissions: &agentos_types::PermissionSet,
+        deferred: usize,
+    ) -> Option<agentos_types::ContextEntry> {
+        if deferred == 0 {
+            return None;
+        }
+        let usage = self.tool_usage.rank_snapshot(&agent_id.to_string()).await;
+        let discovery = &self.config.tools.discovery;
+        let index = self.tool_registry.read().await.tools_for_prompt_ranked(
+            &usage,
+            discovery.l0_max_names_per_category,
+            discovery.l0_max_tokens,
+            permissions,
+        );
+        Some(agentos_types::ContextEntry {
+            role: agentos_types::ContextRole::System,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: format!(
+                    "{index}\n\nOnly some of these tools are loaded in your tool list. \
+                     For any other, call `search-tools` (then `describe-tool`) — it becomes \
+                     callable right after."
+                ),
+            }],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: agentos_types::ContextPartition::Active,
+            category: agentos_types::ContextCategory::Tools,
+            is_summary: false,
+        })
     }
 
     /// Mark (or unmark) `agent_id` as mid-conversation-turn.
@@ -2682,9 +2829,17 @@ impl Kernel {
         };
 
         // Build system prompt from the canonical builder — same structure as task execution.
-        let llm_tool_manifests: Vec<ToolManifest> = self
+        let chat_candidates = self
             .build_chat_tool_manifests(&agent_id, session_id, scope)
             .await;
+        // The claude-code gateway ignores the native array — skip ranking.
+        let (mut llm_tool_manifests, mut deferred_pool) = if llm.uses_tool_gateway() {
+            (chat_candidates, Default::default())
+        } else {
+            self.chat_working_set(&agent_id, session_id, new_message, chat_candidates)
+                .await
+        };
+        let mut armed_count = 0usize;
         let connected_channels: Vec<crate::system_prompt::ChannelHint> =
             match self.channel_registry.list_active().await {
                 Ok(list) => list
@@ -2712,6 +2867,7 @@ impl Kernel {
                 granted_folders: crate::system_prompt::GrantedFolders::from_paths(
                     &self.workspace_paths_for_agent(&agent_id),
                 ),
+                unattended: false,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -2731,6 +2887,12 @@ impl Kernel {
         });
         // Chat parity with the task path: the agent's self-curated context
         // memory is shown back to it on every turn (see `chat_memory.rs`).
+        if let Some(index) = self
+            .chat_tool_index(&agent_id, &agent_permissions, deferred_pool.len())
+            .await
+        {
+            ctx.push(index);
+        }
         if let Some(block) = self.context_memory_block(&agent_id).await {
             ctx.push(agentos_types::ContextEntry {
                 role: agentos_types::ContextRole::System,
@@ -2836,21 +2998,27 @@ impl Kernel {
         // show `describe-tool {name: gmail_send}` ran 3x and `agent-manual
         // {section: mcp}` ran 2x back-to-back. Replay first result with a
         // `_dedup: true` flag + hint so the model unblocks instead of looping.
-        // Pre-populate from the per-session dedup map. Each user message
-        // spawns a fresh `chat_infer_*` call with an empty history of tool
-        // results (chat history sent to the LLM is text-only — tool results
-        // from prior turns are NOT replayed). Without this, a small model
-        // re-issues `agent-manual`/`describe-tool` for tools it already used
-        // moments earlier — see logs 2026-05-08T08:04. Persisted across calls
-        // for the same `session_id`; cap 128 entries / session.
-        let mut executed_tool_calls: ChatSessionDedupCache =
-            load_session_dedup_cache(&self.chat_session_dedup, session_id).await;
+        // Starts EMPTY every turn. The cache breaks loops inside one turn; it
+        // is not a result cache, and priming it from the session map made the
+        // operator's own "check it again" a no-op — the kernel replayed the
+        // previous turn's answer for up to 15 minutes while the world had moved
+        // (2026-09-18: an Instagram inbox that had just received its first DM).
+        // The priming was written for a small model re-issuing
+        // `agent-manual`/`describe-tool`, and those are meta tools that
+        // `is_dedup_cacheable` has since stopped caching at all, so nothing is
+        // left for it to save. The session map itself stays — it is what the
+        // chat working set reads to keep this session's tools in scope.
+        let mut executed_tool_calls: ChatSessionDedupCache = HashMap::new();
         let mut consecutive_dedup_count: u32 = 0;
         const SESSION_DEDUP_CACHE_CAP: usize = 128;
 
-        // One task id per chat turn: episodic rows, TaskStart/TaskEnd hooks and
-        // the background review key off it (per-tool-call ids stay separate —
-        // the approval gate and capability token are scoped to those).
+        // ONE task id for the whole turn, used by everything: episodic rows,
+        // TaskStart/TaskEnd hooks, the background review, the capability token,
+        // the approval gate, and the `task_id` streamed on `ToolStart`. Do not
+        // re-introduce a per-iteration id — a client matches an inline approval
+        // or question card to the live turn by this id and nothing else, so the
+        // moment the stream and the gate disagree the card is unmatchable
+        // (2026-09-18: approvals silently stopped rendering in chat).
         let turn_task_id = TaskID::new();
         let turn_trace_id = TraceID::new();
         let turn_started = std::time::Instant::now();
@@ -2871,6 +3039,7 @@ impl Kernel {
             turn_trace_id,
             new_message,
             session_id,
+            scope,
         )
         .await?;
 
@@ -2920,6 +3089,22 @@ impl Kernel {
                     .await;
                 }
                 return Err(msg);
+            }
+
+            // Last iteration: whatever tool call comes back is dropped, so say so
+            // up front. Without this gpt-oss spends it on one more call and the
+            // turn ends with no text. Tools stay offered — Anthropic rejects
+            // tool_use history without a tools array.
+            // ponytail: a model that ignores this still ends silent; per-adapter
+            // `tool_choice: none` is the upgrade.
+            // Skipped when a blank-answer nudge is already last: two user entries
+            // in a row fail on strict-alternation chat templates.
+            if iterations > 1
+                && iterations == chat_max_tool_iterations
+                && ctx.active_entries().last().map(|e| e.role)
+                    != Some(agentos_types::ContextRole::User)
+            {
+                ctx.push(Self::nudge_entry(FINAL_ITERATION_NUDGE));
             }
 
             let image_parts_in_context = ctx
@@ -2994,9 +3179,7 @@ impl Kernel {
                     &gc.intent_type,
                     &gc.payload,
                     &gc.result,
-                    !gc.result
-                        .as_object()
-                        .is_some_and(|o| o.contains_key("error")),
+                    !tool_result_is_error(&gc.result),
                     gc.duration_ms,
                     iterations,
                 )
@@ -3227,14 +3410,14 @@ impl Kernel {
                         .tool_calls
                         .iter()
                         .map(|tc| {
-                            (
-                                self.tool_runner
-                                    .resolve_tool_name(&tc.tool_name)
-                                    .unwrap_or_else(|| tc.tool_name.clone()),
-                                tc.payload.clone(),
-                                tc.intent_type.clone(),
-                                tc.id.clone(),
-                            )
+                            let name = self
+                                .tool_runner
+                                .resolve_tool_name(&tc.tool_name)
+                                .unwrap_or_else(|| tc.tool_name.clone());
+                            let payload = self
+                                .schema_registry
+                                .drop_rejected_nulls(&name, tc.payload.clone());
+                            (name, payload, tc.intent_type.clone(), tc.id.clone())
                         })
                         .collect();
 
@@ -3265,7 +3448,10 @@ impl Kernel {
                 // is then validated against it (HMAC verify + expiry + scoped
                 // intents + per-permission check) with parity to the task path —
                 // instead of running at the agent's full standing permissions.
-                let chat_task_id = TaskID::new();
+                // The turn's id — see `turn_task_id`. The token, the ToolPre
+                // gate, `ToolStart` and any `ask-user` notification must all
+                // carry the same one.
+                let chat_task_id = turn_task_id;
                 let chat_token = {
                     let turn_intents: std::collections::BTreeSet<IntentTypeFlag> = calls_to_execute
                         .iter()
@@ -3301,13 +3487,11 @@ impl Kernel {
                         serde_json::to_string(payload).unwrap_or_default(),
                     );
                     let cached = executed_tool_calls.get(&dedup_key).map(|(_, v)| v.clone());
-                    // The timestamp is deliberately NOT refreshed on a hit. It
-                    // used to be, as an LRU touch so hot keys outlived colder
-                    // ones — but it doubles as the age `load_session_dedup_cache`
-                    // measures, so a call the model repeats every few minutes
-                    // would renew its own result forever and never re-execute.
-                    // Losing a hot key to eviction only costs one extra
-                    // execution; serving a week-old result is a wrong answer.
+                    // The timestamp is deliberately NOT refreshed on a hit: it
+                    // is the insertion age `persist_session_dedup_cache` evicts
+                    // by, and an LRU touch would let a hot key outlive every
+                    // colder one forever. Losing a hot key to eviction costs one
+                    // extra execution — the cheaper mistake.
 
                     // MA-02 / W4: charge the call against `max_tool_calls_per_day`.
                     // Below the dedup lookup — a cache replay executes nothing,
@@ -3458,8 +3642,6 @@ impl Kernel {
                         wrapped
                     } else {
                         consecutive_dedup_count = 0;
-                        let gate_task_id = exec_ctx.task_id;
-
                         // S1: validate the per-turn capability token BEFORE the
                         // approval gate — the cheapest hard gate first. This is
                         // the same Layer-A check the task path runs (HMAC verify,
@@ -3514,7 +3696,7 @@ impl Kernel {
                         // exactly like the task-execution path, so chat is not
                         // an approval bypass for ExecCapable/ControlPlane tools.
                         else if let Err(reason) = self
-                            .enforce_chat_tool_pre(agent_id, gate_task_id, tool_name, payload)
+                            .enforce_chat_tool_pre(agent_id, chat_task_id, tool_name, payload)
                             .await
                         {
                             tracing::warn!(
@@ -3579,9 +3761,20 @@ impl Kernel {
                     }
                     let duration_ms = start.elapsed().as_millis() as u64;
 
-                    let success = !tool_result
-                        .as_object()
-                        .is_some_and(|o| o.contains_key("error"));
+                    let success = !tool_result_is_error(&tool_result);
+                    if success && self.config.tools.discovery.rearm_on_describe {
+                        crate::tool_scoping::arm_discovered(
+                            crate::task_executor::rearm_tool_names(
+                                tool_name,
+                                payload,
+                                &tool_result,
+                            ),
+                            &mut llm_tool_manifests,
+                            &mut deferred_pool,
+                            &mut armed_count,
+                            self.config.tools.discovery.armed_cap,
+                        );
+                    }
 
                     if cached.is_none() {
                         self.chat_record_tool(
@@ -3735,7 +3928,7 @@ impl Kernel {
                         completion_tokens = result.tokens_used.completion_tokens,
                         "Chat LLM returned empty final answer; nudging model once"
                     );
-                    ctx.push(Self::empty_answer_nudge_entry());
+                    ctx.push(Self::nudge_entry(EMPTY_ANSWER_NUDGE));
                     continue;
                 }
                 let answer = if visible_text.trim().is_empty() {
@@ -3910,9 +4103,17 @@ impl Kernel {
             }
         };
 
-        let llm_tool_manifests: Vec<ToolManifest> = self
+        let chat_candidates = self
             .build_chat_tool_manifests(&agent_id, session_id, scope)
             .await;
+        // The claude-code gateway ignores the native array — skip ranking.
+        let (mut llm_tool_manifests, mut deferred_pool) = if llm.uses_tool_gateway() {
+            (chat_candidates, Default::default())
+        } else {
+            self.chat_working_set(&agent_id, session_id, new_message, chat_candidates)
+                .await
+        };
+        let mut armed_count = 0usize;
         let connected_channels: Vec<crate::system_prompt::ChannelHint> =
             match self.channel_registry.list_active().await {
                 Ok(list) => list
@@ -3940,6 +4141,7 @@ impl Kernel {
                 granted_folders: crate::system_prompt::GrantedFolders::from_paths(
                     &self.workspace_paths_for_agent(&agent_id),
                 ),
+                unattended: false,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -3959,6 +4161,12 @@ impl Kernel {
         });
         // Chat parity with the task path: the agent's self-curated context
         // memory is shown back to it on every turn (see `chat_memory.rs`).
+        if let Some(index) = self
+            .chat_tool_index(&agent_id, &agent_permissions, deferred_pool.len())
+            .await
+        {
+            ctx.push(index);
+        }
         if let Some(block) = self.context_memory_block(&agent_id).await {
             ctx.push(agentos_types::ContextEntry {
                 role: agentos_types::ContextRole::System,
@@ -4055,21 +4263,27 @@ impl Kernel {
         let mut empty_text_streak_signature: Option<String> = None;
         let mut empty_text_streak_count: u32 = 0;
         let mut meta_tool_streak_count: u32 = 0;
-        // Pre-populate from the per-session dedup map. Each user message
-        // spawns a fresh `chat_infer_*` call with an empty history of tool
-        // results (chat history sent to the LLM is text-only — tool results
-        // from prior turns are NOT replayed). Without this, a small model
-        // re-issues `agent-manual`/`describe-tool` for tools it already used
-        // moments earlier — see logs 2026-05-08T08:04. Persisted across calls
-        // for the same `session_id`; cap 128 entries / session.
-        let mut executed_tool_calls: ChatSessionDedupCache =
-            load_session_dedup_cache(&self.chat_session_dedup, session_id).await;
+        // Starts EMPTY every turn. The cache breaks loops inside one turn; it
+        // is not a result cache, and priming it from the session map made the
+        // operator's own "check it again" a no-op — the kernel replayed the
+        // previous turn's answer for up to 15 minutes while the world had moved
+        // (2026-09-18: an Instagram inbox that had just received its first DM).
+        // The priming was written for a small model re-issuing
+        // `agent-manual`/`describe-tool`, and those are meta tools that
+        // `is_dedup_cacheable` has since stopped caching at all, so nothing is
+        // left for it to save. The session map itself stays — it is what the
+        // chat working set reads to keep this session's tools in scope.
+        let mut executed_tool_calls: ChatSessionDedupCache = HashMap::new();
         let mut consecutive_dedup_count: u32 = 0;
         const SESSION_DEDUP_CACHE_CAP: usize = 128;
 
-        // One task id per chat turn: episodic rows, TaskStart/TaskEnd hooks and
-        // the background review key off it (per-tool-call ids stay separate —
-        // the approval gate and capability token are scoped to those).
+        // ONE task id for the whole turn, used by everything: episodic rows,
+        // TaskStart/TaskEnd hooks, the background review, the capability token,
+        // the approval gate, and the `task_id` streamed on `ToolStart`. Do not
+        // re-introduce a per-iteration id — a client matches an inline approval
+        // or question card to the live turn by this id and nothing else, so the
+        // moment the stream and the gate disagree the card is unmatchable
+        // (2026-09-18: approvals silently stopped rendering in chat).
         let turn_task_id = TaskID::new();
         let turn_trace_id = TraceID::new();
         let turn_started = std::time::Instant::now();
@@ -4085,6 +4299,7 @@ impl Kernel {
                 turn_trace_id,
                 new_message,
                 session_id,
+                scope,
             )
             .await
         {
@@ -4207,6 +4422,22 @@ impl Kernel {
                     .await;
                 }
                 return Err(msg);
+            }
+
+            // Last iteration: whatever tool call comes back is dropped, so say so
+            // up front. Without this gpt-oss spends it on one more call and the
+            // turn ends with no text. Tools stay offered — Anthropic rejects
+            // tool_use history without a tools array.
+            // ponytail: a model that ignores this still ends silent; per-adapter
+            // `tool_choice: none` is the upgrade.
+            // Skipped when a blank-answer nudge is already last: two user entries
+            // in a row fail on strict-alternation chat templates.
+            if iterations > 1
+                && iterations == chat_max_tool_iterations
+                && ctx.active_entries().last().map(|e| e.role)
+                    != Some(agentos_types::ContextRole::User)
+            {
+                ctx.push(Self::nudge_entry(FINAL_ITERATION_NUDGE));
             }
 
             let image_parts_in_context = ctx
@@ -4797,14 +5028,14 @@ impl Kernel {
                         .tool_calls
                         .iter()
                         .map(|tc| {
-                            (
-                                self.tool_runner
-                                    .resolve_tool_name(&tc.tool_name)
-                                    .unwrap_or_else(|| tc.tool_name.clone()),
-                                tc.payload.clone(),
-                                tc.intent_type.clone(),
-                                tc.id.clone(),
-                            )
+                            let name = self
+                                .tool_runner
+                                .resolve_tool_name(&tc.tool_name)
+                                .unwrap_or_else(|| tc.tool_name.clone());
+                            let payload = self
+                                .schema_registry
+                                .drop_rejected_nulls(&name, tc.payload.clone());
+                            (name, payload, tc.intent_type.clone(), tc.id.clone())
                         })
                         .collect();
 
@@ -4832,7 +5063,10 @@ impl Kernel {
 
                 // S1: mint one signed, short-TTL capability token scoped to the
                 // intents this streaming chat turn needs (see non-streaming path).
-                let chat_task_id = TaskID::new();
+                // The turn's id — see `turn_task_id`. The token, the ToolPre
+                // gate, `ToolStart` and any `ask-user` notification must all
+                // carry the same one.
+                let chat_task_id = turn_task_id;
                 let chat_token = {
                     let turn_intents: std::collections::BTreeSet<IntentTypeFlag> = calls_to_execute
                         .iter()
@@ -4866,13 +5100,11 @@ impl Kernel {
                         serde_json::to_string(payload).unwrap_or_default(),
                     );
                     let cached = executed_tool_calls.get(&dedup_key).map(|(_, v)| v.clone());
-                    // The timestamp is deliberately NOT refreshed on a hit. It
-                    // used to be, as an LRU touch so hot keys outlived colder
-                    // ones — but it doubles as the age `load_session_dedup_cache`
-                    // measures, so a call the model repeats every few minutes
-                    // would renew its own result forever and never re-execute.
-                    // Losing a hot key to eviction only costs one extra
-                    // execution; serving a week-old result is a wrong answer.
+                    // The timestamp is deliberately NOT refreshed on a hit: it
+                    // is the insertion age `persist_session_dedup_cache` evicts
+                    // by, and an LRU touch would let a hot key outlive every
+                    // colder one forever. Losing a hot key to eviction costs one
+                    // extra execution — the cheaper mistake.
 
                     // MA-02 / W4: charge the call against `max_tool_calls_per_day`.
                     // Below the dedup lookup — a cache replay executes nothing,
@@ -5039,8 +5271,6 @@ impl Kernel {
                         wrapped
                     } else {
                         consecutive_dedup_count = 0;
-                        let gate_task_id = exec_ctx.task_id;
-
                         // S1: validate the per-turn capability token BEFORE the
                         // approval gate (parity with the task path and the
                         // non-streaming chat path). Runner `permissions.check`
@@ -5092,7 +5322,7 @@ impl Kernel {
                         // exactly like the task-execution path, so streaming
                         // chat is not an approval bypass.
                         else if let Err(reason) = self
-                            .enforce_chat_tool_pre(agent_id, gate_task_id, tool_name, payload)
+                            .enforce_chat_tool_pre(agent_id, chat_task_id, tool_name, payload)
                             .await
                         {
                             tracing::warn!(
@@ -5182,9 +5412,20 @@ impl Kernel {
                             s
                         }
                     };
-                    let success = !tool_result
-                        .as_object()
-                        .is_some_and(|o| o.contains_key("error"));
+                    let success = !tool_result_is_error(&tool_result);
+                    if success && self.config.tools.discovery.rearm_on_describe {
+                        crate::tool_scoping::arm_discovered(
+                            crate::task_executor::rearm_tool_names(
+                                tool_name,
+                                payload,
+                                &tool_result,
+                            ),
+                            &mut llm_tool_manifests,
+                            &mut deferred_pool,
+                            &mut armed_count,
+                            self.config.tools.discovery.armed_cap,
+                        );
+                    }
 
                     if cached.is_none() {
                         self.chat_record_tool(
@@ -5333,7 +5574,7 @@ impl Kernel {
                         completion_tokens = result.tokens_used.completion_tokens,
                         "Chat streaming LLM returned empty final answer; nudging model once"
                     );
-                    ctx.push(Self::empty_answer_nudge_entry());
+                    ctx.push(Self::nudge_entry(EMPTY_ANSWER_NUDGE));
                     continue;
                 }
                 let answer = if visible_text.trim().is_empty() {
@@ -6712,12 +6953,7 @@ impl Kernel {
                                                 // Must match the adapter's enforced resource and
                                                 // parse as `resource:BITS` — see
                                                 // `commands/mcp.rs`.
-                                                permissions: vec![format!(
-                                                    "mcp.{}:x",
-                                                    agentos_mcp::adapter::sanitize_tool_name(
-                                                        &tool_def.name
-                                                    )
-                                                )],
+                                                permissions: vec![format!("{}:x", agentos_mcp::adapter::server_permission_resource(&record.name))],
                                             },
                                         capabilities_provided: agentos_types::tool::ToolOutputs {
                                             outputs: vec!["content.text".to_string()],
@@ -7134,6 +7370,9 @@ impl Kernel {
         // retry raised a fresh escalation.
         escalation_manager
             .set_hardware_registry(Arc::clone(&hardware_registry))
+            .await;
+        escalation_manager
+            .set_capture_consent(Arc::clone(&capture_consent))
             .await;
         let cost_tracker = Arc::new(crate::cost_tracker::CostTracker::with_state_store(Some(
             state_store.clone(),
@@ -8470,6 +8709,7 @@ impl Kernel {
         default_thinking_level: Option<ThinkingLevel>,
         system_prompt: Option<Option<String>>,
         working_set_size: Option<Option<usize>>,
+        avatar: Option<Option<String>>,
     ) -> Result<(), String> {
         let mut registry = self.agent_registry.write().await;
         registry
@@ -8479,6 +8719,7 @@ impl Kernel {
                 default_thinking_level,
                 system_prompt,
                 working_set_size,
+                avatar,
             )
             .map(|_| ())
     }
@@ -9059,55 +9300,6 @@ mod preflight_tests {
 }
 
 #[cfg(test)]
-mod session_dedup_tests {
-    use super::*;
-
-    fn cache_entry(age: std::time::Duration) -> (std::time::Instant, serde_json::Value) {
-        (
-            std::time::Instant::now() - age,
-            serde_json::json!({"ok": true}),
-        )
-    }
-
-    #[tokio::test]
-    async fn stale_dedup_entries_are_not_replayed() {
-        let map: Arc<RwLock<ChatSessionDedupMap>> = Arc::new(RwLock::new(HashMap::new()));
-        let fresh = ("web-search".to_string(), r#"{"q":"now"}"#.to_string());
-        let stale = ("web-search".to_string(), r#"{"q":"last week"}"#.to_string());
-        {
-            let mut g = map.write().await;
-            let cache: ChatSessionDedupCache = HashMap::from([
-                (
-                    fresh.clone(),
-                    cache_entry(std::time::Duration::from_secs(30)),
-                ),
-                (
-                    stale.clone(),
-                    cache_entry(SESSION_DEDUP_ENTRY_TTL + std::time::Duration::from_secs(1)),
-                ),
-            ]);
-            g.insert("sess-1".to_string(), (std::time::Instant::now(), cache));
-        }
-
-        let loaded = load_session_dedup_cache(&map, Some("sess-1")).await;
-        assert!(
-            loaded.contains_key(&fresh),
-            "recent call should still dedup"
-        );
-        assert!(
-            !loaded.contains_key(&stale),
-            "expired result must be re-executed, not replayed as fresh"
-        );
-
-        // No session id (e.g. a one-shot inference) shares nothing.
-        assert!(load_session_dedup_cache(&map, None).await.is_empty());
-        assert!(load_session_dedup_cache(&map, Some("other"))
-            .await
-            .is_empty());
-    }
-}
-
-#[cfg(test)]
 mod vault_bootstrap_tests {
     use super::*;
     use crate::config::*;
@@ -9363,6 +9555,51 @@ mod hal_device_access_gate_tests {
         )
         .await
         .expect("approved device should pass on the retry");
+    }
+
+    /// 2026-09-15: webcam approved from the Telegram card, device granted,
+    /// capture still failed `consent_required` — only `agentos hal approve`
+    /// opened the driver's consent window.
+    #[tokio::test]
+    async fn approving_a_webcam_escalation_opens_capture_consent() {
+        let (gate, registry, escalation_manager) = make_gate();
+        escalation_manager
+            .set_hardware_registry(Arc::clone(&registry))
+            .await;
+        let consent = Arc::new(agentos_hal::ConsentStore::new());
+        escalation_manager
+            .set_capture_consent(Arc::clone(&consent))
+            .await;
+        let agent_id = AgentID::new();
+        registry.register_pending_device("webcam:video0", "webcam");
+
+        gate.check(
+            &agent_id,
+            &TaskID::new(),
+            "webcam:video0",
+            "webcam",
+            HalOperation::Execute,
+        )
+        .await
+        .expect_err("first contact should escalate");
+        let pending = escalation_manager.list_pending().await;
+        escalation_manager
+            .resolve(pending[0].id, "approve".to_string())
+            .await
+            .expect("escalation should resolve");
+
+        assert!(consent.check(&agent_id.to_string(), "webcam:video0"));
+    }
+
+    #[test]
+    fn null_error_field_is_not_a_failure() {
+        assert!(!tool_result_is_error(
+            &serde_json::json!({"state": "paused", "error": null})
+        ));
+        assert!(tool_result_is_error(
+            &serde_json::json!({"error": "denied"})
+        ));
+        assert!(!tool_result_is_error(&serde_json::json!("plain text")));
     }
 
     /// The 2026-09-09 failure: the agent asked to set the volume, the gate

@@ -3,14 +3,18 @@
 //! Enables agents to compile code, run tests, execute linters, and retrieve
 //! artifacts. Build output is parsed into structured JSON (test results,
 //! compiler errors) rather than returned as raw stdout.
+//!
+//! Build commands are agent-controlled code (`make`, `cargo build` runs
+//! `build.rs`, `python -c`). They run in a bwrap sandbox limited to the agent's
+//! exec roots, with a cleared environment and network only on request.
 
 use crate::capability_provider::{CapabilityContext, CapabilityProvider, CapabilityResult};
-use crate::managed_env::{activated_env, WorkspaceResolver};
+use crate::managed_env::{activate, WorkspaceResolver};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -131,25 +135,31 @@ impl Default for BuildConfig {
     }
 }
 
+fn exists(dir: &Path, marker: &str) -> bool {
+    std::fs::symlink_metadata(dir.join(marker)).is_ok_and(|m| m.is_file())
+}
+
 // ---------------------------------------------------------------------------
 // Output parsers
 // ---------------------------------------------------------------------------
 
-/// Detect ecosystem from a working directory.
+/// Detect ecosystem from a working directory. Markers are checked without
+/// following symlinks: the directory is agent-writable, and a
+/// `Cargo.toml -> /root/x` link would turn this into a host existence oracle.
 fn detect_ecosystem(dir: &Path) -> &'static str {
-    if dir.join("Cargo.toml").exists() {
+    if exists(dir, "Cargo.toml") {
         "rust"
-    } else if dir.join("package.json").exists() {
+    } else if exists(dir, "package.json") {
         "nodejs"
-    } else if dir.join("pyproject.toml").exists()
-        || dir.join("setup.py").exists()
-        || dir.join("pytest.ini").exists()
-        || dir.join("setup.cfg").exists()
+    } else if exists(dir, "pyproject.toml")
+        || exists(dir, "setup.py")
+        || exists(dir, "pytest.ini")
+        || exists(dir, "setup.cfg")
     {
         "python"
-    } else if dir.join("go.mod").exists() {
+    } else if exists(dir, "go.mod") {
         "go"
-    } else if dir.join("Makefile").exists() {
+    } else if exists(dir, "Makefile") {
         "make"
     } else {
         "unknown"
@@ -310,11 +320,10 @@ fn validate_build_command(command: &str, allowed: &[String]) -> Result<(), Agent
 
 /// Allowlist for `build-run` invocations that target a managed workspace.
 ///
-/// When `build-run` is called with `workspace = "..."`, the workspace is the
-/// sandbox, so this list is intentionally wider than the no-workspace
-/// `default_allowed_commands` — but still bounded to interpreters and build
-/// front-ends. Anything not on the list is rejected so an agent can't pivot
-/// to running `rm`, `sudo`, `curl … | sh`, etc.
+/// Wider than the no-workspace `default_allowed_commands` (interpreters run
+/// arbitrary code), which is acceptable only because every command runs in the
+/// bwrap sandbox. The list keeps intent legible: build and run tooling, not
+/// `rm`, `sudo`, `curl … | sh`.
 const WORKSPACE_BUILD_PREFIXES: &[&str] = &[
     // Python: interpreter + package manager + common test/lint front-ends.
     "python", "python3", "pip", "pytest", "ruff", "mypy", "flake8",
@@ -374,33 +383,6 @@ impl BuildProvider {
         }
     }
 
-    /// Validate that `working_dir` is within the agent's accessible scope.
-    fn validate_working_dir(
-        working_dir: &Path,
-        context: &CapabilityContext,
-    ) -> Result<(), AgentOSError> {
-        if !working_dir.starts_with(&context.data_dir)
-            && !context
-                .workspace_paths
-                .iter()
-                .any(|wp| working_dir.starts_with(wp))
-        {
-            let mut allowed: Vec<String> = vec![context.data_dir.display().to_string()];
-            for wp in &context.workspace_paths {
-                allowed.push(wp.display().to_string());
-            }
-            return Err(AgentOSError::PermissionDenied {
-                resource: "build.run".into(),
-                operation: format!(
-                    "working_dir '{}' is outside agent scope. Allowed paths: [{}]",
-                    working_dir.display(),
-                    allowed.join(", ")
-                ),
-            });
-        }
-        Ok(())
-    }
-
     pub fn with_defaults() -> Self {
         Self::new(BuildConfig::default())
     }
@@ -430,15 +412,17 @@ impl BuildProvider {
             });
         }
 
-        // Working dir defaults to workspace root when set, else data_dir.
-        let working_dir = params["working_dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .or_else(|| workspace_info.as_ref().map(|w| w.root.clone()))
-            .unwrap_or_else(|| context.data_dir.clone());
-
-        // SECURITY: validate working_dir is within agent's scope.
-        Self::validate_working_dir(&working_dir, context)?;
+        // Working dir defaults to the workspace root when set, else the agent
+        // home; an explicit one must lie inside the agent's exec roots.
+        let working_dir = context.exec_working_dir(
+            params["working_dir"].as_str(),
+            workspace_info
+                .as_ref()
+                .map(|w| w.root.clone())
+                .unwrap_or_else(|| context.agent_home.clone()),
+            "build.run",
+        )?;
+        let network = context.exec_network(params, "build-run")?;
 
         // Allowlist: stricter when no workspace; broader (but still bounded)
         // when running inside a workspace's own tooling.
@@ -460,31 +444,24 @@ impl BuildProvider {
         let program = parts[0];
         let args = &parts[1..];
 
-        let workspace_for_spawn = workspace_info.clone();
-        let working_dir_for_spawn = working_dir.clone();
-        let program_owned = program.to_string();
-        let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut sandbox = context.exec_sandbox("build-run", network);
+        if let Some(ws) = &workspace_info {
+            sandbox = activate(sandbox, ws)?;
+        }
+        let mut cmd = sandbox.command(&working_dir, program).await?;
+        cmd.args(args);
 
-        let output = tokio::time::timeout(timeout, async move {
-            let mut cmd = tokio::process::Command::new(&program_owned);
-            cmd.args(&args_owned).current_dir(&working_dir_for_spawn);
-            if let Some(ws) = &workspace_for_spawn {
-                cmd.env_clear();
-                for (k, v) in activated_env(ws) {
-                    cmd.env(k, v);
-                }
-            }
-            cmd.output().await
-        })
-        .await
-        .map_err(|_| AgentOSError::ToolExecutionFailed {
-            tool_name: "build-run".into(),
-            reason: format!("build timed out after {}s", self.config.build_timeout_secs),
-        })?
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "build-run".into(),
-            reason: format!("failed to execute build command: {e}"),
-        })?;
+        // The sandbox is killed when the timed-out future is dropped.
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| AgentOSError::ToolExecutionFailed {
+                tool_name: "build-run".into(),
+                reason: format!("build timed out after {}s", self.config.build_timeout_secs),
+            })?
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                tool_name: "build-run".into(),
+                reason: format!("failed to execute build command: {e}"),
+            })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let exit_code = output.status.code().unwrap_or(-1);
@@ -536,14 +513,13 @@ impl BuildProvider {
         params: &Value,
         context: &CapabilityContext,
     ) -> Result<CapabilityResult, AgentOSError> {
-        let working_dir = params["working_dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| context.data_dir.clone());
-
-        // SECURITY: validate working_dir BEFORE detect_ecosystem to prevent
+        // SECURITY: resolve working_dir BEFORE detect_ecosystem to prevent a
         // filesystem existence oracle (probing /root/Cargo.toml etc.).
-        Self::validate_working_dir(&working_dir, context)?;
+        let working_dir = context.exec_working_dir(
+            params["working_dir"].as_str(),
+            context.agent_home.clone(),
+            "build.test",
+        )?;
 
         // Auto-detect ecosystem and choose test command.
         let ecosystem = detect_ecosystem(&working_dir);
@@ -565,6 +541,7 @@ impl BuildProvider {
         let run_params = json!({
             "command": command,
             "working_dir": working_dir.to_string_lossy().to_string(),
+            "allow_network": params["allow_network"],
         });
         self.action_run(&run_params, context).await
     }
@@ -574,13 +551,12 @@ impl BuildProvider {
         params: &Value,
         context: &CapabilityContext,
     ) -> Result<CapabilityResult, AgentOSError> {
-        let working_dir = params["working_dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| context.data_dir.clone());
-
-        // SECURITY: validate working_dir BEFORE detect_ecosystem.
-        Self::validate_working_dir(&working_dir, context)?;
+        // SECURITY: resolve working_dir BEFORE detect_ecosystem.
+        let working_dir = context.exec_working_dir(
+            params["working_dir"].as_str(),
+            context.agent_home.clone(),
+            "build.lint",
+        )?;
 
         let ecosystem = detect_ecosystem(&working_dir);
         let command = match ecosystem {
@@ -599,6 +575,7 @@ impl BuildProvider {
         let run_params = json!({
             "command": command,
             "working_dir": working_dir.to_string_lossy().to_string(),
+            "allow_network": params["allow_network"],
         });
         self.action_run(&run_params, context).await
     }
@@ -652,6 +629,7 @@ impl CapabilityProvider for BuildProvider {
 mod tests {
     use super::*;
     use agentos_types::{AgentID, TaskID, TraceID};
+    use std::path::PathBuf;
 
     fn make_provider() -> BuildProvider {
         BuildProvider::with_defaults()
@@ -665,7 +643,18 @@ mod tests {
             data_dir: PathBuf::from("/tmp"),
             permissions: agentos_types::PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: PathBuf::from("/tmp"),
+            workspace_paths_executable: vec![],
         }
+    }
+
+    /// Running needs a working bwrap; CI hosts without user namespaces skip.
+    async fn sandbox_or_skip() -> bool {
+        let ok = agentos_tools::sandbox_fs::bwrap_usable().await;
+        if !ok {
+            eprintln!("skipping: bwrap cannot sandbox on this host");
+        }
+        ok
     }
 
     #[test]
@@ -763,14 +752,8 @@ mod tests {
             root: tmp.path().to_path_buf(),
             ecosystem: crate::managed_env::Ecosystem::Python,
         };
-        let env = crate::managed_env::activated_env(&ws);
-        let path = env
-            .iter()
-            .find(|(k, _)| k == "PATH")
-            .map(|(_, v)| v.as_str())
-            .unwrap();
-        assert!(path.contains("venv/bin"));
-        assert!(!path.contains("node_modules"));
+        let dirs = crate::managed_env::workspace_bin_dirs(&ws);
+        assert_eq!(dirs, vec![tmp.path().join("venv").join("bin")]);
     }
 
     // -- Output parsers --
@@ -873,6 +856,9 @@ FAILED tests/test_api.py::test_create - KeyError: 'name'
 
     #[tokio::test]
     async fn run_echo_command() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = BuildProvider::new(BuildConfig {
             allowed_commands: vec![], // Empty = allow all
             ..Default::default()
@@ -897,6 +883,9 @@ FAILED tests/test_api.py::test_create - KeyError: 'name'
 
     #[tokio::test]
     async fn run_failing_command() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = BuildProvider::new(BuildConfig {
             allowed_commands: vec![],
             ..Default::default()
@@ -939,6 +928,61 @@ FAILED tests/test_api.py::test_create - KeyError: 'name'
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("cannot auto-detect"));
+    }
+
+    #[tokio::test]
+    async fn build_runs_sandboxed_in_scope_only() {
+        let home = tempfile::TempDir::new().unwrap();
+        let data = tempfile::TempDir::new().unwrap();
+        std::fs::write(data.path().join("vault.db"), "secret").unwrap();
+        let ctx = CapabilityContext {
+            data_dir: data.path().to_path_buf(),
+            agent_home: home.path().to_path_buf(),
+            ..make_context()
+        };
+        let p = BuildProvider::new(BuildConfig {
+            allowed_commands: vec![],
+            ..Default::default()
+        });
+
+        // Kernel state under data_dir is no longer a valid working_dir.
+        let err = p
+            .execute(
+                "run",
+                json!({"command": "ls", "working_dir": data.path().display().to_string()}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("outside agent scope"), "{err}");
+        let err = p
+            .execute("run", json!({"command": "ls", "allow_network": true}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("net.outbound"), "{err}");
+
+        if !sandbox_or_skip().await {
+            return;
+        }
+        // Defaults to the agent home; sees neither the kernel env nor data_dir.
+        let vault = data.path().join("vault.db").display().to_string();
+        let out = p
+            .execute("run", json!({"command": "env"}), &ctx)
+            .await
+            .unwrap();
+        let text = out.output["output"].as_str().unwrap();
+        assert_eq!(out.output["exit_code"], 0, "{text}");
+        assert!(!text.contains("CARGO_MANIFEST_DIR"), "{text}");
+        assert!(
+            text.contains(&format!("HOME={}", home.path().display())),
+            "{text}"
+        );
+        let out = p
+            .execute("run", json!({"command": format!("cat {vault}")}), &ctx)
+            .await
+            .unwrap();
+        assert_ne!(out.output["exit_code"], 0);
+        assert!(!out.output["output"].as_str().unwrap().contains("secret"));
     }
 
     #[tokio::test]

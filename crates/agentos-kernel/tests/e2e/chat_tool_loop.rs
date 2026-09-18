@@ -620,7 +620,7 @@ async fn full_scope_does_not_refuse_messaging_tools() {
 }
 
 /// A convo turn is capped well below the general chat cap. The turn that caused
-/// this work ran 20 iterations; four is enough for one lookup before speaking.
+/// this work ran 20 iterations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn convo_turn_caps_tool_iterations() {
@@ -631,7 +631,13 @@ async fn convo_turn_caps_tool_iterations() {
     let responses: Vec<MockResponse> = (0..20)
         .map(|i| tool_call_response_with_payload("agent-manual", serde_json::json!({"section": i})))
         .collect();
-    common::register_mock_agent_with_responses(&kernel, "convo-cap-agent", responses).await;
+    let agent_id =
+        common::register_mock_agent_with_responses(&kernel, "convo-cap-agent", vec![]).await;
+    let mock = std::sync::Arc::new(agentos_llm::MockLLMCore::with_responses(responses));
+    kernel.active_llms.write().await.insert(
+        agent_id,
+        mock.clone() as std::sync::Arc<dyn agentos_llm::LLMCore>,
+    );
 
     let result = kernel
         .chat_infer_with_tools_scoped(
@@ -645,12 +651,28 @@ async fn convo_turn_caps_tool_iterations() {
         .await
         .expect("chat_infer_with_tools_scoped failed");
 
-    assert!(
-        result.tool_calls.len() as u32 <= agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS,
-        "a convo turn must stop at {} iterations; ran {}",
-        agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS,
-        result.tool_calls.len()
+    let cap = agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS as usize;
+    assert_eq!(
+        result.iterations as usize, cap,
+        "a convo turn must stop at the cap"
     );
+    assert_eq!(
+        result.tool_calls.len(),
+        cap - 1,
+        "the capped call is dropped"
+    );
+
+    // Only the last inference is told its tool calls won't run.
+    let history = mock.call_history();
+    assert_eq!(history.len(), cap);
+    let told = |i: usize| {
+        history[i]
+            .context_entries
+            .iter()
+            .any(|(_, t)| t.contains("last step this turn"))
+    };
+    assert!(told(cap - 1), "final iteration must carry the nudge");
+    assert!(!told(cap - 2), "earlier iterations must not");
 
     kernel.shutdown();
     handle.await.unwrap();
@@ -756,6 +778,108 @@ async fn stream_with_no_reader_ends_the_turn_without_failing() {
         result.tokens_used, 0,
         "the turn must bail before paying for an inference"
     );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// The `task_id` on `ToolStart` must be the id the escalation is filed under.
+///
+/// A client correlates the inline approval card to the live turn by that id and
+/// by nothing else, so the moment the stream and the approval gate disagree the
+/// card is unmatchable and approvals silently stop appearing in chat — which is
+/// exactly what happened when the gate moved onto the per-turn id while the
+/// stream still carried a per-iteration one (2026-09-18).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tool_start_task_id_matches_the_escalation_it_raises() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    {
+        let resolver = kernel
+            .approval_mode_resolver
+            .as_ref()
+            .expect("approval mode resolver must be wired at boot");
+        let mut cfg = resolver.snapshot();
+        cfg.mode = agentos_types::ApprovalMode::AskAlways;
+        resolver.reload(cfg);
+    }
+
+    common::register_mock_agent_with_permissions(
+        &kernel,
+        "chat-card-agent",
+        vec![
+            // A payload that actually validates: schema validation runs ahead of
+            // the approval gate, so a malformed call never reaches it.
+            tool_call_response_with_payload(
+                "shell-exec",
+                serde_json::json!({ "command": "echo hi" }),
+            ),
+            MockResponse::text("Understood.").with_stop_reason(StopReason::EndTurn),
+        ],
+        // The capability check runs ahead of the approval gate, so the agent has
+        // to be allowed to execute before approval is the thing standing in the
+        // way.
+        agentos_types::PermissionSet {
+            entries: vec![agentos_types::PermissionEntry {
+                resource: "process.exec".to_string(),
+                read: true,
+                write: true,
+                execute: true,
+                query: true,
+                observe: true,
+                expires_at: None,
+            }],
+            deny_entries: vec![],
+        },
+    )
+    .await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<agentos_kernel::ChatStreamEvent>(64);
+    let escalations = std::sync::Arc::clone(&kernel.escalation_manager);
+    // Reads the stream like the panel does: take the id off `ToolStart`, look
+    // for the escalation under it, then answer so the parked turn can finish.
+    let reader = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let agentos_kernel::ChatStreamEvent::ToolStart { task_id, .. } = ev else {
+                continue;
+            };
+            let streamed: agentos_types::TaskID = task_id
+                .expect("a chat tool call must stream the task id its approval is filed under")
+                .parse()
+                .expect("task_id must be a well-formed id");
+            // The gate raises the escalation just after the frame is sent.
+            for _ in 0..50 {
+                let found = escalations.for_task(&streamed).await;
+                if let Some(esc) = found.into_iter().find(|e| !e.resolved) {
+                    escalations.resolve(esc.id, "deny".to_string()).await;
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            return false;
+        }
+        false
+    });
+
+    let result = kernel
+        .chat_infer_streaming(
+            "chat-card-agent",
+            &[],
+            "Run a shell command.",
+            None,
+            tx,
+            None,
+        )
+        .await
+        .expect("chat_infer_streaming failed");
+
+    assert!(
+        reader.await.unwrap(),
+        "no pending escalation was filed under the task id `ToolStart` streamed — \
+         an inline approval card could never be matched to this turn"
+    );
+    assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
 
     kernel.shutdown();
     handle.await.unwrap();

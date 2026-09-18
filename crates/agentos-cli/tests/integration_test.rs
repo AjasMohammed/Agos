@@ -80,6 +80,7 @@ async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>
         system_prompt: None,
         manually_offline: false,
         working_set_size: None,
+        avatar: None,
     };
 
     {

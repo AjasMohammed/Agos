@@ -172,6 +172,7 @@ mod tests {
             system_prompt: None,
             manually_offline: false,
             working_set_size: None,
+            avatar: None,
         }
     }
 

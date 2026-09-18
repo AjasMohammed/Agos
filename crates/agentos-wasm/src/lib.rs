@@ -1,5 +1,8 @@
 //! AgentOS WASM tool execution engine.
 //!
+//! **Experimental.** Not enforced for all tools; API may change before v2 and is
+//! not covered by the v1 stability promise.
+//!
 //! This crate provides [`WasmToolExecutor`] which loads `.wasm` modules
 //! and exposes them as [`AgentTool`](agentos_tools::AgentTool) implementations,
 //! slotting them transparently into the existing `ToolRunner`.

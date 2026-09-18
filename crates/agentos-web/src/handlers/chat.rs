@@ -875,12 +875,15 @@ pub async fn send(
                 history.push(("user".to_string(), text));
             }
             "assistant" => {
+                // Stored non-answers are dropped; pending tool summaries still flush.
+                let content = (!agentos_kernel::is_unreplayable_assistant_turn(&m.content))
+                    .then_some(m.content);
                 flush_to_assistant(
                     &mut history,
                     &mut pending_tool_summaries,
                     &mut pending_tool_summaries_bytes,
                     &mut pending_meta_summary,
-                    Some(m.content),
+                    content,
                 );
             }
             _ => continue,

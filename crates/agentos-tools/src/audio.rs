@@ -82,6 +82,7 @@ impl AgentTool for AudioTool {
     ) -> Result<Value, AgentOSError> {
         let hal = context
             .hal
+            .clone()
             .ok_or_else(|| AgentOSError::ToolExecutionFailed {
                 tool_name: self.name().to_string(),
                 reason: "Hardware Abstraction Layer (HAL) not available in this context"
@@ -104,6 +105,17 @@ impl AgentTool for AudioTool {
         // (including an attempt to forge the reserved key itself).
         let mut payload = payload;
         if let Value::Object(map) = &mut payload {
+            // File tools hand out paths relative to the agent home
+            // (`file-glob` → `inbox/<id>/song.mp3`); the driver only takes
+            // absolute ones and writes wherever it is told.
+            crate::workspace::contain_hal_path(map, "audio_path", self.name(), &context, false)?;
+            crate::workspace::contain_hal_path(map, "output_path", self.name(), &context, true)?;
+            // Recordings with no `output_path` land in the agent home, not /tmp.
+            let capture_dir = crate::workspace::agent_capture_dir(self.name(), &context)?;
+            map.insert(
+                crate::workspace::HAL_OUTPUT_DIR_KEY.to_string(),
+                Value::String(capture_dir.to_string_lossy().into_owned()),
+            );
             map.remove("agent_id");
             map.remove("session_id");
             map.insert(

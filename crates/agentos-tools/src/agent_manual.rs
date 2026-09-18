@@ -466,7 +466,7 @@ impl ManualSection {
             "scratchpad" => Some("Persistent agent notebook with wikilinks and backlink graph for working memory."),
             "artifacts" => Some("Publish a document the user will look at — report, deck, dashboard. Returns a shareable url; sandboxed rendering, no external assets."),
             "channels" => Some("Discord/Slack/Telegram/Teams/Matrix outbound, DM pairing, and inbound slash-commands."),
-            "mcp" => Some("Attach external Model Context Protocol servers; their tools appear in your registry at runtime."),
+            "mcp" => Some("External Model Context Protocol servers the operator has granted you; their tools appear in your registry."),
             "hal" => Some("Hardware Abstraction Layer: process-manager, network-sockets, system-services, system-mounts, audio, display, USB, WiFi, etc. Use these for HOST inspection — shell-exec is sandboxed."),
             "plugins" => Some("Manifest-driven plugins (Discord, Slack, …). Enable/disable; trust tier governs signature checks."),
             "skills" => Some("Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} for its required tools, permissions, triggers, and budget."),
@@ -1151,7 +1151,7 @@ impl AgentManualTool {
                 {"name": "coordination", "description": "Multi-agent coordination: spawn sub-agents, await results, verify outputs, run teams"},
                 {"name": "scratchpad", "description": "Obsidian-style markdown scratchpad: pages, wikilinks, backlink graph"},
                 {"name": "channels", "description": channels_index_description(connected)},
-                {"name": "mcp", "description": "Attached MCP servers (inventory). Drill into one with {section: mcp, server: <name>} to see its tools."},
+                {"name": "mcp", "description": "MCP servers granted to you (inventory). Drill into one with {section: mcp, server: <name>} to see its tools."},
                 {"name": "hal", "description": "Hardware abstraction tools (live, this agent's available drivers)"},
                 {"name": "plugins", "description": "Tools contributed by enabled plugins (live)"},
                 {"name": "skills", "description": "Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} to see its required tools, permissions, triggers, and budget."},
@@ -2341,7 +2341,7 @@ impl AgentManualTool {
         if by_server.is_empty() {
             return Ok(serde_json::json!({
                 "section": "mcp",
-                "summary": "No MCP servers currently attached. The operator must attach one before MCP tools become callable.",
+                "summary": "No MCP servers are granted to you. The operator must attach one and grant it to you before its tools become callable.",
                 "servers": [],
                 "total_tools": 0,
             }));
@@ -2378,7 +2378,7 @@ impl AgentManualTool {
                     let known: Vec<&String> = by_server.keys().collect();
                     Ok(serde_json::json!({
                         "section": "mcp",
-                        "unavailable": format!("MCP server '{target}' not attached"),
+                        "unavailable": format!("MCP server '{target}' is not attached or not granted to you"),
                         "attached_servers": known,
                         "usage": "Call agent-manual {\"section\": \"mcp\"} for the server inventory, then drill in with {\"section\": \"mcp\", \"server\": \"<name>\"}."
                     }))
@@ -2399,7 +2399,7 @@ impl AgentManualTool {
 
         Ok(serde_json::json!({
             "section": "mcp",
-            "summary": "Attached MCP servers. To see a server's tools, call again with {\"section\": \"mcp\", \"server\": \"<name>\"}.",
+            "summary": "MCP servers granted to you. To see a server's tools, call again with {\"section\": \"mcp\", \"server\": \"<name>\"}.",
             "servers": servers,
             "total_tools": mcp_tools.len(),
         }))
@@ -2834,7 +2834,7 @@ impl AgentTool for AgentManualTool {
         //
         // Used by the two "what can I call" surfaces — `tools` (the catalogue,
         // mirroring `list-tools`) and `suggest` (ranked search, mirroring
-        // `search-tools`). The per-domain sections below (`mcp`, `hal`,
+        // `search-tools`) and `mcp`. The other per-domain sections below (`hal`,
         // `capabilities`, `scheduling`, …) deliberately stay UNFILTERED: they
         // are the map of what the install offers and therefore what the agent
         // can ask an operator to grant. Hiding a KMC or HAL tool there would
@@ -2928,7 +2928,9 @@ impl AgentTool for AgentManualTool {
             ManualSection::Channels => self.section_channels(channels_snapshot.as_deref()),
             ManualSection::Mcp => {
                 let server_filter = payload.get("server").and_then(|v| v.as_str());
-                Self::section_mcp(&summaries, server_filter)
+                // Filtered, unlike the other domain sections: MCP access is
+                // granted per server, so an agent lists only servers it holds.
+                Self::section_mcp(&visible, server_filter)
             }
             ManualSection::Hal => Self::section_hal(&summaries),
             ManualSection::Plugins => Self::section_plugins(&summaries),

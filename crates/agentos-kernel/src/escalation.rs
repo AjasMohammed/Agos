@@ -104,6 +104,10 @@ pub trait BroadcastSink: Send + Sync {
     async fn broadcast(&self, escalation: &PendingEscalation);
     fn name(&self) -> &'static str;
 
+    /// The escalation was decided (any surface, or expiry). Sinks that left
+    /// interactive controls behind retract them here. Default: ignore.
+    async fn resolved(&self, _escalation_id: u64) {}
+
     /// Late-bind the `NotificationRouter` so a sink can reach *both* outbound
     /// channel stacks (see `NotificationRouter::send_to_channel`). Sinks are
     /// constructed at kernel boot before every collaborator exists; this is
@@ -156,6 +160,12 @@ pub struct EscalationManager {
     /// escalation and the agent could never get through. Set at kernel boot;
     /// `None` in unit tests and in the CLI, where no HAL exists.
     hardware_registry: RwLock<Option<Arc<agentos_hal::HardwareRegistry>>>,
+    /// Driver-level capture consent for `webcam:` / `audio:` devices. An
+    /// approved `device_access` escalation is the same operator decision as
+    /// `agentos hal approve`, which opens this window; without it a channel
+    /// approval granted the device but every capture still failed with
+    /// `consent_required`. `None` in unit tests and the CLI.
+    capture_consent: RwLock<Option<Arc<agentos_hal::ConsentStore>>>,
     /// Lossy realtime fan-out for the control panel's WebSocket layer. Set at
     /// kernel boot; `None` in the CLI and in unit tests. Without it the panel
     /// only learns about a new (or resolved) escalation on its next poll, so an
@@ -243,6 +253,7 @@ impl EscalationManager {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         }
     }
@@ -251,6 +262,11 @@ impl EscalationManager {
     /// See [`Self::hardware_registry`].
     pub async fn set_hardware_registry(&self, registry: Arc<agentos_hal::HardwareRegistry>) {
         *self.hardware_registry.write().await = Some(registry);
+    }
+
+    /// Attach the capture consent store. See [`Self::capture_consent`].
+    pub async fn set_capture_consent(&self, store: Arc<agentos_hal::ConsentStore>) {
+        *self.capture_consent.write().await = Some(store);
     }
 
     /// Announce a new escalation on every registered `BroadcastSink`
@@ -284,6 +300,38 @@ impl EscalationManager {
                 }
             });
         }
+    }
+
+    /// Tell every sink these escalations are decided, off the caller's path:
+    /// retracting a Telegram button is an HTTP round-trip and the resolver
+    /// (an API request, the sweeper) must not wait on it.
+    async fn notify_sinks_resolved(&self, ids: Vec<u64>) {
+        if ids.is_empty() {
+            return;
+        }
+        let sinks = self.broadcast_sinks.read().await.clone();
+        if sinks.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            // Same per-sink bound as `fan_out_to_sinks`: a hung sink must not
+            // leak this detached task.
+            const SINK_RESOLVED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            for sink in sinks {
+                for id in &ids {
+                    if tokio::time::timeout(SINK_RESOLVED_TIMEOUT, sink.resolved(*id))
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            sink = sink.name(),
+                            escalation_id = id,
+                            "BroadcastSink::resolved timed out"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     /// Deliver `outcome` to whoever is parked on `escalation_id` and drop the
@@ -793,6 +841,7 @@ impl EscalationManager {
             // surface (channel DM, CLI) must not leave a live Approve button
             // on another.
             self.emit_realtime("escalation.resolved", Some(id));
+            self.notify_sinks_resolved(vec![id]).await;
         }
 
         result
@@ -819,6 +868,7 @@ impl EscalationManager {
             }
         }
         let count = to_persist.len();
+        let ids: Vec<u64> = to_persist.iter().map(|e| e.id).collect();
         let outcome = if resolution_is_approval(resolution) {
             ResolutionOutcome::Approved
         } else {
@@ -846,6 +896,7 @@ impl EscalationManager {
             // subscribers refetch the whole list regardless.
             self.emit_realtime("escalation.resolved", None);
         }
+        self.notify_sinks_resolved(ids).await;
         count
     }
 
@@ -951,6 +1002,8 @@ impl EscalationManager {
             // each cancelling the refetch the last one started.
             self.emit_realtime("escalation.expired", None);
         }
+        self.notify_sinks_resolved(expired.iter().map(|e| e.0).collect())
+            .await;
 
         expired
     }
@@ -1066,11 +1119,21 @@ impl EscalationManager {
             task_id,
             agent_id,
             reason: EscalationReason::AuthorizationRequired,
+            // Labelled like `ApprovalHook`'s block so `EscalationCard` renders
+            // the same fields instead of a bare sentence.
             context_summary: format!(
-                "Agent requested access to hardware device '{}' for '{}' operation.",
-                device_id, operation
+                "What: hardware device access — '{operation}' operation\n\
+                 Where: {device_id}\n\
+                 Approving grants this agent the device.",
             ),
-            decision_point: format!("Approve HAL access to device '{}'", device_id),
+            decision_point: format!(
+                "Approve HAL access to device '{device_id}'{}",
+                if device_id.starts_with("webcam:") || device_id.starts_with("audio:") {
+                    " — also opens capture consent for 1 hour"
+                } else {
+                    ""
+                }
+            ),
             options: vec!["approve".to_string(), "deny".to_string()],
             urgency: "normal".to_string(),
             blocking: true,
@@ -1196,6 +1259,30 @@ impl EscalationManager {
         };
         match registry.approve_for_agent(device_id, escalation.agent_id) {
             Ok(()) => {
+                let mut consent_granted = false;
+                if device_id.starts_with("webcam:") || device_id.starts_with("audio:") {
+                    if let Some(consent) = self.capture_consent.read().await.clone() {
+                        consent.grant(
+                            &escalation.agent_id.to_string(),
+                            device_id,
+                            crate::commands::hal::OPERATOR_CAPTURE_CONSENT_TTL,
+                        );
+                        consent_granted = true;
+                    }
+                }
+                // Same row `agentos hal approve` writes, so a camera/mic
+                // window opened from a channel card is in the device trail.
+                self.audit(Self::audit_entry(
+                    AuditEventType::DeviceApproved,
+                    escalation,
+                    serde_json::json!({
+                        "device_id": device_id,
+                        "escalation_id": escalation.id,
+                        "approved_by": "escalation",
+                        "capture_consent_granted": consent_granted,
+                    }),
+                ))
+                .await;
                 tracing::info!(
                     escalation_id = escalation.id,
                     device_id = %device_id,
@@ -1257,6 +1344,7 @@ impl EscalationManager {
         drop(escalations);
 
         let count = updated.len();
+        let ids: Vec<u64> = updated.iter().map(|e| e.id).collect();
         let outcome = if approved {
             ResolutionOutcome::Approved
         } else {
@@ -1280,6 +1368,7 @@ impl EscalationManager {
             // operator already made.
             self.emit_realtime("escalation.resolved", None);
         }
+        self.notify_sinks_resolved(ids).await;
 
         count
     }
@@ -1394,6 +1483,81 @@ mod tests {
         let resolved = rx.try_recv().expect("resolve should broadcast");
         assert_eq!(resolved.event, "escalation.resolved");
         assert_eq!(resolved.data["escalation_id"], id);
+    }
+
+    /// A decision made on the panel must reach the sinks, or the Telegram
+    /// prompt keeps live Approve/Deny buttons for a closed escalation.
+    #[tokio::test]
+    async fn resolve_notifies_sinks_so_channel_buttons_are_retracted() {
+        struct ResolvedSink(tokio::sync::mpsc::UnboundedSender<u64>);
+        #[async_trait::async_trait]
+        impl BroadcastSink for ResolvedSink {
+            async fn broadcast(&self, _: &PendingEscalation) {}
+            fn name(&self) -> &'static str {
+                "test-resolved"
+            }
+            async fn resolved(&self, id: u64) {
+                let _ = self.0.send(id);
+            }
+        }
+
+        let manager = EscalationManager::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.add_sink(Arc::new(ResolvedSink(tx))).await;
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "ctx".into(),
+                "decide".into(),
+                vec!["approve".into()],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        manager.resolve(id, "approve".to_string()).await;
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("sink should hear the resolution");
+        assert_eq!(got, Some(id));
+        // Already resolved: a second decision must not retract again.
+        manager.resolve(id, "deny".to_string()).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+
+        // Expiry is a resolution too.
+        let manager = EscalationManager {
+            timeout_secs: 0,
+            ..EscalationManager::new()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.add_sink(Arc::new(ResolvedSink(tx))).await;
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "ctx".into(),
+                "decide".into(),
+                vec!["approve".into()],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        manager.sweep_expired().await;
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("sweep should notify");
+        assert_eq!(got, Some(id));
     }
 
     #[tokio::test]
@@ -1528,6 +1692,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };
         let id = manager
@@ -1781,6 +1946,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };
 
@@ -1830,6 +1996,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };
 

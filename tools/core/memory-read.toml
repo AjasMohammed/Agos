@@ -29,11 +29,11 @@ description = "Memory tier to read from"
 
 [payload_schema.properties.key]
 type = "string"
-description = "Semantic memory key (required when scope=semantic)"
+description = "Semantic memory key (scope=semantic; alternative to id)"
 
 [payload_schema.properties.id]
-type = "integer"
-description = "Episodic entry ID (required when scope=episodic)"
+type = ["integer", "string"]
+description = "Entry ID: the UUID string returned by memory-write/memory-search (scope=semantic), or the integer episodic entry ID (scope=episodic)"
 
 
 [sandbox]

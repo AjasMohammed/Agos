@@ -5,10 +5,12 @@
 //! per-agent isolation.
 //!
 //! Workspaces are scoped per-agent at `{data_dir}/workspaces/{workspace_name}/`.
-//! Package installation runs inside bwrap (when available) with network enabled
-//! only for the install duration.
+//! Venv creation and package installation run in a bwrap [`Sandbox`] that sees
+//! only the workspace (writable) and system dirs (read-only), with a cleared
+//! environment; installs get network, creation does not. No bwrap, no install.
 
 use crate::capability_provider::{CapabilityContext, CapabilityProvider, CapabilityResult};
+use agentos_tools::sandbox_fs::Sandbox;
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -213,51 +215,99 @@ pub trait WorkspaceResolver: Send + Sync {
     async fn resolve(&self, agent_id: agentos_types::AgentID, name: &str) -> Option<WorkspaceInfo>;
 }
 
-/// Build the env-var set a child process needs to see the workspace's
-/// installed packages.
-///
-/// The returned vector is intended for `Command::env_clear()` followed by
-/// `Command::env()` for each pair — we deliberately avoid inheriting the
-/// kernel's environment to keep secrets out of agent-spawned processes.
-///
-/// `PATH` order: `{ws}/venv/bin` → `{ws}/node_modules/.bin` → `{ws}/bin` →
-/// system PATH. Components that don't exist on disk are skipped so a Rust
+/// `{data_dir}/workspaces/{agent_id}/` — every managed workspace of one agent.
+pub fn agent_workspaces_root(data_dir: &Path, agent_id: &agentos_types::AgentID) -> PathBuf {
+    data_dir.join("workspaces").join(agent_id.to_string())
+}
+
+/// Workspace-local bin dirs that exist, in lookup order: `{ws}/venv/bin` →
+/// `{ws}/node_modules/.bin` → `{ws}/bin`. Missing ones are skipped so a Rust
 /// workspace doesn't get a phantom `venv/bin` entry.
+pub fn workspace_bin_dirs(ws: &WorkspaceInfo) -> Vec<PathBuf> {
+    [
+        ws.root.join("venv").join("bin"),
+        ws.root.join("node_modules").join(".bin"),
+        ws.root.join("bin"),
+    ]
+    .into_iter()
+    .filter(|d| d.is_dir())
+    .collect()
+}
+
+/// Env vars (besides `PATH`) a child needs to see the workspace's packages.
+/// Only ever applied inside a [`Sandbox`], which starts from a cleared
+/// environment — the kernel's own holds every provider API key.
 pub fn activated_env(ws: &WorkspaceInfo) -> Vec<(String, String)> {
-    let venv_bin = ws.root.join("venv").join("bin");
-    let node_bin = ws.root.join("node_modules").join(".bin");
-    let cargo_bin = ws.root.join("bin");
-
-    let mut path_parts: Vec<String> = Vec::new();
-    if venv_bin.is_dir() {
-        path_parts.push(venv_bin.to_string_lossy().into_owned());
-    }
-    if node_bin.is_dir() {
-        path_parts.push(node_bin.to_string_lossy().into_owned());
-    }
-    if cargo_bin.is_dir() {
-        path_parts.push(cargo_bin.to_string_lossy().into_owned());
-    }
-    let system_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-    path_parts.push(system_path);
-
     let mut env = vec![
-        ("PATH".to_string(), path_parts.join(":")),
+        // Package-manager caches (`~/.cache/pip`, `~/.npm`, `~/.cargo`) land
+        // in the workspace, the only writable place that persists.
         ("HOME".to_string(), ws.root.to_string_lossy().into_owned()),
-        // Locale defaults so subprocesses don't fail on UTF-8 stdout.
-        ("LANG".to_string(), "C.UTF-8".to_string()),
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
     ];
-
     if matches!(ws.ecosystem, Ecosystem::Python) {
         env.push((
             "VIRTUAL_ENV".to_string(),
             ws.root.join("venv").to_string_lossy().into_owned(),
         ));
-        // Strip PYTHONHOME so the venv interpreter resolves correctly.
-        env.push(("PYTHONHOME".to_string(), String::new()));
     }
     env
+}
+
+/// Run inside `ws`: its bins first on `PATH`, its env set.
+///
+/// SECURITY: does not bind `ws.root`. The caller binds the agent's
+/// [`agent_workspaces_root`] instead — a bind of `ws.root` itself would sit
+/// under that writable directory, where a sandboxed command can swap it for a
+/// symlink that bwrap then resolves on the host.
+pub fn activate(mut sandbox: Sandbox, ws: &WorkspaceInfo) -> Result<Sandbox, AgentOSError> {
+    if ws.ecosystem == Ecosystem::Python && !venv_usable_in_sandbox(&ws.root) {
+        return Err(AgentOSError::KernelError {
+            reason: "this Python workspace's venv cannot run in the sandbox (a stub, or created \
+                     for a host interpreter under /home before sandboxing); recreate it with \
+                     env-destroy + env-create"
+                .into(),
+        });
+    }
+    for dir in workspace_bin_dirs(ws) {
+        sandbox = sandbox.path_prepend(dir);
+    }
+    for (k, v) in activated_env(ws) {
+        sandbox = sandbox.env(k, v);
+    }
+    Ok(sandbox)
+}
+
+/// Whether `venv/bin/python` resolves to an interpreter the sandbox can see.
+fn venv_usable_in_sandbox(root: &Path) -> bool {
+    std::fs::canonicalize(root.join("venv").join("bin").join("python")).is_ok_and(|p| {
+        ["/usr", "/bin", "/lib", "/lib64", "/sbin"]
+            .iter()
+            .any(|d| p.starts_with(d))
+    })
+}
+
+/// `create_dir` that accepts an existing real directory but never follows or
+/// accepts a symlink — workspace dirs sit in agent-writable space, and
+/// `create_dir_all` through a planted link would create folders anywhere the
+/// kernel user can write.
+fn ensure_real_dir(path: &Path) -> Result<(), AgentOSError> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match std::fs::symlink_metadata(path) {
+                Ok(m) if m.is_dir() => Ok(()),
+                _ => Err(AgentOSError::KernelError {
+                    reason: format!(
+                        "workspace path '{}' exists and is not a plain directory",
+                        path.display()
+                    ),
+                }),
+            }
+        }
+        Err(e) => Err(AgentOSError::KernelError {
+            reason: format!("failed to create '{}': {e}", path.display()),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -446,10 +496,31 @@ impl EnvProvider {
         agent_id: &agentos_types::AgentID,
         workspace_name: &str,
     ) -> PathBuf {
-        data_dir
-            .join("workspaces")
-            .join(agent_id.to_string())
-            .join(workspace_name)
+        agent_workspaces_root(data_dir, agent_id).join(workspace_name)
+    }
+
+    /// `python3 -m venv {root}/venv` in a network-less sandbox that binds the
+    /// agent's workspaces `scope` (see [`activate`] for why not `root`).
+    async fn create_venv(scope: &Path, root: &Path) -> Result<(), String> {
+        let mut cmd = Sandbox::new("env-create")
+            .bind_rw(scope)
+            .env("HOME", root)
+            .command(root, "python3")
+            .await
+            .map_err(|e| e.to_string())?;
+        cmd.args(["-m", "venv"]).arg(root.join("venv"));
+        let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
+            .await
+            .map_err(|_| "python3 -m venv timed out".to_string())?
+            .map_err(|e| format!("failed to run python3: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(200)
+                .collect())
+        }
     }
 
     /// Check whether a package is allowed by policy.
@@ -531,70 +602,49 @@ impl EnvProvider {
         // installs on other workspaces aren't blocked.
         let root_clone = root_path.clone();
         let eco = ecosystem;
-        let stub_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stub_flag_for_blocking = stub_flag.clone();
+        let scope = agent_workspaces_root(&context.data_dir, &context.agent_id);
+        let scope_clone = scope.clone();
         tokio::task::spawn_blocking(move || -> Result<(), AgentOSError> {
-            std::fs::create_dir_all(&root_clone).map_err(|e| AgentOSError::KernelError {
+            // Up to `data_dir/workspaces/<agent_id>` nothing is writable from a
+            // sandbox, so `create_dir_all` is safe; below it the agent can
+            // plant symlinks.
+            std::fs::create_dir_all(&scope_clone).map_err(|e| AgentOSError::KernelError {
                 reason: format!("failed to create workspace directory: {e}"),
             })?;
-
-            match eco {
-                Ecosystem::Python => {
-                    let venv_dir = root_clone.join("venv");
-                    let output = std::process::Command::new("python3")
-                        .args(["-m", "venv", &venv_dir.to_string_lossy()])
-                        .output();
-
-                    match output {
-                        Ok(out) if out.status.success() => {}
-                        Ok(out) => {
-                            tracing::warn!(
-                                "python3 -m venv failed ({}), creating stub structure; env-install will fail until python3 is available",
-                                String::from_utf8_lossy(&out.stderr)
-                                    .chars()
-                                    .take(200)
-                                    .collect::<String>()
-                            );
-                            std::fs::create_dir_all(venv_dir.join("bin")).ok();
-                            std::fs::create_dir_all(venv_dir.join("lib")).ok();
-                            stub_flag_for_blocking
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "python3 not found ({e}), creating stub venv structure; env-install will fail until python3 is available"
-                            );
-                            std::fs::create_dir_all(venv_dir.join("bin")).ok();
-                            std::fs::create_dir_all(venv_dir.join("lib")).ok();
-                            stub_flag_for_blocking
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-                Ecosystem::NodeJs => {
-                    std::fs::create_dir_all(root_clone.join("node_modules")).map_err(|e| {
-                        AgentOSError::KernelError {
-                            reason: format!("failed to create node_modules: {e}"),
-                        }
-                    })?;
-                }
-                Ecosystem::Rust => {
-                    std::fs::create_dir_all(root_clone.join("target")).map_err(|e| {
-                        AgentOSError::KernelError {
-                            reason: format!("failed to create target dir: {e}"),
-                        }
-                    })?;
-                }
-                Ecosystem::System | Ecosystem::Generic => {}
+            ensure_real_dir(&root_clone)?;
+            let subdir = match eco {
+                Ecosystem::NodeJs => Some("node_modules"),
+                Ecosystem::Rust => Some("target"),
+                Ecosystem::Python | Ecosystem::System | Ecosystem::Generic => None,
+            };
+            if let Some(sub) = subdir {
+                ensure_real_dir(&root_clone.join(sub))?;
             }
-
             Ok(())
         })
         .await
         .map_err(|e| AgentOSError::KernelError {
             reason: format!("workspace creation task panicked: {e}"),
         })??;
-        let python_venv_stub = stub_flag.load(std::sync::atomic::Ordering::Relaxed);
+
+        // The venv is built by the sandbox's own `python3`, so its interpreter
+        // symlink resolves inside later sandboxes (a host pyenv/conda python
+        // under /home would dangle there).
+        let python_venv_stub = ecosystem == Ecosystem::Python
+            && match Self::create_venv(&scope, &root_path).await {
+                Ok(()) => false,
+                Err(reason) => {
+                    tracing::warn!(
+                        workspace = %name,
+                        "python venv not created ({reason}); creating stub structure, env-install will fail until it can be"
+                    );
+                    let venv_dir = root_path.join("venv");
+                    for dir in [venv_dir.clone(), venv_dir.join("bin"), venv_dir.join("lib")] {
+                        ensure_real_dir(&dir).ok();
+                    }
+                    true
+                }
+            };
 
         let workspace = ManagedWorkspace {
             name: name.to_string(),
@@ -634,7 +684,7 @@ impl EnvProvider {
         });
         if python_venv_stub {
             output["warnings"] = json!([
-                "python3 unavailable: venv is a stub; env-install will fail until python3 is installed (try host-package-install for python3-venv)"
+                "python venv could not be created in the sandbox (python3/python3-venv missing, or bwrap unusable): venv is a stub and env-install will fail; see the kernel log (host-package-install can add python3-venv)"
             ]);
         }
         Ok(CapabilityResult {
@@ -743,26 +793,38 @@ impl EnvProvider {
             }
         };
 
-        // Execute install command with timeout — use Command::new to avoid shell injection.
+        // SECURITY: install scripts (setup.py, npm lifecycle scripts, build.rs)
+        // are arbitrary code. They run sandboxed: the workspace is the only
+        // writable path, kernel state and the operator's home do not exist,
+        // and the environment is cleared. Network is on — installing needs it,
+        // and `env.install` already requires `net.outbound:x`.
+        // Argv, never `sh -c`, so a package name cannot inject.
+        let ws = WorkspaceInfo {
+            root: ws_path.clone(),
+            ecosystem,
+        };
+        let sandbox = Sandbox::new("env-install")
+            .bind_rw(agent_workspaces_root(&context.data_dir, &context.agent_id))
+            .network(true);
+        // `activate` would refuse a Python workspace whose venv cannot run
+        // here; pip is invoked by path, so check it the same way.
+        let sandbox = activate(sandbox, &ws)?;
+        let mut cmd = sandbox.command(&ws_path, &program).await?;
+        cmd.args(&args);
         let timeout = std::time::Duration::from_secs(self.config.install_timeout_secs);
-        let output = tokio::time::timeout(timeout, async {
-            tokio::process::Command::new(&program)
-                .args(&args)
-                .output()
-                .await
-        })
-        .await
-        .map_err(|_| AgentOSError::ToolExecutionFailed {
-            tool_name: "env-install".into(),
-            reason: format!(
-                "package installation timed out after {}s",
-                self.config.install_timeout_secs
-            ),
-        })?
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "env-install".into(),
-            reason: format!("failed to execute install command: {e}"),
-        })?;
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| AgentOSError::ToolExecutionFailed {
+                tool_name: "env-install".into(),
+                reason: format!(
+                    "package installation timed out after {}s",
+                    self.config.install_timeout_secs
+                ),
+            })?
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                tool_name: "env-install".into(),
+                reason: format!("failed to execute install command: {e}"),
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1091,6 +1153,8 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             permissions: agentos_types::PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: data_dir.join("agents").join("test"),
+            workspace_paths_executable: vec![],
         }
     }
 
@@ -1220,6 +1284,8 @@ mod tests {
             data_dir: tmp.path().to_path_buf(),
             permissions: agentos_types::PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: tmp.path().join("agents").join("test"),
+            workspace_paths_executable: vec![],
         };
 
         // First provider — create a generic workspace via the action.
@@ -1596,5 +1662,131 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("elevated policy"));
+    }
+
+    /// A sandboxed command can replace a workspace dir with a symlink. bwrap
+    /// resolves bind sources on the host, so binding that path would mount
+    /// the link target — here the kernel data dir — into the next sandbox.
+    #[tokio::test]
+    async fn swapped_workspace_symlink_does_not_expose_host_paths() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("vault.db"), "SECRET").unwrap();
+        let provider = Arc::new(make_provider());
+        let ctx = make_context(tmp.path());
+        std::fs::create_dir_all(&ctx.agent_home).unwrap();
+        let scope = agent_workspaces_root(tmp.path(), &ctx.agent_id);
+
+        // env-create never creates through a planted link.
+        let elsewhere = TempDir::new().unwrap();
+        std::fs::create_dir_all(&scope).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), scope.join("planted")).unwrap();
+        let err = provider
+            .execute(
+                "create",
+                json!({"name": "planted", "ecosystem": "nodejs"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not a plain directory"), "{err}");
+        assert!(!elsewhere.path().join("node_modules").exists());
+
+        provider
+            .execute("create", json!({"name": "w"}), &ctx)
+            .await
+            .unwrap();
+        if !agentos_tools::sandbox_fs::bwrap_usable().await {
+            eprintln!("skipping sandbox half: bwrap cannot sandbox on this host");
+            return;
+        }
+        // What a proc-spawn'd `sh` in the agent's scope can do.
+        std::fs::remove_dir(scope.join("w")).unwrap();
+        std::os::unix::fs::symlink("../..", scope.join("w")).unwrap();
+        assert!(scope.join("w").join("vault.db").exists(), "fixture");
+
+        let build = crate::managed_build::BuildProvider::with_resolver(
+            crate::managed_build::BuildConfig {
+                allowed_commands: vec![],
+                ..Default::default()
+            },
+            provider.clone(),
+        );
+        // Positive control: the same command does read files in scope.
+        std::fs::write(ctx.agent_home.join("probe"), "VISIBLE").unwrap();
+        for (path, visible) in [
+            (ctx.agent_home.join("probe"), true),
+            (tmp.path().join("vault.db"), false),
+            (scope.join("w").join("vault.db"), false),
+        ] {
+            let out = build
+                .execute(
+                    "run",
+                    json!({"workspace": "w", "command": format!("python3 -c print(open('{}').read())", path.display()),
+                           "working_dir": ctx.agent_home.display().to_string()}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            let text = out.output["output"].as_str().unwrap();
+            let expected = if visible { "VISIBLE" } else { "SECRET" };
+            assert_eq!(
+                text.contains(expected),
+                visible,
+                "{}: {text}",
+                path.display()
+            );
+        }
+    }
+
+    /// Real installs through the sandbox, then use from `build-run`. Needs
+    /// network, bwrap, python3-venv and npm: `cargo test -p agentos-kernel
+    /// --lib sandboxed_install -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: installs real packages"]
+    async fn sandboxed_install_is_usable_from_build_run() {
+        let tmp = TempDir::new().unwrap();
+        let config = EnvConfig {
+            python_policy: "open".into(),
+            nodejs_policy: "open".into(),
+            ..EnvConfig::default()
+        };
+        let provider = Arc::new(EnvProvider::new(config, HashMap::new()));
+        let mut ctx = make_context(tmp.path());
+        std::fs::create_dir_all(&ctx.agent_home).unwrap();
+        ctx.permissions
+            .grant_op("net.outbound".into(), PermissionOp::Execute, None);
+
+        for (ws, eco, pkg) in [("py", "python", "six"), ("js", "nodejs", "is-number")] {
+            let created = provider
+                .execute("create", json!({"name": ws, "ecosystem": eco}), &ctx)
+                .await
+                .unwrap();
+            assert!(created.output.get("warnings").is_none(), "{created:?}");
+            provider
+                .execute("install", json!({"workspace": ws, "package": pkg}), &ctx)
+                .await
+                .unwrap();
+        }
+        // The venv interpreter must resolve inside later sandboxes.
+        let python = std::fs::canonicalize(
+            agent_workspaces_root(tmp.path(), &ctx.agent_id).join("py/venv/bin/python"),
+        )
+        .unwrap();
+        assert!(!python.starts_with("/home"), "{}", python.display());
+
+        let build = crate::managed_build::BuildProvider::with_resolver(
+            Default::default(),
+            provider.clone(),
+        );
+        for (ws, cmd) in [
+            ("py", "python -c __import__(\"six\")"),
+            ("js", "node -e require(\"is-number\")"),
+        ] {
+            let out = build
+                .execute("run", json!({"workspace": ws, "command": cmd}), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(out.output["exit_code"], 0, "{ws}: {}", out.output["output"]);
+        }
     }
 }

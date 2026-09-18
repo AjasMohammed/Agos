@@ -180,6 +180,7 @@ pub async fn update_settings(
             system_prompt: Some(system_prompt.unwrap_or_default()),
             // ponytail: HTML form has no working-set control; REST/panel only.
             working_set_size: None,
+            avatar: None,
         })
         .await
     {

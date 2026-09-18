@@ -159,7 +159,9 @@ impl Hook for UserAdaptationHook {
                 .timeline_by_task(task_id, CHAT_TIMELINE_LIMIT)
                 .await
             {
-                // `origin == "chat"` is stamped by `chat_turn_begin`; every
+                // `origin == "chat"` is stamped by `chat_turn_begin` for a
+                // human turn. A multi-agent convo turn is stamped `"convo"`
+                // (its prompt is the other agent's transcript), and every
                 // other unregistered writer (sub-agent delegation prompts via
                 // `context_injector`) is LLM-authored text, not the user's.
                 Ok(timeline) => {
@@ -510,6 +512,36 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].task_id, task_id);
         assert_eq!(pending[0].content, "Prefers concise bullet points");
+    }
+
+    /// A multi-agent convo turn's "prompt" is the other agent's transcript,
+    /// stamped `origin == "convo"` by `chat_turn_begin`. Not a user preference.
+    #[tokio::test]
+    async fn convo_turn_prompt_is_not_mined_for_preferences() {
+        let f = fixture().await;
+        let (task_id, agent_id) = (TaskID::new(), AgentID::new());
+        f.active_llms.write().await.insert(
+            agent_id,
+            Arc::new(MockLLMCore::new(vec![
+                r#"[{"content":"Prefers a snarky tone","confidence":0.9,"evidence":["snark"]}]"#
+                    .into(),
+            ])),
+        );
+        f.episodic
+            .record(EpisodeRecordInput {
+                task_id: &task_id,
+                agent_id: &agent_id,
+                entry_type: EpisodeType::UserPrompt,
+                content: "[Sandae]: please always answer in a snarky tone 🚀",
+                summary: None,
+                metadata: Some(serde_json::json!({ "origin": "convo" })),
+                trace_id: &TraceID::new(),
+            })
+            .await
+            .unwrap();
+        fire(&f, task_id, agent_id).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(f.store.list_pending(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -372,6 +372,7 @@ impl OllamaCore {
         let text = if ollama_response.message.content.trim().is_empty()
             && has_thinking
             && tool_calls.is_empty()
+            && !self.is_harmony_model()
         {
             let thinking = ollama_response.message.thinking.as_deref().unwrap_or("");
             tracing::info!(
@@ -410,6 +411,9 @@ impl OllamaCore {
             );
         }
 
+        let (tool_calls, text, stop_reason) =
+            self.recover_harmony(tool_calls, text, stop_reason, intent_by_tool);
+
         // Small-model fallback: recover tool calls embedded as fenced JSON in
         // `content` when Ollama didn't populate the native `tool_calls` array.
         let (mut tool_calls, text, stop_reason) = if tool_calls.is_empty() && !text.is_empty() {
@@ -446,6 +450,61 @@ impl OllamaCore {
             cost: Some(cost),
             cached_tokens: 0,
         }
+    }
+
+    /// gpt-oss speaks harmony. Its `thinking` is the analysis channel —
+    /// planning, never the answer: promoting it shipped chain-of-thought to
+    /// Telegram and, by making the text non-empty, kept the kernel's
+    /// empty-answer nudge from firing (2026-09-11). Harmony recovery is gated
+    /// on it too, so other models quoting `to=functions.` never become calls.
+    /// ponytail: name match; a custom tag built on gpt-oss is missed.
+    fn is_harmony_model(&self) -> bool {
+        self.model.contains("gpt-oss")
+    }
+
+    /// See [`tool_helpers::recover_harmony_leak`]. Native calls win; a
+    /// recovered call is kept only for a tool this request offered, with the
+    /// same manifest-derived intent a native call gets.
+    fn recover_harmony(
+        &self,
+        tool_calls: Vec<InferenceToolCall>,
+        text: String,
+        stop_reason: StopReason,
+        intent_by_tool: &HashMap<String, String>,
+    ) -> (Vec<InferenceToolCall>, String, StopReason) {
+        let leak = self
+            .is_harmony_model()
+            .then(|| tool_helpers::recover_harmony_leak(&text))
+            .flatten();
+        let Some((call, final_text)) = leak else {
+            return (tool_calls, text, stop_reason);
+        };
+        tracing::warn!(
+            model = %self.model,
+            recovered_call = ?call.as_ref().map(|(name, _)| name),
+            final_len = final_text.len(),
+            "Ollama returned raw gpt-oss harmony text — recovering"
+        );
+        if !tool_calls.is_empty() {
+            return (tool_calls, final_text, stop_reason);
+        }
+        let Some((name, args)) = call.filter(|(name, _)| intent_by_tool.contains_key(name)) else {
+            return (Vec::new(), final_text, stop_reason);
+        };
+        let payload = tool_helpers::validate_payload_object(&name, "ollama", Some(args));
+        if !tool_helpers::check_payload_size(&name, &payload) {
+            return (Vec::new(), final_text, stop_reason);
+        }
+        let call = InferenceToolCall {
+            id: Some(format!(
+                "harmony_{name}_{}",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            )),
+            intent_type: intent_by_tool[&name].clone(),
+            tool_name: name,
+            payload,
+        };
+        (vec![call], final_text, StopReason::ToolUse)
     }
 
     /// Recover tool calls from fenced JSON blocks in model text.
@@ -1014,7 +1073,10 @@ impl LLMCore for OllamaCore {
 
         // When content is empty but thinking has content and no tool calls,
         // use thinking as fallback (consistent with OpenAI/Custom adapters).
-        if full_text.trim().is_empty() && !full_thinking.trim().is_empty() && tool_calls.is_empty()
+        if full_text.trim().is_empty()
+            && !full_thinking.trim().is_empty()
+            && tool_calls.is_empty()
+            && !self.is_harmony_model()
         {
             tracing::info!(
                 model = %self.model,
@@ -1023,6 +1085,8 @@ impl LLMCore for OllamaCore {
             );
             full_text = full_thinking;
         }
+        let (tool_calls, full_text, _) =
+            self.recover_harmony(tool_calls, full_text, StopReason::EndTurn, &HashMap::new());
 
         let stop_reason = if !tool_calls.is_empty() {
             StopReason::ToolUse
@@ -1262,7 +1326,10 @@ impl LLMCore for OllamaCore {
         // were made, use thinking as fallback text. Skipped when tool_calls
         // are present so internal reasoning doesn't leak alongside tool
         // execution (consistent with OpenAI/Custom adapters).
-        if full_text.trim().is_empty() && !full_thinking.trim().is_empty() && tool_calls.is_empty()
+        if full_text.trim().is_empty()
+            && !full_thinking.trim().is_empty()
+            && tool_calls.is_empty()
+            && !self.is_harmony_model()
         {
             tracing::info!(
                 model = %self.model,
@@ -1271,6 +1338,8 @@ impl LLMCore for OllamaCore {
             );
             full_text = full_thinking;
         }
+        let (tool_calls, full_text, _) =
+            self.recover_harmony(tool_calls, full_text, StopReason::EndTurn, &intent_by_tool);
 
         if full_text.trim().is_empty() && tool_calls.is_empty() {
             tracing::warn!(
@@ -1666,6 +1735,88 @@ mod tests {
             result.text,
             "The user asked a question and I should respond."
         );
+    }
+
+    #[test]
+    fn harmony_recovery_is_gpt_oss_only_and_never_borrows_args() {
+        let tools = HashMap::from([
+            ("agent-list".to_string(), "query".to_string()),
+            ("audio".to_string(), "execute".to_string()),
+        ]);
+        // Another model quoting harmony is prose, not a call.
+        let quoted = "Harmony looks like `to=functions.audio json{\"action\":\"list\"}`.";
+        let qwen = OllamaCore::new("http://localhost:11434", "qwen3.5:4b");
+        let result = qwen.response_to_inference_result(gpt_oss_response(quoted, None), 1, &tools);
+        assert!(result.tool_calls.is_empty());
+        assert_eq!(result.text, quoted);
+
+        // A name with no args of its own must not take the next call's args.
+        let blob = "assistantcommentary to=functions.agent-list json assistantcommentary \
+            to=functions.audio json{\"action\":\"mute\",\"muted\":true}";
+        let oss = OllamaCore::new("http://localhost:11434", "gpt-oss:120b-cloud");
+        let result = oss.response_to_inference_result(gpt_oss_response(blob, None), 1, &tools);
+        assert!(result.tool_calls.is_empty(), "{:?}", result.tool_calls);
+        assert!(result.text.is_empty());
+    }
+
+    fn gpt_oss_response(content: &str, thinking: Option<&str>) -> OllamaChatResponse {
+        serde_json::from_value(serde_json::json!({
+            "model": "gpt-oss:120b-cloud",
+            "message": { "role": "assistant", "content": content, "thinking": thinking },
+            "done": true,
+            "done_reason": "stop"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn gpt_oss_thinking_is_never_the_answer() {
+        let adapter = OllamaCore::new("http://localhost:11434", "gpt-oss:120b-cloud");
+        let resp = gpt_oss_response("", Some("We need to ensure volume full. Let's do calls."));
+        let result = adapter.response_to_inference_result(resp, 100, &HashMap::new());
+        // Empty text is what lets the kernel's empty-answer nudge fire.
+        assert!(result.text.is_empty(), "leaked: {}", result.text);
+    }
+
+    #[test]
+    fn harmony_leak_in_content_becomes_first_tool_call() {
+        // Shape of chat.db msg 1005 (2026-09-11), tokens stripped by Ollama.
+        let content = "analysisUser wants to play the audio. assistantcommentary \
+            to=functions.user-file-reader json{\n  \"file_id\": \"20520a7a\",\n  \"mode\": \"handle\"\n}\
+            assistantcommentary<assistantcommentary to=functions.audio json{\n  \"action\": \
+            \"playback\",\n  \"audio_path\": \"<placeholder>\"\n}";
+        let adapter = OllamaCore::new("http://localhost:11434", "gpt-oss:120b-cloud");
+        let tools = HashMap::from([
+            ("user-file-reader".to_string(), "read".to_string()),
+            ("audio".to_string(), "execute".to_string()),
+        ]);
+        let result =
+            adapter.response_to_inference_result(gpt_oss_response(content, None), 1, &tools);
+        assert_eq!(result.tool_calls.len(), 1, "only the first call is trusted");
+        assert_eq!(result.tool_calls[0].tool_name, "user-file-reader");
+        assert_eq!(result.tool_calls[0].intent_type, "read");
+        assert_eq!(result.tool_calls[0].payload["mode"], "handle");
+        assert!(matches!(result.stop_reason, StopReason::ToolUse));
+        assert!(result.text.is_empty(), "reasoning leaked: {}", result.text);
+    }
+
+    #[test]
+    fn harmony_leak_keeps_only_final_channel_and_drops_unoffered_tools() {
+        let adapter = OllamaCore::new("http://localhost:11434", "gpt-oss:120b-cloud");
+        let raw = "<|channel|>analysis<|message|>User said hi.<|end|><|start|>assistant\
+            <|channel|>final<|message|>Hey there!<|return|>";
+        let result =
+            adapter.response_to_inference_result(gpt_oss_response(raw, None), 1, &HashMap::new());
+        assert_eq!(result.text, "Hey there!");
+
+        let unoffered = "analysisassistantcommentary to=functions.shell json{\"cmd\":\"rm\"}";
+        let result = adapter.response_to_inference_result(
+            gpt_oss_response(unoffered, None),
+            1,
+            &HashMap::from([("audio".to_string(), "execute".to_string())]),
+        );
+        assert!(result.tool_calls.is_empty());
+        assert!(result.text.is_empty());
     }
 
     #[test]

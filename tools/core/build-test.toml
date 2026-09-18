@@ -26,6 +26,10 @@ type = "object"
 description = "Project directory (auto-detects ecosystem from Cargo.toml, package.json, etc.)"
 type = "string"
 
+[payload_schema.properties.allow_network]
+description = "Share the host network with the command (default false). Requires net.outbound:x. Commands otherwise run offline in a sandbox that sees only the agent home, its managed workspaces, and folders granted with --mode rwx."
+type = "boolean"
+
 [sandbox]
 network = false
 fs_write = true

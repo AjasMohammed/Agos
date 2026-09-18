@@ -258,7 +258,49 @@ fn agent_summary(profile: &agentos_types::AgentProfile, supports_images: bool) -
         connected_at: profile.created_at,
         last_active: profile.last_active,
         supports_images,
+        avatar: profile.avatar.clone(),
     }
+}
+
+/// Max length of a stored avatar data URL. It rides along in `agents.json` and
+/// every agent list payload, and `agents.json` is rewritten on every status change
+/// or heartbeat; the panel downscales to 256px WebP (~10-30 KB).
+const AVATAR_MAX_LEN: usize = 64 * 1024;
+
+/// Accept only a base64 raster image data URL whose bytes match the declared type.
+/// SVG is refused: it can carry script, and the value is echoed to every client
+/// that lists agents.
+fn validate_avatar(url: &str) -> Result<(), ApiError> {
+    use base64::Engine;
+    if url.len() > AVATAR_MAX_LEN {
+        return Err(ApiError::BadRequest("Avatar too large (max 64 KB)".into()));
+    }
+    let (kind, payload) = ["png", "jpeg", "webp", "gif"]
+        .iter()
+        .find_map(|t| {
+            url.strip_prefix(&format!("data:image/{t};base64,"))
+                .map(|p| (*t, p))
+        })
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "Avatar must be a data:image/{png,jpeg,webp,gif};base64 URL".into(),
+            )
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| ApiError::BadRequest("Avatar is not valid base64".into()))?;
+    let magic_ok = match kind {
+        "png" => bytes.starts_with(b"\x89PNG"),
+        "jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "gif" => bytes.starts_with(b"GIF8"),
+        _ => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+    };
+    if !magic_ok {
+        return Err(ApiError::BadRequest(format!(
+            "Avatar data is not a {kind} image"
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve an agent path segment that may be either a name or a UUID.
@@ -1639,12 +1681,22 @@ impl KernelService for Kernel {
         let system_prompt = req
             .system_prompt
             .map(|s| if s.trim().is_empty() { None } else { Some(s) });
+        // Same spelling as the prompt: `""` clears.
+        let avatar = match req.avatar {
+            Some(a) if a.is_empty() => Some(None),
+            Some(a) => {
+                validate_avatar(&a)?;
+                Some(Some(a))
+            }
+            None => None,
+        };
         self.api_update_agent_settings(
             req.agent_name,
             req.description,
             req.thinking_level,
             system_prompt,
             req.working_set_size,
+            avatar,
         )
         .await
         // The registry's only failure here is an unknown agent name, which the
@@ -3722,6 +3774,7 @@ impl KernelService for Kernel {
             by_name.insert(
                 name.clone(),
                 ApiMcpServer {
+                    permission: mcp_server_permission(&name),
                     name,
                     state: Some(format!("{state:?}")),
                     tool_count,
@@ -3755,6 +3808,7 @@ impl KernelService for Kernel {
             let entry = by_name
                 .entry(a.name.clone())
                 .or_insert_with(|| ApiMcpServer {
+                    permission: mcp_server_permission(&a.name),
                     name: a.name.clone(),
                     state: None,
                     tool_count: 0,
@@ -4820,7 +4874,7 @@ impl KernelService for Kernel {
         let sid: agentos_types::SubscriptionID = id
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("Invalid subscription ID: {id}")))?;
-        if self.event_bus.disable_subscription(&sid).await {
+        if Kernel::disable_event_subscription(self, &sid).await {
             Ok(())
         } else {
             Err(ApiError::NotFound(format!("Subscription '{id}' not found")))
@@ -5464,7 +5518,9 @@ impl KernelService for Kernel {
                     .await;
                     history.push(("user".to_string(), expanded));
                 }
-                "assistant" => history.push((m.role, m.content)),
+                "assistant" if !agentos_kernel::is_unreplayable_assistant_turn(&m.content) => {
+                    history.push((m.role, m.content))
+                }
                 _ => {}
             }
         }
@@ -5609,7 +5665,9 @@ impl KernelService for Kernel {
                     .await;
                     history.push(("user".to_string(), expanded));
                 }
-                "assistant" => history.push((m.role, m.content)),
+                "assistant" if !agentos_kernel::is_unreplayable_assistant_turn(&m.content) => {
+                    history.push((m.role, m.content))
+                }
                 _ => {}
             }
         }
@@ -5769,11 +5827,19 @@ impl KernelService for Kernel {
         participants: Vec<String>,
         max_turns: u32,
     ) -> Result<ApiConvoSummary, ApiError> {
+        let trimmed = topic.trim();
+        if trimmed.is_empty() || trimmed.chars().count() > 1000 {
+            return Err(ApiError::BadRequest(
+                "Topic is required (max 1000 chars)".into(),
+            ));
+        }
+        let topic = trimmed.to_string();
         if !(2..=8).contains(&participants.len()) {
             return Err(ApiError::BadRequest(
                 "A conversation needs between 2 and 8 participants".into(),
             ));
         }
+        check_convo_participants(self, &participants).await?;
         let store = self.convo_store.clone();
         let t = topic.clone();
         let p = participants.clone();
@@ -5800,10 +5866,28 @@ impl KernelService for Kernel {
         max_turns: u32,
     ) {
         // The loop itself lives in `agentos_kernel::convo_runner` — shared with
-        // the web UI orchestrator so a convo fix lands once. `None` selects the
-        // non-streaming inference path; REST clients poll `GET {id}`.
-        agentos_kernel::convo_runner::run_convo(self, id, &topic, &participants, max_turns, None)
-            .await;
+        // the web UI orchestrator so a convo fix lands once. Progress is relayed
+        // to the `agent-chat:<id>` realtime channel (scope `chat:r`, same as
+        // `GET {id}`) so the panel can show who is speaking and their words as
+        // they arrive. Every turn is still persisted; a missed frame costs a
+        // repaint, never a turn.
+        let (tx, rx) = mpsc::channel(64);
+        let relay = tokio::spawn(relay_convo_events(
+            rx,
+            self.realtime_event_sender.clone(),
+            format!("agent-chat:{id}"),
+        ));
+        agentos_kernel::convo_runner::run_convo(
+            self,
+            id,
+            &topic,
+            &participants,
+            max_turns,
+            Some(tx),
+        )
+        .await;
+        // The runner dropped its sender, so the relay drains and exits.
+        let _ = relay.await;
     }
 
     async fn stop_agent_chat(&self, id: &str) -> Result<(), ApiError> {
@@ -5820,10 +5904,321 @@ impl KernelService for Kernel {
             })
     }
 
+    async fn continue_agent_chat(
+        &self,
+        id: &str,
+        turns: u32,
+    ) -> Result<(ApiConvoSummary, u32), ApiError> {
+        let convo = load_convo(self, id).await?;
+        check_convo_participants(self, &convo.participants).await?;
+        let ceiling = claim_convo_resume(self, id, turns).await?.ok_or_else(|| {
+            ApiError::Conflict(
+                "Conversation is still running — stop it or wait for the current turn".into(),
+            )
+        })?;
+        Ok((convo_summary_with_status(convo, "running"), ceiling))
+    }
+
+    async fn post_agent_chat_message(
+        &self,
+        id: &str,
+        content: String,
+    ) -> Result<(ApiConvoSummary, Option<u32>), ApiError> {
+        let content = content.trim().to_string();
+        if content.is_empty() || content.chars().count() > 4000 {
+            return Err(ApiError::BadRequest(
+                "Message is required (max 4000 chars)".into(),
+            ));
+        }
+        let convo = load_convo(self, id).await?;
+        // Only a reopen needs every agent online; a live run can still take a
+        // message after one drops (its turn fails visibly).
+        if convo.status != "running" {
+            check_convo_participants(self, &convo.participants).await?;
+        }
+
+        let store = self.convo_store.clone();
+        let cid = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.add_turn(&cid, agentos_kernel::convo_store::USER_SPEAKER, &content, 0)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        // Stored first, so a live run reads it on its next turn (the runner grants
+        // an extra round if its budget is spent); a finished one reopens for a
+        // round so every participant answers once.
+        // ponytail: a stopped run still finishing its last turn is Busy here, so
+        // the message waits for Continue.
+        let round = convo.participants.len() as u32;
+        let ceiling = claim_convo_resume(self, id, round).await?;
+        let status = if ceiling.is_some() {
+            "running".to_string()
+        } else {
+            convo.status.clone()
+        };
+        Ok((convo_summary_with_status(convo, &status), ceiling))
+    }
+
     // ── Realtime (Phase 08) ───────────────────────────────────────────────
 
     fn subscribe_realtime(&self) -> tokio::sync::broadcast::Receiver<agentos_types::RealtimeEvent> {
         self.realtime_event_sender.subscribe()
+    }
+}
+
+/// Streamed text is coalesced to at most one frame per interval: the realtime
+/// broadcast is shared and lossy (capacity 512), so a frame per token from a
+/// fast model would evict other channels' events for a lagging subscriber.
+const CONVO_TEXT_FLUSH: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Translate a conversation's runner events into `agent-chat:<id>` frames:
+/// `turn.start`, `turn.text` (a coalesced delta), `turn.tool` (`tool_name` null
+/// once the call returns), `turn.end`, `convo.done`. Every turn frame carries
+/// `agent` + `turn`, so a subscriber that joins mid-turn still knows who speaks.
+async fn relay_convo_events(
+    mut rx: mpsc::Receiver<agentos_kernel::convo_runner::ConvoEvent>,
+    realtime: tokio::sync::broadcast::Sender<agentos_types::RealtimeEvent>,
+    channel: String,
+) {
+    use agentos_kernel::convo_runner::ConvoEvent;
+    use tokio::time::Instant;
+
+    // `Err` = no subscriber connected; the transcript is in the store anyway.
+    let send = |event: &str, data: serde_json::Value| {
+        let _ = realtime.send(agentos_types::RealtimeEvent {
+            channel: channel.clone(),
+            event: event.to_string(),
+            data,
+        });
+    };
+    // Text not yet sent, and whose turn it belongs to.
+    let mut pending = String::new();
+    let mut speaker = (String::new(), 0u32);
+    let mut last_flush = Instant::now();
+    let flush = |pending: &mut String, speaker: &(String, u32), last_flush: &mut Instant| {
+        if !pending.is_empty() {
+            let text = std::mem::take(pending);
+            send(
+                "turn.text",
+                serde_json::json!({ "agent": speaker.0, "turn": speaker.1, "text": text }),
+            );
+        }
+        *last_flush = Instant::now();
+    };
+
+    loop {
+        let next = if pending.is_empty() {
+            rx.recv().await
+        } else {
+            // `recv` is cancel-safe, so a timeout loses nothing.
+            match tokio::time::timeout_at(last_flush + CONVO_TEXT_FLUSH, rx.recv()).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    flush(&mut pending, &speaker, &mut last_flush);
+                    continue;
+                }
+            }
+        };
+        let Some(ev) = next else { break };
+        match ev {
+            ConvoEvent::Chat {
+                agent,
+                turn,
+                event: ChatStreamEvent::TextChunk { text },
+            } => {
+                if speaker.0 != agent || speaker.1 != turn {
+                    flush(&mut pending, &speaker, &mut last_flush);
+                    speaker = (agent, turn);
+                }
+                pending.push_str(&text);
+                if last_flush.elapsed() >= CONVO_TEXT_FLUSH {
+                    flush(&mut pending, &speaker, &mut last_flush);
+                }
+            }
+            ConvoEvent::Chat { agent, turn, event } => {
+                let tool_name = match event {
+                    ChatStreamEvent::ToolStart { tool_name, .. } => Some(tool_name),
+                    ChatStreamEvent::ToolResult { .. } => None,
+                    _ => continue,
+                };
+                flush(&mut pending, &speaker, &mut last_flush);
+                send(
+                    "turn.tool",
+                    serde_json::json!({ "agent": agent, "turn": turn, "tool_name": tool_name }),
+                );
+            }
+            ConvoEvent::TurnStart { agent, turn } => {
+                flush(&mut pending, &speaker, &mut last_flush);
+                send(
+                    "turn.start",
+                    serde_json::json!({ "agent": agent, "turn": turn }),
+                );
+            }
+            ConvoEvent::TurnEnd { agent, turn, .. } => {
+                flush(&mut pending, &speaker, &mut last_flush);
+                send(
+                    "turn.end",
+                    serde_json::json!({ "agent": agent, "turn": turn }),
+                );
+            }
+            // A failed turn is persisted as a transcript row and followed by `Done`.
+            ConvoEvent::Error { .. } => {}
+            ConvoEvent::Done { total_turns } => {
+                flush(&mut pending, &speaker, &mut last_flush);
+                send(
+                    "convo.done",
+                    serde_json::json!({ "total_turns": total_turns }),
+                );
+            }
+        }
+    }
+    // Sender gone without a `Done` (runner panicked mid-turn): send what's left.
+    flush(&mut pending, &speaker, &mut last_flush);
+}
+
+#[cfg(test)]
+mod convo_relay_tests {
+    use super::relay_convo_events;
+    use agentos_kernel::convo_runner::ConvoEvent;
+    use agentos_kernel::ChatStreamEvent;
+
+    #[tokio::test]
+    async fn relays_speaker_coalesced_text_and_lifecycle() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let (rt_tx, mut rt_rx) = tokio::sync::broadcast::channel(16);
+        let relay = tokio::spawn(relay_convo_events(rx, rt_tx, "agent-chat:c1".into()));
+
+        let chat = |event| ConvoEvent::Chat {
+            agent: "alice".into(),
+            turn: 1,
+            event,
+        };
+        tx.send(ConvoEvent::TurnStart {
+            agent: "alice".into(),
+            turn: 1,
+        })
+        .await
+        .unwrap();
+        tx.send(chat(ChatStreamEvent::TextChunk { text: "Hel".into() }))
+            .await
+            .unwrap();
+        tx.send(chat(ChatStreamEvent::TextChunk { text: "lo".into() }))
+            .await
+            .unwrap();
+        tx.send(ConvoEvent::TurnEnd {
+            agent: "alice".into(),
+            turn: 1,
+            answer: "Hello".into(),
+        })
+        .await
+        .unwrap();
+        tx.send(ConvoEvent::Done { total_turns: 1 }).await.unwrap();
+        drop(tx);
+        relay.await.unwrap();
+
+        let mut frames = Vec::new();
+        while let Ok(ev) = rt_rx.try_recv() {
+            assert_eq!(ev.channel, "agent-chat:c1");
+            frames.push((ev.event, ev.data));
+        }
+        let names: Vec<&str> = frames.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["turn.start", "turn.text", "turn.end", "convo.done"]);
+        assert_eq!(frames[0].1["agent"], "alice");
+        // Both chunks land in one frame, attributed to the speaker.
+        assert_eq!(frames[1].1["text"], "Hello");
+        assert_eq!(frames[1].1["agent"], "alice");
+        assert_eq!(frames[1].1["turn"], 1);
+    }
+
+    /// Text is flushed by the timer while the model is quiet, before a tool
+    /// frame, and on a speaker change — always attributed to whoever wrote it.
+    #[tokio::test(start_paused = true)]
+    async fn flushes_on_timer_tool_and_speaker_change() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let (rt_tx, mut rt_rx) = tokio::sync::broadcast::channel(16);
+        let relay = tokio::spawn(relay_convo_events(rx, rt_tx, "agent-chat:c1".into()));
+        let chat = |agent: &str, turn, event| ConvoEvent::Chat {
+            agent: agent.into(),
+            turn,
+            event,
+        };
+        let text = |t: &str| ChatStreamEvent::TextChunk { text: t.into() };
+        let drain = |rx: &mut tokio::sync::broadcast::Receiver<agentos_types::RealtimeEvent>| {
+            let mut frames = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                frames.push((ev.event, ev.data));
+            }
+            frames
+        };
+
+        // Quiet model: the timer flushes without further input.
+        tx.send(chat("a", 1, text("one"))).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let got = drain(&mut rt_rx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].0.as_str(), &got[0].1["text"]),
+            ("turn.text", &"one".into())
+        );
+
+        // Pending text lands before the tool frame; the result clears the tool.
+        tx.send(chat("a", 1, text("two"))).await.unwrap();
+        tx.send(chat(
+            "a",
+            1,
+            ChatStreamEvent::ToolStart {
+                tool_name: "web-search".into(),
+                iteration: 1,
+                task_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+        tx.send(chat(
+            "a",
+            1,
+            ChatStreamEvent::ToolResult {
+                tool_name: "web-search".into(),
+                result_preview: String::new(),
+                duration_ms: 1,
+                success: true,
+            },
+        ))
+        .await
+        .unwrap();
+
+        // Speaker change with text pending: each chunk keeps its author. The
+        // last chunk is only flushed by the channel closing.
+        tx.send(chat("a", 1, text("three"))).await.unwrap();
+        tx.send(chat("b", 2, text("four"))).await.unwrap();
+        drop(tx);
+        relay.await.unwrap();
+
+        let got = drain(&mut rt_rx);
+        let rest: Vec<_> = got
+            .iter()
+            .map(|(e, d)| {
+                (
+                    e.as_str(),
+                    d["agent"].clone(),
+                    d["text"].clone(),
+                    d["tool_name"].clone(),
+                )
+            })
+            .collect();
+        use serde_json::Value::Null;
+        assert_eq!(
+            rest,
+            [
+                ("turn.text", "a".into(), "two".into(), Null),
+                ("turn.tool", "a".into(), Null, "web-search".into()),
+                ("turn.tool", "a".into(), Null, Null),
+                ("turn.text", "a".into(), "three".into(), Null),
+                ("turn.text", "b".into(), "four".into(), Null),
+            ]
+        );
     }
 }
 
@@ -5858,4 +6253,110 @@ mod parse_scope_tests {
             );
         }
     }
+}
+
+// ── Agent conversation helpers ────────────────────────────────────────────────
+
+/// Every participant must be a registered, online agent with a well-formed name
+/// (names are interpolated into turn prompts unwrapped). Shared by create and
+/// by resume, where an agent may have gone offline since.
+async fn check_convo_participants(
+    kernel: &Kernel,
+    participants: &[String],
+) -> Result<(), ApiError> {
+    let registry = kernel.agent_registry.read().await;
+    for (i, name) in participants.iter().enumerate() {
+        if !agentos_kernel::commands::agent::is_valid_agent_name(name) {
+            return Err(ApiError::BadRequest(format!(
+                "Invalid agent name: '{name}'"
+            )));
+        }
+        if participants[..i].contains(name) {
+            return Err(ApiError::BadRequest(
+                "Duplicate participants are not allowed".into(),
+            ));
+        }
+        match registry.get_by_name(name) {
+            None => return Err(ApiError::BadRequest(format!("Agent '{name}' not found"))),
+            Some(a) if a.status == agentos_types::AgentStatus::Offline => {
+                return Err(ApiError::BadRequest(format!("Agent '{name}' is offline")))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+async fn load_convo(
+    kernel: &Kernel,
+    id: &str,
+) -> Result<agentos_kernel::convo_store::AgentConvo, ApiError> {
+    let store = kernel.convo_store.clone();
+    let id_owned = id.to_string();
+    tokio::task::spawn_blocking(move || store.get_convo(&id_owned))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("Conversation {id} not found")))
+}
+
+/// `Some(new ceiling)` when reopened, `None` when a run is already live.
+async fn claim_convo_resume(
+    kernel: &Kernel,
+    id: &str,
+    turns: u32,
+) -> Result<Option<u32>, ApiError> {
+    use agentos_kernel::convo_store::ResumeError;
+    let store = kernel.convo_store.clone();
+    let id_owned = id.to_string();
+    match tokio::task::spawn_blocking(move || store.claim_resume(&id_owned, turns))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+    {
+        Ok(ceiling) => Ok(Some(ceiling)),
+        Err(ResumeError::Busy) => Ok(None),
+        Err(ResumeError::NotFound) => {
+            Err(ApiError::NotFound(format!("Conversation {id} not found")))
+        }
+        Err(ResumeError::Db(e)) => Err(ApiError::Internal(e.to_string())),
+    }
+}
+
+fn convo_summary_with_status(
+    convo: agentos_kernel::convo_store::AgentConvo,
+    status: &str,
+) -> ApiConvoSummary {
+    ApiConvoSummary {
+        id: convo.id,
+        topic: convo.topic,
+        participants: convo.participants,
+        status: status.to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use super::validate_avatar;
+
+    #[test]
+    fn accepts_raster_data_urls_only() {
+        assert!(validate_avatar("data:image/png;base64,iVBORw0KGgo=").is_ok());
+        assert!(validate_avatar("data:image/webp;base64,UklGRgAAAABXRUJQVlA4IA==").is_ok());
+        // Declared type must match the bytes (PNG bytes labelled webp).
+        assert!(validate_avatar("data:image/webp;base64,iVBORw0KGgo=").is_err());
+        // SVG can carry script; non-image and non-base64 payloads are refused.
+        assert!(validate_avatar("data:image/svg+xml;base64,PHN2Zz4=").is_err());
+        assert!(validate_avatar("https://example.com/a.png").is_err());
+        assert!(validate_avatar("data:image/png;base64,\"><script>").is_err());
+        let huge = format!("data:image/png;base64,{}", "A".repeat(64 * 1024));
+        assert!(validate_avatar(&huge).is_err());
+    }
+}
+
+fn mcp_server_permission(server: &str) -> String {
+    format!(
+        "{}:x",
+        agentos_mcp::adapter::server_permission_resource(server)
+    )
 }

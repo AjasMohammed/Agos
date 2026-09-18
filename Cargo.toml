@@ -32,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/AjasMohammed/Agos"
@@ -160,8 +160,12 @@ codegen-units = 16
 strip = "debuginfo"
 incremental = false  # see [profile.dev] — keeps target/ bounded
 
+# Shipped-artifact profile (release.yml). Thin LTO, not fat: fat LTO over
+# wasmtime + onnxruntime needs more RAM than a GitHub runner (and a 13 GB dev
+# box) reliably has; thin gets most of the size win. Measure with
+# scripts/bench-footprint.sh before changing.
 [profile.dist]
 inherits = "release"
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 strip = "symbols"

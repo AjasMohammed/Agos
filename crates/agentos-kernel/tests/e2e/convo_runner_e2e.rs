@@ -220,3 +220,128 @@ async fn round_robin_order_and_turn_events() {
     kernel.shutdown();
     handle.await.unwrap();
 }
+
+/// Continue resumes the SAME conversation: a second run picks up after the last
+/// speaker with the stored transcript, and an operator row posted in between is
+/// answered without counting toward the turn budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn continue_resumes_after_last_speaker_with_operator_message() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "a",
+        vec![
+            MockResponse::text("a1").with_stop_reason(StopReason::EndTurn),
+            MockResponse::text("a2").with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "b",
+        vec![
+            MockResponse::text("b1").with_stop_reason(StopReason::EndTurn),
+            MockResponse::text("b2").with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let participants = vec!["a".to_string(), "b".to_string()];
+    let store = Arc::clone(&kernel.convo_store);
+    let convo_id = store
+        .create_convo("topic", &participants, 3)
+        .expect("create");
+
+    // a, b, a — budget spent, next speaker is b.
+    run_convo(&kernel, &convo_id, "topic", &participants, 3, None).await;
+    assert_eq!(
+        store.get_convo(&convo_id).unwrap().unwrap().status,
+        "complete"
+    );
+
+    store
+        .add_turn(
+            &convo_id,
+            agentos_kernel::convo_store::USER_SPEAKER,
+            "wrap up",
+            0,
+        )
+        .expect("operator row");
+    let ceiling = store.claim_resume(&convo_id, 1).expect("claim");
+    assert_eq!(ceiling, 4, "operator rows don't count toward the budget");
+
+    run_convo(&kernel, &convo_id, "topic", &participants, ceiling, None).await;
+
+    let turns = store.get_turns(&convo_id).expect("turns");
+    let speakers: Vec<&str> = turns.iter().map(|t| t.agent_name.as_str()).collect();
+    assert_eq!(speakers, ["a", "b", "a", "@user", "b"]);
+    let numbers: Vec<u32> = turns.iter().map(|t| t.turn_number).collect();
+    assert_eq!(numbers, [1, 2, 3, 4, 5]);
+    assert_eq!(
+        store.get_convo(&convo_id).unwrap().unwrap().status,
+        "complete"
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// An operator message waiting when the budget is spent earns one more round,
+/// and the raised ceiling is persisted so the panel's "turn N of M" stays true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn operator_message_past_budget_earns_a_round() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "a",
+        vec![
+            MockResponse::text("a1").with_stop_reason(StopReason::EndTurn),
+            MockResponse::text("a2").with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "b",
+        vec![
+            MockResponse::text("b1").with_stop_reason(StopReason::EndTurn),
+            MockResponse::text("b2").with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let participants = vec!["a".to_string(), "b".to_string()];
+    let store = Arc::clone(&kernel.convo_store);
+    let convo_id = store
+        .create_convo("topic", &participants, 2)
+        .expect("create");
+    run_convo(&kernel, &convo_id, "topic", &participants, 2, None).await;
+
+    store
+        .add_turn(
+            &convo_id,
+            agentos_kernel::convo_store::USER_SPEAKER,
+            "one more",
+            0,
+        )
+        .expect("operator row");
+    store.set_status(&convo_id, "running").expect("reopen");
+    run_convo(&kernel, &convo_id, "topic", &participants, 2, None).await;
+
+    let speakers: Vec<String> = store
+        .get_turns(&convo_id)
+        .expect("turns")
+        .into_iter()
+        .map(|t| t.agent_name)
+        .collect();
+    assert_eq!(speakers, ["a", "b", "@user", "a", "b"]);
+    let convo = store.get_convo(&convo_id).unwrap().unwrap();
+    assert_eq!((convo.status.as_str(), convo.max_turns), ("complete", 4));
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}

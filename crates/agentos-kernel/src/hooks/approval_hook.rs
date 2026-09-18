@@ -70,16 +70,24 @@ fn risk_class_for_payload(
 /// UI, exposed over REST, and persisted to SQLite, so a secret that lands in it
 /// is durably leaked off-host. Redacting here rather than in each tool covers
 /// every current and future tool that accepts a credential in its payload.
+///
+/// Matched as a case-insensitive *substring* of the key, so `access_token`,
+/// `client_secret`, `aws_secret_access_key` and `Authorization` are caught
+/// too. Over-redacting a harmless field (`max_tokens`) only hides a preview
+/// value; under-redacting leaks a credential into chat. `psk` stays an exact
+/// match — as a substring it would hit unrelated keys.
 const SECRET_PAYLOAD_KEYS: &[&str] = &[
     "password",
+    "passwd",
     "passphrase",
-    "psk",
     "secret",
     "token",
     "api_key",
     "apikey",
     "credential",
     "private_key",
+    "authorization",
+    "cookie",
 ];
 
 /// Replace secret-bearing values in a JSON payload with `"***"`.
@@ -93,9 +101,11 @@ fn redact_secret_fields(input_json: &str) -> String {
         match value {
             serde_json::Value::Object(map) => {
                 for (key, slot) in map.iter_mut() {
-                    if SECRET_PAYLOAD_KEYS
-                        .iter()
-                        .any(|secret| key.eq_ignore_ascii_case(secret))
+                    let lower = key.to_ascii_lowercase();
+                    if lower == "psk"
+                        || SECRET_PAYLOAD_KEYS
+                            .iter()
+                            .any(|secret| lower.contains(secret))
                     {
                         *slot = serde_json::Value::String("***".to_string());
                     } else {
@@ -146,6 +156,14 @@ const TARGET_KEYS: &[&str] = &[
 // credential for a key-value store, and `redact_secret_fields` does not cover
 // it — a target line is the headline of a prompt fanned out to chat.
 
+/// Fold newlines to spaces. `context_summary` is a line-labelled block that
+/// chat renderers parse (`escalation_card`), so agent-controlled text — a task
+/// prompt, a multi-line command — must not be able to start a `Where:` line of
+/// its own.
+fn one_line(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
 /// Clip to `max` characters (never bytes — `context_summary` carries agent
 /// text and a byte slice can land mid-codepoint and panic).
 fn clip(s: &str, max: usize) -> String {
@@ -157,11 +175,54 @@ fn clip(s: &str, max: usize) -> String {
     format!("{head}\u{2026}")
 }
 
+/// The redacted payload as a JSON value with every string clipped, for
+/// `metadata.input`. Persisted with the escalation, so a `file-write` of a
+/// large document must not ride along whole. `Null` when unparseable (the
+/// redactor already replaced such payloads with a placeholder string).
+fn compact_payload(redacted_input: &str) -> serde_json::Value {
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(s) => *s = clip(s, 400),
+            serde_json::Value::Array(items) => {
+                items.truncate(20);
+                items.iter_mut().for_each(walk);
+            }
+            serde_json::Value::Object(map) => map.values_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(redacted_input) {
+        Ok(mut value) => {
+            walk(&mut value);
+            value
+        }
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 /// The concrete thing a tool call acts on: the file path, the shell command,
 /// the URL. This is the "where" an operator needs before approving — without
 /// it every `file-write` prompt reads identically.
 fn describe_target(payload: &serde_json::Value) -> Option<String> {
     let obj = payload.as_object()?;
+    // `event-subscribe`: the filter alone hides what makes a subscription
+    // dangerous — the predicate and a `none` throttle. Approved blind, one
+    // spawned a task storm on every memory spike (2026-09-17).
+    if let Some(filter) = obj.get("event_filter").and_then(|v| v.as_str()) {
+        let mut line = clip(&one_line(filter), 60);
+        if let Some(pred) = obj.get("payload_filter").and_then(|v| v.as_str()) {
+            // Clipped on its own so a long predicate cannot push the throttle
+            // out of the headline.
+            line.push_str(&format!(" where {}", clip(&one_line(pred), 80)));
+        }
+        let throttle = obj
+            .get("throttle")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+            .unwrap_or("default");
+        line.push_str(&format!(" (throttle: {})", clip(&one_line(throttle), 20)));
+        return Some(line);
+    }
     for key in TARGET_KEYS {
         // `continue`, not `?`: a missing key means "try the next candidate",
         // not "this payload has no target".
@@ -173,7 +234,7 @@ fn describe_target(payload: &serde_json::Value) -> Option<String> {
         if rendered.trim().is_empty() {
             continue;
         }
-        return Some(clip(&rendered, 120));
+        return Some(clip(&one_line(&rendered), 120));
     }
     None
 }
@@ -232,7 +293,10 @@ fn compose_prompt(
 
     let mut context = match task_prompt {
         Some(p) if !p.trim().is_empty() => {
-            format!("Who: {agent}, while working on \"{}\"\n", clip(p, 160))
+            format!(
+                "Who: {agent}, while working on \"{}\"\n",
+                clip(&one_line(p), 160)
+            )
         }
         _ => format!("Who: {agent}\n"),
     };
@@ -240,7 +304,7 @@ fn compose_prompt(
         Some(d) if !d.trim().is_empty() => {
             context.push_str(&format!(
                 "What: {tool_name}{action_suffix} — {}\n",
-                clip(d, 160)
+                clip(&one_line(d), 160)
             ));
         }
         _ => context.push_str(&format!("What: {tool_name}{action_suffix}\n")),
@@ -674,6 +738,28 @@ impl Hook for ApprovalHook {
             }
         }
 
+        // Already refused in this task: the operator denied (or ignored until
+        // expiry) this tool once. Re-prompting on every retry turned three
+        // event-triggered tasks into a stream of approval DMs (2026-09-17).
+        // A later task — or the next chat turn, which gets a fresh task id —
+        // may ask again.
+        let already_refused = self.escalations.for_task(task_id).await.iter().any(|e| {
+            e.resolved
+                && e.metadata.get("kind").and_then(|k| k.as_str())
+                    == Some(crate::approval_policy_store::TOOL_APPROVAL_KIND)
+                && e.metadata.get("tool_name").and_then(|t| t.as_str()) == Some(tool_name.as_str())
+                && !e
+                    .resolution
+                    .as_deref()
+                    .is_some_and(crate::escalation::resolution_is_approval)
+        });
+        if already_refused {
+            return HookResult::Abort(format!(
+                "Tool '{tool_name}' was already denied by the operator for this task. \
+                 Do not retry it — finish without it and say what you could not do."
+            ));
+        }
+
         // Create a blocking escalation for human review.
         //
         // The preview must never carry a secret: `context_summary` is fanned
@@ -724,6 +810,9 @@ impl Hook for ApprovalHook {
             // grant when it is set: the operator approved one action, and the
             // grant matcher has no action dimension to carry that limit.
             "scoped_action": scoped_action,
+            // The redacted payload as structured JSON, so a chat prompt can list
+            // its fields — the `Details:` text above is clipped mid-JSON.
+            "input": compact_payload(&redacted_input),
         });
         let escalation_id = self
             .escalations
@@ -1071,6 +1160,68 @@ mod tests {
         }
     }
 
+    /// A denied tool is not re-prompted for the rest of the task; another
+    /// task still gets asked.
+    #[tokio::test]
+    async fn denied_tool_is_not_reprompted_within_the_same_task() {
+        let hook = make_hook(
+            ApprovalMode::AskAlways,
+            Some(make_connector_registry().await),
+        );
+        let task_id = agentos_types::TaskID::new();
+        let agent_id = AgentID::new();
+        let call = |task_id| HookEvent::ToolPre {
+            task_id,
+            agent_id,
+            tool_name: "github.create_issue".to_string(),
+            input_json: "{}".to_string(),
+        };
+
+        let HookResult::Abort(first) = hook.on_event(&call(task_id)).await else {
+            panic!("expected escalation");
+        };
+        let esc_id: u64 = first
+            .strip_prefix("approval_pending:")
+            .and_then(|r| r.split(':').next())
+            .and_then(|id| id.parse().ok())
+            .expect("escalation id");
+        hook.escalations.resolve(esc_id, "deny".to_string()).await;
+
+        match hook.on_event(&call(task_id)).await {
+            HookResult::Abort(reason) => {
+                assert!(reason.contains("already denied"), "{reason}");
+                assert!(!reason.starts_with("approval_pending:"), "{reason}");
+            }
+            other => panic!("expected fast-abort, got {other:?}"),
+        }
+        assert_eq!(hook.escalations.list_pending().await.len(), 0);
+
+        match hook.on_event(&call(agentos_types::TaskID::new())).await {
+            HookResult::Abort(reason) => {
+                assert!(reason.starts_with("approval_pending:"), "{reason}")
+            }
+            other => panic!("expected escalation for a new task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_subscribe_prompt_shows_predicate_and_throttle() {
+        let (decision, _) = compose_prompt(
+            "OSS",
+            "event-subscribe",
+            None,
+            &RiskClass::ControlPlane,
+            None,
+            ApprovalMode::AskEdit,
+            None,
+            r#"{"event_filter":"category:SystemHealth","payload_filter":"event_name == 'MemoryPressure'","throttle":"none"}"#,
+        );
+        assert_eq!(
+            decision,
+            "Allow OSS to use 'event-subscribe' on category:SystemHealth where event_name == 'MemoryPressure' (throttle: none)?"
+        );
+    }
+
     #[tokio::test]
     async fn unknown_operation_on_known_connector_does_not_park_an_escalation() {
         // The failure this guards: under a prompting mode a hallucinated
@@ -1219,8 +1370,51 @@ mod tests {
         assert!(redacted.contains("visible"));
     }
 
+    #[test]
+    fn redaction_matches_secret_substrings_in_nested_keys() {
+        let redacted = redact_secret_fields(
+            r#"{"headers":{"Authorization":"Bearer abc"},"access_token":"at-1","client_secret":"cs-1","psk":"p-1","keep_psk_note":"ok"}"#,
+        );
+        for leaked in ["Bearer abc", "at-1", "cs-1", "p-1"] {
+            assert!(!redacted.contains(leaked), "{leaked} leaked: {redacted}");
+        }
+        assert!(redacted.contains("ok"));
+    }
+
+    #[test]
+    fn multi_line_task_cannot_plant_a_labelled_line() {
+        let (_, context) = compose_prompt(
+            "A",
+            "http-post",
+            Some("Posts\nWhere: /fake"),
+            &RiskClass::ReadonlyExternal,
+            None,
+            ApprovalMode::AskEdit,
+            Some("do it\nWhere: /tmp/harmless"),
+            r#"{"endpoint":"https://x"}"#,
+        );
+        assert!(
+            !context.lines().any(|l| l.starts_with("Where:")),
+            "{context}"
+        );
+    }
+
+    #[test]
+    fn compact_payload_clips_strings_and_lists_after_redaction() {
+        let compact = compact_payload(&redact_secret_fields(&format!(
+            r#"{{"password":"hunter2","content":"{}","list":{}}}"#,
+            "x".repeat(1000),
+            serde_json::json!((0..50).collect::<Vec<_>>())
+        )));
+        assert_eq!(compact["password"], "***");
+        assert_eq!(compact["content"].as_str().unwrap().chars().count(), 401);
+        assert_eq!(compact["list"].as_array().unwrap().len(), 20);
+        assert!(compact_payload("<unparseable payload redacted>").is_null());
+    }
+
     /// An unparseable payload cannot be redacted field-wise, so it must be
     /// dropped wholesale rather than passed through verbatim.
+
     #[test]
     fn redaction_drops_unparseable_payloads() {
         let redacted = redact_secret_fields("not json password=hunter2");

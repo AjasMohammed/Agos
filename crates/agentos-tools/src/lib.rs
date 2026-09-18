@@ -75,6 +75,7 @@ pub mod procedure_search;
 pub mod process_manager;
 pub mod raw_usb;
 pub mod runner;
+pub mod sandbox_fs;
 pub mod sanitize;
 pub mod schedule_control;
 pub mod schedule_once;
@@ -395,7 +396,9 @@ mod tests {
     }
 
     fn make_memory_stores(data_dir: &Path) -> (Arc<SemanticStore>, Arc<EpisodicStore>) {
-        let embedder = Arc::new(Embedder::new().unwrap());
+        // Real MiniLM when the `embeddings` feature is on (workspace default via
+        // agentos-cli); zero-vector stub otherwise so `-p agentos-tools` still runs.
+        let embedder = Arc::new(Embedder::new().unwrap_or_else(|_| Embedder::noop()));
         let semantic = Arc::new(SemanticStore::open_with_embedder(data_dir, embedder).unwrap());
         let episodic = Arc::new(EpisodicStore::open(data_dir).unwrap());
         (semantic, episodic)
@@ -821,6 +824,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(feature = "embeddings"),
+        ignore = "asserts semantic_score > 0, which needs the real MiniLM embedder (embeddings feature)"
+    )]
     async fn test_memory_write_and_search() {
         let dir = TempDir::new().unwrap();
         let ctx = make_context(dir.path());

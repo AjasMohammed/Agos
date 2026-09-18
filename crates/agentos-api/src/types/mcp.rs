@@ -21,6 +21,9 @@ pub struct ApiMcpServer {
     /// `null` when only a persisted attachment exists with no live process.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Permission that grants an agent every tool of this server
+    /// (`mcp:<server>/:x`); pass it to the agent grant/revoke endpoints.
+    pub permission: String,
     /// Number of tools exposed by the server.
     pub tool_count: usize,
     /// Call statistics (present only for live servers).

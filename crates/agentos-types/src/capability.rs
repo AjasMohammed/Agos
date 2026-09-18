@@ -89,7 +89,7 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
     "172.30.",
     "172.31.",
     "192.168.",
-    "127.",
+    "127.", // also reached by IP parse; kept for hostname-shaped inputs like "127.x.example"
     "169.254.",
     "0.",
     "localhost",
@@ -100,6 +100,15 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
              // on hostnames like "fdic.gov" that start with "fd".
 ];
 
+/// Provider metadata hostnames (GCP, AWS) that alias 169.254.169.254.
+const BLOCKED_METADATA_HOSTNAMES: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.goog",
+    "metadata",
+    "instance-data",
+    "instance-data.ec2.internal",
+];
+
 /// Extract the bare host from a `net:` target, stripping scheme, userinfo,
 /// port and path. Lowercased, brackets removed.
 ///
@@ -108,6 +117,14 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
 /// `x@169.254.169.254` (matching nothing) while the HTTP client connects to the
 /// real host after the `@`.
 fn extract_ssrf_host(target: &str) -> String {
+    // A trailing dot is a legal absolute FQDN (`metadata.google.internal.`)
+    // that resolvers treat identically; strip it so exact-match lists hold.
+    extract_ssrf_host_raw(target)
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn extract_ssrf_host_raw(target: &str) -> String {
     let lc = target.to_lowercase();
     // Strip any scheme:// (not just http/https, so ftp:// etc. can't smuggle a host).
     let after_scheme = match lc.find("://") {
@@ -149,6 +166,12 @@ fn host_is_private(host: &str) -> bool {
     if let Some(ip) = parse_host_ip(host) {
         return ip_is_blocked(ip);
     }
+    // Cloud metadata hostnames resolve to link-local space via the provider's
+    // resolver, so the IP check above never sees them. Exact match, so a
+    // hostname like `metadata-api.example.com` is not caught by a prefix.
+    if BLOCKED_METADATA_HOSTNAMES.contains(&host) {
+        return true;
+    }
     // Hostname / dotted-form string-prefix fallbacks (e.g. "localhost").
     for prefix in PRIVATE_NETWORK_PREFIXES {
         if host.starts_with(prefix) {
@@ -174,16 +197,38 @@ fn parse_host_ip(host: &str) -> Option<std::net::IpAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Some(ip);
     }
-    let n = if let Some(hex) = host.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16).ok()?
-    } else if host.len() > 1 && host.starts_with('0') && host.bytes().all(|b| b.is_ascii_digit()) {
-        u32::from_str_radix(&host[1..], 8).ok()?
-    } else if !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit()) {
-        host.parse::<u32>().ok()?
-    } else {
-        return None;
+    if !host.contains('.') {
+        return parse_ipv4_part(host).map(|n| IpAddr::V4(Ipv4Addr::from(n)));
+    }
+    // inet_aton dotted forms that `Ipv4Addr::from_str` rejects but libc/curl
+    // accept: per-part octal/hex (`0177.0.0.1`, `0x7f.0.0.1`) and short forms
+    // (`127.1` = 127.0.0.1, `127.0.1` = 127.0.0.1).
+    let parts: Vec<u32> = host
+        .split('.')
+        .map(parse_ipv4_part)
+        .collect::<Option<_>>()?;
+    let n = match parts.as_slice() {
+        [a, b, c, d] if *a <= 255 && *b <= 255 && *c <= 255 && *d <= 255 => {
+            (a << 24) | (b << 16) | (c << 8) | d
+        }
+        [a, b, c] if *a <= 255 && *b <= 255 && *c <= 0xffff => (a << 24) | (b << 16) | c,
+        [a, b] if *a <= 255 && *b <= 0xff_ffff => (a << 24) | b,
+        _ => return None,
     };
     Some(IpAddr::V4(Ipv4Addr::from(n)))
+}
+
+/// One inet_aton component: `0x..` hex, leading-zero octal, else decimal.
+fn parse_ipv4_part(s: &str) -> Option<u32> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).ok()
+    } else if s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()) {
+        u32::from_str_radix(&s[1..], 8).ok()
+    } else if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse::<u32>().ok()
+    } else {
+        None
+    }
 }
 
 /// Range-check an IP against private/loopback/link-local/reserved space.

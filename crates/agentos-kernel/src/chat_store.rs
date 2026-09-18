@@ -198,8 +198,8 @@ impl ChatStore {
                 let result_json = v.get("result").cloned().map(|x| x.to_string());
                 let success = v.get("success").and_then(|x| x.as_bool()).or_else(|| {
                     v.get("result")
-                        .and_then(|r| r.as_object())
-                        .map(|obj| !obj.contains_key("error"))
+                        .filter(|r| r.is_object())
+                        .map(|r| !crate::kernel::tool_result_is_error(r))
                 });
 
                 let _ = conn.execute(
@@ -878,6 +878,31 @@ impl ChatStore {
         Ok(all.into_iter().map(|(_, e)| e).collect())
     }
 
+    /// Distinct tool names called in `session_id`, most recent first — every
+    /// persisted call, including failures and tools the dedup cache skips
+    /// (volatile, approval-gated). Feeds the chat working-set pins.
+    pub fn recent_tool_names(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(c.tool_name, m.tool_name) AS name
+             FROM chat_messages m
+             LEFT JOIN chat_tool_calls c ON c.message_id = m.id
+             WHERE m.session_id = ?1 AND m.role = 'tool'
+               AND COALESCE(c.tool_name, m.tool_name) IS NOT NULL
+             GROUP BY name
+             ORDER BY MAX(m.id) DESC
+             LIMIT ?2",
+        )?;
+        let names = stmt
+            .query_map(params![session_id, limit as i64], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(names)
+    }
+
     /// Batch-insert tool call records for a session. Each tool call becomes a
     /// message with role='tool'. Call this before saving the final assistant message
     /// so the message ordering is: user -> tool1 -> tool2 -> ... -> assistant.
@@ -895,10 +920,7 @@ impl ChatStore {
         for tc in tool_calls {
             let payload_json = tc.payload.to_string();
             let result_json = tc.result.to_string();
-            let success = !tc
-                .result
-                .as_object()
-                .is_some_and(|obj| obj.contains_key("error"));
+            let success = !crate::kernel::tool_result_is_error(&tc.result);
             let content = format!("Tool call: {}", tc.tool_name);
             // RETURNING, not `last_insert_rowid()`: the `chat_messages_ai` FTS
             // trigger inserts into `chat_messages_fts` after this row, so the
@@ -984,6 +1006,40 @@ mod tests {
         assert!(store.search("   ", Some("alpha"), 5).unwrap().is_empty());
     }
     use super::*;
+
+    /// Working-set pins read every persisted call, newest first, distinct —
+    /// including failures, which the in-memory dedup cache never holds.
+    #[test]
+    fn recent_tool_names_distinct_newest_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ChatStore::open(&dir.path().join("chat.db")).expect("open");
+        let sid = store.create_session("alpha").expect("create");
+        let call = |name: &str, result: serde_json::Value| crate::kernel::ChatToolCallRecord {
+            tool_name: name.to_string(),
+            intent_type: String::new(),
+            id: None,
+            payload: serde_json::json!({}),
+            result,
+            duration_ms: 1,
+        };
+        store
+            .add_tool_calls(
+                &sid,
+                &[
+                    call("shell-exec", serde_json::json!({"error": "denied"})),
+                    call("web-fetch", serde_json::json!({"ok": true})),
+                    call("shell-exec", serde_json::json!({"ok": true})),
+                ],
+            )
+            .expect("add");
+        let names = store.recent_tool_names(&sid, 10).expect("names");
+        assert_eq!(names, vec!["shell-exec", "web-fetch"]);
+        assert_eq!(store.recent_tool_names(&sid, 1).expect("names").len(), 1);
+        assert!(store
+            .recent_tool_names("other", 10)
+            .expect("names")
+            .is_empty());
+    }
 
     /// A lazily-opened chat: session row, zero messages, and the first send is
     /// the first row — no blank placeholder turn at the head of the transcript.

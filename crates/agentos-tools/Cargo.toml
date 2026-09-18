@@ -21,7 +21,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream", "multi
 futures-util = "0.3"
 csv = "1.3.1"
 rusqlite = { workspace = true, features = ["bundled", "vtab"] }
-agentos-vault = { version = "1.0.0", path = "../agentos-vault" }
+agentos-vault = { version = "1.0.0-rc.1", path = "../agentos-vault" }
 base64.workspace = true
 agentos-memory = { path = "../agentos-memory" }
 agentos-scratch = { path = "../agentos-scratch" }
@@ -43,6 +43,10 @@ zeroize = { workspace = true }
 # Only for `killpg` on converter timeouts — shelling out to `kill` with a
 # negative pid signals the caller's own process group on util-linux.
 libc = "0.2"
+
+[features]
+# Forwarded to agentos-memory; enabled by agentos-cli's default features.
+embeddings = ["agentos-memory/embeddings"]
 
 [dev-dependencies]
 agentos-audit = { path = "../agentos-audit" }

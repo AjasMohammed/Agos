@@ -1246,14 +1246,15 @@ impl LLMCore for CustomCore {
 
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
 
+        // Carry buffer for a multibyte UTF-8 sequence split across HTTP chunks.
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut stream = res.bytes_stream();
         'outer: while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| AgentOSError::LLMError {
                 provider: "custom".to_string(),
                 reason: format!("Stream read error: {}", e),
             })?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            line_buffer.push_str(&chunk_str);
+            crate::streaming_helpers::push_utf8_chunk(&mut utf8_pending, &chunk, &mut line_buffer);
 
             if line_buffer.len() > MAX_LINE_BUFFER_BYTES {
                 let err_msg = "SSE line buffer exceeded 1 MB";

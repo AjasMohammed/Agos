@@ -265,7 +265,15 @@
             var accumulated = Array.from(s.bubble.querySelectorAll(".chat-text-segment"))
                 .map(function (el) { return el.dataset.rawMarkdown || ""; })
                 .join("");
-            if (!accumulated || accumulated.length < data.answer.length) {
+            // The kernel appends a `_[tools run: …]_` record that never streamed.
+            // Compare without it, so streamed text between tool cards is kept.
+            var record = data.answer.match(/\n\n_\[tools run: [^\]\n]*\]_$/);
+            var body = record ? data.answer.slice(0, record.index) : data.answer;
+            if (accumulated && accumulated.length >= body.length && record) {
+                var note = newTextSegment(s);
+                note.dataset.rawMarkdown = record[0];
+                note.innerHTML = renderMarkdown(record[0].trim());
+            } else if (!accumulated || accumulated.length < data.answer.length) {
                 // Clear existing text segments and replace with the complete answer.
                 Array.from(s.bubble.querySelectorAll(".chat-text-segment")).forEach(function (el) {
                     el.remove();

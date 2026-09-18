@@ -1,3 +1,5 @@
+//! **Experimental.** Hardware abstraction layer. Driver surface and consent gates may change before v2; not covered by the v1 stability promise.
+
 pub mod consent;
 pub mod drivers;
 pub mod hal;

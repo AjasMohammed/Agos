@@ -100,12 +100,113 @@ pub struct CapabilityContext {
     pub task_id: TaskID,
     /// Distributed trace identifier for correlation.
     pub trace_id: TraceID,
-    /// The agent's data directory (always writable).
+    /// The kernel data directory. Holds kernel state (vault, audit log, other
+    /// agents' homes) — never expose it to agent-run commands; use
+    /// [`exec_roots`](Self::exec_roots).
     pub data_dir: PathBuf,
     /// The agent's effective permission set.
     pub permissions: PermissionSet,
     /// Additional directories the agent may access.
     pub workspace_paths: Vec<PathBuf>,
+    /// The agent's home (`data_dir/agents/<name>/`).
+    pub agent_home: PathBuf,
+    /// Workspace grants with `--mode rwx`.
+    pub workspace_paths_executable: Vec<PathBuf>,
+}
+
+impl CapabilityContext {
+    /// Directories agent-controlled commands (`build.*`, `proc.*`) may run in
+    /// and write: the agent home, its managed workspaces, and `rwx` grants.
+    /// The rest of `data_dir` (vault, audit log, other agents) never is.
+    pub fn exec_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![
+            self.agent_home.clone(),
+            crate::managed_env::agent_workspaces_root(&self.data_dir, &self.agent_id),
+        ];
+        roots.extend(
+            agentos_tools::sandbox_fs::grants_outside(
+                &self.workspace_paths_executable,
+                &self.data_dir,
+            )
+            .cloned(),
+        );
+        roots
+    }
+
+    /// The working directory for an agent command: `requested` if it lies
+    /// inside [`exec_roots`](Self::exec_roots), else `default`.
+    pub fn exec_working_dir(
+        &self,
+        requested: Option<&str>,
+        default: PathBuf,
+        resource: &str,
+    ) -> Result<PathBuf, AgentOSError> {
+        let Some(requested) = requested else {
+            return Ok(default);
+        };
+        let dir = PathBuf::from(requested);
+        let roots = self.exec_roots();
+        // `starts_with` is lexical: `root/../vault` would pass it.
+        let lexically_safe = dir.is_absolute()
+            && !dir
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+        // A symlink inside a root (`home/x -> /root`) passes the lexical test;
+        // the sandbox would not follow it out, but host-side probes of the dir
+        // (ecosystem detection) would.
+        let resolves_inside = || match std::fs::canonicalize(&dir) {
+            Ok(real) => roots
+                .iter()
+                .filter_map(|r| std::fs::canonicalize(r).ok())
+                .any(|r| real.starts_with(r)),
+            Err(_) => true,
+        };
+        if lexically_safe && roots.iter().any(|r| dir.starts_with(r)) && resolves_inside() {
+            return Ok(dir);
+        }
+        let allowed: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        Err(AgentOSError::PermissionDenied {
+            resource: resource.into(),
+            operation: format!(
+                "working_dir '{requested}' is outside agent scope (absolute path, no `..`). \
+                 Allowed: [{}]; grant a folder with --mode rwx to build or run there",
+                allowed.join(", ")
+            ),
+        })
+    }
+
+    /// `allow_network` from the payload. Egress from agent-controlled code is
+    /// a capability of its own: asking for it requires `net.outbound:x` (the
+    /// KMC name) or `network.outbound:x` (what `shell-exec` and default agent
+    /// grants use).
+    pub fn exec_network(&self, params: &Value, resource: &str) -> Result<bool, AgentOSError> {
+        let wanted = params["allow_network"].as_bool().unwrap_or(false);
+        let granted = ["net.outbound", "network.outbound"]
+            .iter()
+            .any(|r| self.permissions.check(r, PermissionOp::Execute));
+        if wanted && !granted {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "net.outbound".into(),
+                operation: format!(
+                    "{resource} allow_network=true requires net.outbound:x or network.outbound:x"
+                ),
+            });
+        }
+        Ok(wanted)
+    }
+
+    /// Sandbox for an agent command: every exec root writable, `HOME` at the
+    /// agent home, network as decided by [`exec_network`](Self::exec_network).
+    pub fn exec_sandbox(&self, tool: &str, network: bool) -> agentos_tools::sandbox_fs::Sandbox {
+        self.exec_roots()
+            .into_iter()
+            .fold(
+                agentos_tools::sandbox_fs::Sandbox::new(tool),
+                |sandbox, root| sandbox.bind_rw(root),
+            )
+            .network(network)
+            .env("HOME", &self.agent_home)
+    }
 }
 
 /// Structured result from a capability provider.
@@ -195,6 +296,8 @@ mod tests {
             data_dir: PathBuf::from("/tmp/test-data"),
             permissions: PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: PathBuf::from("/tmp/test-data/agents/test"),
+            workspace_paths_executable: vec![],
         }
     }
 

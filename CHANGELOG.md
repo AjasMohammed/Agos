@@ -10,6 +10,40 @@ The distributed binary is `agentos` (crate `agentos-cli`); the version reported 
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-09-17
+
+Release candidate for 1.0.0: Linux x86_64, single-operator deployments. Same
+content as the 1.0.0 section below plus the release-readiness work from
+`plans/real-world-relevance/`:
+
+### Added
+- Security regression suite covering the OpenClaw CVE classes (SSRF to cloud
+  metadata, file-tool path traversal, injected control-plane writes, tampered
+  signed manifests, WebSocket ambient auth, no-credential access); wired into
+  `release-gate.yml`. Listed in `docs/guide/06-security.md`.
+- CI guard (`scripts/check-toolpre-guard.sh`) that fails if any kernel tool
+  execution path skips the ToolPre hook chain.
+- `dist` cargo profile (thin LTO) used by `release.yml`; lite build
+  (`--no-default-features`, no ONNX/MiniLM) published as `agentos-lite-linux-amd64`.
+- `scripts/bench-footprint.sh` and `docs/guide/benchmarks.md` (binary size,
+  cold start, idle RSS, measured).
+- `docs/guide/00-five-minute-tour.md`, `MAINTAINERS.md`, SECURITY.md
+  "Known Limitations" and 90-day disclosure window.
+- Release signing key (minisign id `0692DEA1023C9472`) committed at
+  `packaging/signing/agentos-release.pub`.
+
+### Changed
+- `scripts/install.sh` pins the release public key, requires the `.sig`
+  asset, and accepts `rsign` as a verifier.
+- Streaming LLM adapters (OpenAI, Anthropic, Gemini, custom) carry partial
+  UTF-8 sequences across chunk boundaries instead of emitting U+FFFD.
+- `embeddings` is a cargo feature (default on in `agentos-cli` only);
+  `Embedder::new()` failure falls back to no-op instead of aborting boot.
+
+### Fixed
+- SSRF guard: cloud metadata hostnames, trailing-dot hosts, dotted-octal /
+  hex / short-form IPv4 encodings, and IPv4-mapped IPv6 are now blocked.
+
 ## [1.0.0] - unreleased
 
 First production release. AgentOS graduates from "feature-complete + green

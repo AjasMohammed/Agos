@@ -3476,4 +3476,14 @@ default_model = "llama3.2"
             Some("https://openai.internal/v1")
         );
     }
+
+    /// Release claim: with no config, the API and health servers bind loopback only.
+    #[test]
+    fn api_default_bind_is_loopback() {
+        assert_eq!(default_api_host(), "127.0.0.1");
+        assert_eq!(default_health_bind(), "127.0.0.1");
+        let api: ApiSettings = toml::from_str("").expect("all ApiSettings fields have defaults");
+        assert_eq!(api.host, "127.0.0.1");
+        assert!(!api.enabled, "API server is opt-in");
+    }
 }

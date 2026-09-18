@@ -361,3 +361,41 @@ fn scenario_g_reject_tool_invalid_signature() {
         other => panic!("Expected ToolSignatureInvalid error, got: {other:?}"),
     }
 }
+
+// ─── Scenario H: Tampered signed manifest (risk_class / name flip) ──────────
+
+/// ClawHavoc class: a validly signed Community manifest must stop verifying the
+/// moment any signed field changes. `risk_class` is part of the signing
+/// payload precisely so an attacker cannot take a signed `control_plane` tool
+/// and relabel it `readonly_scoped` to slip past approval.
+#[test]
+fn scenario_h_tampered_signed_manifest_rejected() {
+    let (sk, pk_hex) = make_keypair();
+    let seed = sk.to_bytes();
+
+    let mut manifest = make_community_manifest_with_sig(&pk_hex, "");
+    manifest.risk_class = RiskClass::ControlPlane;
+    manifest.manifest.signature = Some(agentos_tools::sign_manifest(&manifest, &seed));
+
+    // Positive control: the untouched signed manifest registers.
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(manifest.clone())
+        .expect("validly signed community manifest must register");
+
+    // Flip the risk class after signing → signature no longer covers the bytes.
+    let mut relabelled = manifest.clone();
+    relabelled.risk_class = RiskClass::ReadonlyScoped;
+    match ToolRegistry::new().register(relabelled) {
+        Err(AgentOSError::ToolSignatureInvalid { .. }) => {}
+        other => panic!("risk_class tamper must fail signature check, got {other:?}"),
+    }
+
+    // Same for the name: a signed payload cannot be re-homed under another tool.
+    let mut renamed = manifest;
+    renamed.manifest.name = "file-reader".to_string();
+    match ToolRegistry::new().register(renamed) {
+        Err(AgentOSError::ToolSignatureInvalid { .. }) => {}
+        other => panic!("name tamper must fail signature check, got {other:?}"),
+    }
+}

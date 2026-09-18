@@ -586,6 +586,46 @@ impl SemanticStore {
         .map_err(|e| AgentOSError::StorageError(format!("get_by_key task panicked: {}", e)))?
     }
 
+    /// Fetch one entry by its UUID, restricted to `agent_id` when given.
+    ///
+    /// `memory-write` and `memory-search` hand agents UUIDs, so a read-back
+    /// by that id has to exist; before this, an agent had only `key`, and
+    /// gpt-oss passed the UUID as `id` and was rejected by the schema.
+    pub async fn get_by_id_scoped(
+        &self,
+        id: &str,
+        agent_id: Option<&AgentID>,
+    ) -> Result<Option<MemoryEntry>, AgentOSError> {
+        let db = self.conn.clone();
+        let id_owned = id.to_owned();
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for get_by_id".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, agent_id, key, content, created_at, updated_at, tags,
+                            last_used_at, use_count, confidence, status
+                     FROM semantic_memory
+                     WHERE id = ?1 AND (?2 IS NULL OR agent_id = ?2)",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+
+            let mut rows = stmt
+                .query_map(params![id_owned, agent_id_str], Self::row_to_entry)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+
+            match rows.next() {
+                Some(Ok(entry)) => Ok(Some(entry)),
+                Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("get_by_id task panicked: {}", e)))?
+    }
+
     /// Mark memory entries as used right now: bump `use_count` and stamp
     /// `last_used_at`. Fire-and-forget reinforcement — callers must never fail
     /// a task on a touch error. Returns the number of rows updated.

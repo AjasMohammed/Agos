@@ -120,6 +120,27 @@ pub fn rrf_merge(
     out
 }
 
+/// Nudge habitually used tools up the fused order — multiplicatively, so the
+/// prior stays a tie-breaker. The old additive `0.05·ln(1+u)` reached ~0.19
+/// for a tool used 45 times, while a rank-1 hit on BOTH legs is only
+/// `2/61 ≈ 0.033`: an agent that had used `notify-user` a lot could never
+/// surface `channel-send` for "telegram" (session aec64098, 2026-09-15).
+/// The factor is ~×1.2 at 45 uses (×1.35 at 1 000), so a top-ranked hit on
+/// both legs beats top-ranked single-leg hits; the prior only reorders
+/// near neighbours. Deep two-leg hits (rank ~40 on each) can still lose.
+pub fn apply_usage_prior(order: &mut [(String, f32, &'static str)], usage: &HashMap<String, f64>) {
+    if usage.is_empty() {
+        return;
+    }
+    for (name, score, _) in order.iter_mut() {
+        if let Some(u) = usage.get(name) {
+            // Clamp: a corrupt negative count would make `ln` NaN.
+            *score *= 1.0 + 0.05 * (1.0 + u.max(0.0) as f32).ln();
+        }
+    }
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 /// Per-agent usage scores for the ranking prior. Empty when the store is
 /// absent (fresh install) — the prior is then a no-op.
 async fn agentos_tools_usage(context: &ToolExecutionContext) -> HashMap<String, f64> {
@@ -208,18 +229,7 @@ impl AgentTool for SearchToolsTool {
         // the tool this agent habitually uses outranks a near-duplicate sibling.
         let mut order = rrf_merge(&semantic_names, &keyword_names, top_k * 2);
         let usage = agentos_tools_usage(&context).await;
-        if !usage.is_empty() {
-            for (name, score, _) in order.iter_mut() {
-                if let Some(u) = usage.get(name) {
-                    *score += 0.05 * (1.0 + *u as f32).ln();
-                }
-            }
-            order.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-        }
+        apply_usage_prior(&mut order, &usage);
         order.truncate(top_k);
         let desc_by_name: HashMap<&str, &str> = summaries
             .iter()
@@ -257,6 +267,44 @@ impl AgentTool for SearchToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Session aec64098: "telegram" hit `channel-send` on both legs, yet five
+    /// tools the agent had used 10–45 times (semantic-only, no keyword hit)
+    /// filled the top 5 because the additive prior dwarfed RRF.
+    #[test]
+    fn usage_prior_cannot_bury_a_two_leg_hit() {
+        let semantic: Vec<String> = [
+            "notify-user",
+            "agent-message",
+            "agent-messages-read",
+            "agent-messages-list",
+            "schedule-once",
+            "channel-send",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let keyword = vec!["channel-send".to_string()];
+        let mut order = rrf_merge(&semantic, &keyword, 10);
+        let usage: HashMap<String, f64> = [
+            ("notify-user", 45.0),
+            ("agent-message", 28.0),
+            ("agent-messages-read", 16.0),
+            ("agent-messages-list", 10.0),
+            ("schedule-once", 7.0),
+        ]
+        .iter()
+        .map(|(n, u)| (n.to_string(), *u))
+        .collect();
+        apply_usage_prior(&mut order, &usage);
+        assert_eq!(order[0].0, "channel-send", "{order:?}");
+        // The prior still reorders single-leg neighbours: a well-used tool at
+        // semantic rank 2 outranks an unused one at rank 1 by a hair.
+        let semantic = vec!["agent-list".to_string(), "notify-user".to_string()];
+        let mut order = rrf_merge(&semantic, &[], 10);
+        apply_usage_prior(&mut order, &usage);
+        assert_eq!(order[0].0, "notify-user", "{order:?}");
+    }
 
     #[test]
     fn rrf_merge_fuses_both_legs_and_dedups() {

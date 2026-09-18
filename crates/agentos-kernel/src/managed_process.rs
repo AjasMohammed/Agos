@@ -5,9 +5,13 @@
 //!
 //! Processes are tracked per-agent and automatically cleaned up on task
 //! completion or agent disconnect.
+//!
+//! Every process runs in a bwrap sandbox limited to the agent's exec roots,
+//! with a cleared environment and network only on request. The tracked PID is
+//! bwrap's: any signal that terminates it tears down the whole sandbox.
 
 use crate::capability_provider::{CapabilityContext, CapabilityProvider, CapabilityResult};
-use crate::managed_env::{activated_env, WorkspaceInfo, WorkspaceResolver};
+use crate::managed_env::{activate, WorkspaceInfo, WorkspaceResolver};
 use agentos_types::{AgentID, AgentOSError, PermissionOp, TaskID};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -425,7 +429,7 @@ impl ProcessProvider {
 
 /// Resolve a binary name against the workspace's local bin dirs.
 ///
-/// Order matches `activated_env`'s `PATH`: venv/bin → node_modules/.bin →
+/// Order matches `workspace_bin_dirs`: venv/bin → node_modules/.bin →
 /// bin. Returns `None` if no match is an executable regular file confined
 /// to the workspace tree.
 ///
@@ -468,7 +472,9 @@ fn resolve_workspace_binary(ws: &WorkspaceInfo, binary: &str) -> Option<PathBuf>
             );
             continue;
         }
-        return Some(canonical);
+        // The literal path: binds use literal paths, so a canonical one
+        // (e.g. `/var/home` behind a `/home` symlink) would not exist inside.
+        return Some(p);
     }
     None
 }
@@ -523,32 +529,20 @@ impl ProcessProvider {
             });
         }
 
-        let working_dir = params["working_dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .or_else(|| workspace_info.as_ref().map(|w| w.root.clone()))
-            .unwrap_or_else(|| context.data_dir.clone());
-
-        // SECURITY: validate working_dir is within agent's scope.
-        if !working_dir.starts_with(&context.data_dir)
-            && !context
-                .workspace_paths
-                .iter()
-                .any(|wp| working_dir.starts_with(wp))
-        {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "proc.spawn".into(),
-                operation: format!(
-                    "working_dir '{}' is outside agent scope",
-                    working_dir.display()
-                ),
-            });
-        }
+        let working_dir = context.exec_working_dir(
+            params["working_dir"].as_str(),
+            workspace_info
+                .as_ref()
+                .map(|w| w.root.clone())
+                .unwrap_or_else(|| context.agent_home.clone()),
+            "proc.spawn",
+        )?;
+        let network = context.exec_network(params, "proc-spawn")?;
 
         // Resolve the binary. With a workspace, prefer the workspace's local
-        // bin dirs and bypass the global binary allowlist (the workspace is
-        // the sandbox). Without a workspace, keep the original "no path-based
-        // binaries + allowlist" rules.
+        // bin dirs and bypass the global binary allowlist (the process is
+        // sandboxed either way). Without a workspace, keep the original "no
+        // path-based binaries + allowlist" rules.
         let (resolved_binary, in_workspace) = if let Some(ws) = workspace_info.as_ref() {
             match resolve_workspace_binary(ws, binary) {
                 Some(path) => (path.to_string_lossy().into_owned(), true),
@@ -592,17 +586,15 @@ impl ProcessProvider {
         let limits = self.table.config.default_limits.clone();
 
         // Spawn the process first (we need the PID for the table entry).
-        let mut cmd = tokio::process::Command::new(&resolved_binary);
+        let mut sandbox = context.exec_sandbox("proc-spawn", network);
+        if let Some(ws) = workspace_info.as_ref() {
+            sandbox = activate(sandbox, ws)?;
+        }
+        let mut cmd = sandbox.command(&working_dir, &resolved_binary).await?;
         cmd.args(&args)
-            .current_dir(&working_dir)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        if let Some(ws) = workspace_info.as_ref() {
-            cmd.env_clear();
-            for (k, v) in activated_env(ws) {
-                cmd.env(k, v);
-            }
-        }
 
         let mut child = cmd.spawn().map_err(|e| AgentOSError::ToolExecutionFailed {
             tool_name: "proc-spawn".into(),
@@ -1027,7 +1019,18 @@ mod tests {
             data_dir: PathBuf::from("/tmp"),
             permissions: agentos_types::PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: PathBuf::from("/tmp"),
+            workspace_paths_executable: vec![],
         }
+    }
+
+    /// Spawning needs a working bwrap; CI hosts without user namespaces skip.
+    async fn sandbox_or_skip() -> bool {
+        let ok = agentos_tools::sandbox_fs::bwrap_usable().await;
+        if !ok {
+            eprintln!("skipping: bwrap cannot sandbox on this host");
+        }
+        ok
     }
 
     #[test]
@@ -1205,6 +1208,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_echo_process() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx = make_context();
 
@@ -1248,6 +1254,9 @@ mod tests {
 
     #[tokio::test]
     async fn max_processes_enforced() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx = make_context();
 
@@ -1268,6 +1277,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_processes() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx = make_context();
 
@@ -1281,6 +1293,9 @@ mod tests {
 
     #[tokio::test]
     async fn agent_isolation() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx_a = make_context();
         let ctx_b = CapabilityContext {
@@ -1313,6 +1328,9 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_fast_process() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx = make_context();
 
@@ -1340,6 +1358,9 @@ mod tests {
 
     #[tokio::test]
     async fn output_capture() {
+        if !sandbox_or_skip().await {
+            return;
+        }
         let p = make_provider();
         let ctx = make_context();
 
@@ -1368,6 +1389,87 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("hello from managed process"));
+    }
+
+    #[tokio::test]
+    async fn spawned_process_is_sandboxed_without_kernel_env() {
+        if !sandbox_or_skip().await {
+            return;
+        }
+        let home = tempfile::TempDir::new().unwrap();
+        let data = tempfile::TempDir::new().unwrap();
+        std::fs::write(data.path().join("vault.db"), "secret").unwrap();
+        let ctx = CapabilityContext {
+            data_dir: data.path().to_path_buf(),
+            agent_home: home.path().to_path_buf(),
+            ..make_context()
+        };
+        let p = make_provider();
+        // `cargo test` exports CARGO_MANIFEST_DIR to this process — the
+        // stand-in for the kernel's API keys.
+        let script = format!(
+            "env; test -e '{}' && echo VAULT_VISIBLE; echo ok > written",
+            data.path().join("vault.db").display()
+        );
+        let spawned = p
+            .execute(
+                "spawn",
+                json!({"binary": "sh", "args": ["-c", script]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let id = spawned.output["process_id"].as_str().unwrap();
+        let waited = p
+            .execute("wait", json!({"process_id": id, "timeout_secs": 10}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(waited.output["exit_code"], 0);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let out = p
+            .execute("output", json!({"process_id": id, "lines": 200}), &ctx)
+            .await
+            .unwrap();
+        let text = out.output["lines"].to_string();
+        assert!(!text.contains("CARGO_MANIFEST_DIR"), "{text}");
+        assert!(!text.contains("VAULT_VISIBLE"), "{text}");
+        assert!(
+            text.contains(&format!("HOME={}", home.path().display())),
+            "{text}"
+        );
+        assert!(home.path().join("written").exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_working_dir_outside_exec_roots_and_ungranted_network() {
+        let home = tempfile::TempDir::new().unwrap();
+        let data = tempfile::TempDir::new().unwrap();
+        let ctx = CapabilityContext {
+            data_dir: data.path().to_path_buf(),
+            agent_home: home.path().join("agents").join("a"),
+            ..make_context()
+        };
+        let p = make_provider();
+        let escape = format!("{}/agents/a/../..", home.path().display());
+        for dir in [data.path().display().to_string(), escape, "relative".into()] {
+            let err = p
+                .execute("spawn", json!({"binary": "echo", "working_dir": dir}), &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("outside agent scope"),
+                "{dir}: {err}"
+            );
+        }
+        let err = p
+            .execute(
+                "spawn",
+                json!({"binary": "echo", "allow_network": true}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("net.outbound"), "{err}");
     }
 
     #[tokio::test]

@@ -71,6 +71,8 @@ impl CapabilityDispatcher for KernelCapabilityDispatcher {
             data_dir,
             permissions,
             workspace_paths,
+            agent_home,
+            workspace_paths_executable,
         } = request;
         // Look up the provider.
         let registry = self.registry.read().await;
@@ -194,6 +196,8 @@ impl CapabilityDispatcher for KernelCapabilityDispatcher {
             data_dir,
             permissions,
             workspace_paths,
+            agent_home,
+            workspace_paths_executable,
         };
 
         let result = provider.execute(&action, params, &context).await;
@@ -309,6 +313,8 @@ mod tests {
             data_dir: std::env::temp_dir(),
             permissions: perms,
             workspace_paths: vec![],
+            agent_home: std::env::temp_dir(),
+            workspace_paths_executable: vec![],
         }
     }
 

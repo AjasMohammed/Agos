@@ -912,6 +912,8 @@ mod tests {
             data_dir: PathBuf::from("/tmp/test-data"),
             permissions: agentos_types::PermissionSet::default(),
             workspace_paths: vec![],
+            agent_home: PathBuf::from("/tmp/agents/test"),
+            workspace_paths_executable: vec![],
         }
     }
 

@@ -13,7 +13,9 @@ use zeroize::Zeroizing;
 /// `url_private` URL requires the bot token to download, which the kernel
 /// supplies (gated to `slack.com`). Returns `None` when there's nothing to send.
 fn slack_message_content(m: &serde_json::Value) -> Option<MessageContent> {
-    let text = m["text"].as_str().unwrap_or("");
+    // Slack's composer claims any message starting with `/` as its own slash
+    // command, so operators type ` /approve 42`; trim so the router sees `/`.
+    let text = m["text"].as_str().unwrap_or("").trim_start();
     let mut media: Vec<MessageContent> = Vec::new();
     if let Some(files) = m["files"].as_array() {
         for f in files {
@@ -91,7 +93,14 @@ impl ChannelAdapter for SlackAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text: String = msg.text_with_actions().chars().take(40_000).collect();
+        // markdown_text renders standard Markdown; Slack caps it at 12,000 chars.
+        let mut text = msg.text_with_actions();
+        if !msg.actions.is_empty() {
+            text.push_str(
+                "\n_In Slack, type a space before the `/` or Slack treats it as its own command._",
+            );
+        }
+        let text: String = text.chars().take(12_000).collect();
         let thread_ts = msg.thread_id.clone();
         let client = &self.client;
         let token = self.bot_token.as_str();
@@ -101,7 +110,7 @@ impl ChannelAdapter for SlackAdapter {
         crate::retry::with_retry(&policy, "slack", || async {
             let mut body = serde_json::json!({
                 "channel": channel,
-                "text": &text
+                "markdown_text": &text
             });
             if let Some(ts) = thread_ts.as_deref().filter(|s| !s.trim().is_empty()) {
                 body["thread_ts"] = serde_json::Value::String(ts.to_string());
@@ -254,6 +263,15 @@ mod tests {
         assert!(matches!(
             slack_message_content(&m),
             Some(MessageContent::Text(t)) if t == "hello"
+        ));
+    }
+
+    #[test]
+    fn leading_space_before_slash_command_is_trimmed() {
+        let m = json!({ "text": " /approve 42" });
+        assert!(matches!(
+            slack_message_content(&m),
+            Some(MessageContent::Text(t)) if t == "/approve 42"
         ));
     }
 

@@ -256,6 +256,7 @@ pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<Str
         system_prompt: None,
         manually_offline: false,
         working_set_size: None,
+        avatar: None,
     };
 
     kernel.agent_registry.write().await.register(profile);
@@ -274,6 +275,18 @@ pub async fn register_mock_agent_with_responses(
     name: &str,
     responses: Vec<MockResponse>,
 ) -> AgentID {
+    register_mock_agent_with_permissions(kernel, name, responses, PermissionSet::new()).await
+}
+
+/// Like [`register_mock_agent_with_responses`] with an explicit permission set,
+/// for tests that must get past the capability gate to reach a later one.
+#[allow(dead_code)]
+pub async fn register_mock_agent_with_permissions(
+    kernel: &Kernel,
+    name: &str,
+    responses: Vec<MockResponse>,
+    permissions: PermissionSet,
+) -> AgentID {
     let agent_id = AgentID::new();
     let now = chrono::Utc::now();
 
@@ -283,7 +296,7 @@ pub async fn register_mock_agent_with_responses(
         provider: LLMProvider::Ollama,
         model: "mock-model".to_string(),
         status: AgentStatus::Online,
-        permissions: PermissionSet::new(),
+        permissions,
         roles: vec!["base".to_string()],
         current_task: None,
         description: String::new(),
@@ -295,6 +308,7 @@ pub async fn register_mock_agent_with_responses(
         system_prompt: None,
         manually_offline: false,
         working_set_size: None,
+        avatar: None,
     };
 
     kernel.agent_registry.write().await.register(profile);

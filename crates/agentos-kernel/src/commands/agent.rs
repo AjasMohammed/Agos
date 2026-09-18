@@ -9,7 +9,9 @@ use agentos_types::*;
 use secrecy::SecretString;
 use std::sync::Arc;
 
-fn is_valid_agent_name(name: &str) -> bool {
+/// Registration name rule. Also gates conversation participants, whose names are
+/// interpolated unwrapped into the turn prompt — no whitespace, brackets or colons.
+pub fn is_valid_agent_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.contains('/')
@@ -604,6 +606,7 @@ impl Kernel {
                 persisted_thinking_level,
                 persisted_system_prompt,
                 persisted_working_set_size,
+                persisted_avatar,
                 created_at,
                 is_reconnect,
             ) = match registry.get_by_name(&name) {
@@ -616,6 +619,7 @@ impl Kernel {
                     existing.default_thinking_level.clone(),
                     existing.system_prompt.clone(),
                     existing.working_set_size,
+                    existing.avatar.clone(),
                     existing.created_at,
                     true,
                 ),
@@ -626,6 +630,7 @@ impl Kernel {
                     vec![],
                     String::new(),
                     ThinkingLevel::Off,
+                    None,
                     None,
                     None,
                     now,
@@ -813,6 +818,8 @@ impl Kernel {
                 } else {
                     None
                 },
+                // Same: settings endpoint only, survives reconnect.
+                avatar: persisted_avatar,
             };
 
             // Remove stale Offline entry with same name when a new agent connects with a
