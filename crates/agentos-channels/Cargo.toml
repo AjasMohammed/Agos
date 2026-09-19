@@ -27,5 +27,8 @@ zeroize = { workspace = true }
 futures-util = "0.3"
 urlencoding = "2"
 url = { workspace = true }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# rustls with the OS trust store rather than native-tls: this was the last
+# openssl-sys consumer, and openssl has no aarch64 libs in the cross image.
+# Only connect_async() is used, which is TLS-backend agnostic.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 lettre = { workspace = true }
