@@ -4,7 +4,8 @@
     "title": "AgentOS API",
     "description": "REST + WebSocket control-plane API for AgentOS.\n\n**Response envelope:** all success responses are wrapped in `{ \"data\": ... }`; paginated list endpoints also include a `{ \"meta\": { \"total\": N } }` block. Errors use `{ \"error\": { \"code\", \"message\", \"status\" } }`.\n\n**Auth:** send `Authorization: Bearer agos_<key>` on protected routes. The WebSocket endpoint authenticates via a `?token=agos_<key>` query parameter.\n\nThe OpenAI-compatible `POST /api/v1/chat/completions` returns its native shape (not the `{ data }` envelope) and streams `text/event-stream` chunks when `stream` is true.",
     "license": {
-      "name": ""
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
     },
     "version": "0.1.0"
   },
