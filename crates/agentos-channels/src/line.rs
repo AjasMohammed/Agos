@@ -94,7 +94,7 @@ impl ChannelAdapter for LineAdapter {
         let body = if images.is_empty() {
             json!({
                 "replyToken": reply_token,
-                "messages": [{ "type": "text", "text": msg.content.render_for_delivery() }]
+                "messages": [{ "type": "text", "text": msg.text_with_actions() }]
             })
         } else {
             let mut messages: Vec<serde_json::Value> = Vec::new();

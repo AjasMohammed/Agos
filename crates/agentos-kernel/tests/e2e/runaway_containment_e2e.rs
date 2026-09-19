@@ -153,3 +153,89 @@ async fn paused_agent_backlog_is_held_not_executed() {
 
     handle.abort();
 }
+
+/// Pausing a subscription must also stop what it already started. On
+/// 2026-09-17 three memory-pressure tasks kept re-prompting the operator for
+/// process-manager approval long after the subscription was paused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn disabling_subscription_cancels_its_live_tasks() {
+    use agentos_types::{
+        EventID, EventSubscription, EventType, EventTypeFilter, SubscriptionID,
+        SubscriptionPriority, ThrottlePolicy, TriggerSource,
+    };
+
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+    let agent_id = common::register_mock_agent(&kernel, "e2e-sub", vec!["ok".to_string()]).await;
+    // Held offline so the executor leaves both tasks queued.
+    kernel
+        .agent_registry
+        .write()
+        .await
+        .set_offline(&agent_id, true);
+
+    let sub_id = kernel
+        .event_bus
+        .subscribe(EventSubscription {
+            id: SubscriptionID::new(),
+            agent_id,
+            event_type_filter: EventTypeFilter::Exact(EventType::CPUSpikeDetected),
+            filter: None,
+            priority: SubscriptionPriority::Normal,
+            throttle: ThrottlePolicy::None,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        })
+        .await;
+
+    let mut triggered = queued_task(agent_id, "react to cpu spike");
+    triggered.trigger_source = Some(TriggerSource {
+        event_id: EventID::new(),
+        event_type: EventType::CPUSpikeDetected,
+        subscription_id: sub_id,
+        chain_depth: 1,
+    });
+    let triggered_id = kernel.scheduler.enqueue(triggered).await;
+    let unrelated_id = kernel
+        .scheduler
+        .enqueue(queued_task(agent_id, "operator task"))
+        .await;
+
+    // The incident shape: the triggered task holds an open approval prompt.
+    kernel
+        .escalation_manager
+        .create_escalation(
+            triggered_id,
+            agent_id,
+            agentos_kernel::kernel_action::EscalationReason::AuthorizationRequired,
+            "summary".to_string(),
+            "Allow e2e-sub to use 'process-manager'?".to_string(),
+            vec!["approve".to_string(), "deny".to_string()],
+            "high".to_string(),
+            true,
+            agentos_types::TraceID::new(),
+            None,
+        )
+        .await;
+
+    assert!(kernel.disable_event_subscription(&sub_id).await);
+    assert!(
+        kernel.escalation_manager.list_pending().await.is_empty(),
+        "cancelling the task must close its approval prompt"
+    );
+
+    let state = |id| {
+        let kernel = kernel.clone();
+        async move { kernel.scheduler.get_task(&id).await.map(|t| t.state) }
+    };
+    assert_eq!(state(triggered_id).await, Some(TaskState::Cancelled));
+    assert_eq!(state(unrelated_id).await, Some(TaskState::Queued));
+    assert!(
+        !kernel
+            .disable_event_subscription(&SubscriptionID::new())
+            .await,
+        "unknown id reports not found"
+    );
+
+    handle.abort();
+}

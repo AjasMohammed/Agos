@@ -388,6 +388,13 @@ fn pref_patterns() -> &'static [Regex] {
     })
 }
 
+/// True when `msg` matches any of the preference regexes. Cheap pre-filter
+/// used to skip the LLM proposer on turns that cannot contain a preference.
+pub fn looks_like_preference(msg: &str) -> bool {
+    let m = msg.trim();
+    m.len() >= 12 && pref_patterns().iter().any(|r| r.is_match(m))
+}
+
 pub fn heuristic_propose(
     task_id: TaskID,
     agent_id: AgentID,

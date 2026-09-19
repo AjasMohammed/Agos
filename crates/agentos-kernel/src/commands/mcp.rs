@@ -213,11 +213,30 @@ impl Kernel {
             };
         }
 
-        // Reject duplicate names.
-        let existing = self.mcp_supervisor.server_statuses().await;
-        if existing.iter().any(|(n, _, _, _, _)| n == &name) {
+        // The name becomes a permission resource (`mcp:<name>/`), so it gets the
+        // same check the REST path applies — the CLI reaches here directly.
+        if !crate::plugin_registry::valid_plugin_id(&name) {
             return KernelResponse::Error {
-                message: format!("MCP server '{}' is already attached", name),
+                message: format!(
+                    "Invalid MCP server name '{name}': use letters, digits, '-' or '_' (max 64)"
+                ),
+            };
+        }
+
+        // Reject duplicate names, and names that sanitise to an attached server's
+        // permission resource (`a-b` vs `a_b`) — one grant would open both.
+        let resource = agentos_mcp::adapter::server_permission_resource(&name);
+        let existing = self.mcp_supervisor.server_statuses().await;
+        if let Some((taken, ..)) = existing
+            .iter()
+            .find(|(n, ..)| agentos_mcp::adapter::server_permission_resource(n) == resource)
+        {
+            return KernelResponse::Error {
+                message: if taken == &name {
+                    format!("MCP server '{name}' is already attached")
+                } else {
+                    format!("MCP server name '{name}' is too close to attached server '{taken}': both would share the grant {resource}")
+                },
             };
         }
 
@@ -473,8 +492,8 @@ impl Kernel {
                     // every MCP tool from the model while the call itself
                     // would have been allowed.
                     permissions: vec![format!(
-                        "mcp.{}:x",
-                        agentos_mcp::adapter::sanitize_tool_name(&tool_def.name)
+                        "{}:x",
+                        agentos_mcp::adapter::server_permission_resource(&name)
                     )],
                 },
                 capabilities_provided: ToolOutputs {
@@ -500,6 +519,7 @@ impl Kernel {
                 // MCP tools are externally-provided and may perform arbitrary operations.
                 // Default to ExecCapable (requires approval) rather than ReadonlyExternal.
                 risk_class: agentos_types::RiskClass::ExecCapable,
+                risk_class_by_action: Default::default(),
                 usage_hints: None,
                 tags: vec![],
             };

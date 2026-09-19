@@ -4,14 +4,14 @@ risk_class = "write_scoped"
 [manifest]
 name        = "file-editor"
 version     = "1.0.0"
-description = "Applies exact string replacements to a file within data_dir. Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous."
+description = "Applies exact string replacements to a file. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 search_hints = ["edit a file in place", "replace text in a file", "patch a file"]
 
 [capabilities_required]
-permissions = ["fs.user_data:w"]
+permissions = ["fs.user_data:w", "fs.workspace:w"]
 
 [capabilities_provided]
 outputs = ["status"]
@@ -26,7 +26,7 @@ required = ["path", "edits"]
 
 [payload_schema.properties.path]
 type = "string"
-description = "Relative file path under data directory"
+description = "File path: relative (under your home dir) or absolute inside a write-granted folder"
 
 [payload_schema.properties.edits]
 type = "array"

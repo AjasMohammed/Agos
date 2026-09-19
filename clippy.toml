@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "tokio::task::block_in_place", reason = "retires the calling tokio worker thread; bwrap sandboxes use --die-with-parent (PR_SET_PDEATHSIG fires on spawning-thread exit) and would be SIGKILLed — see agentos-tools/src/sandbox_fs.rs" },
+]

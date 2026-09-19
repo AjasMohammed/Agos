@@ -20,6 +20,10 @@ pub struct ApiAgentSummary {
     /// Whether the connected LLM adapter will emit native image blocks for this agent.
     #[serde(default)]
     pub supports_images: bool,
+    /// Profile picture as a `data:image/...;base64,` URL, usable directly as an
+    /// `<img src>`. Absent when none is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 /// Serde default for `last_active` on older payloads that predate the field.
@@ -84,6 +88,24 @@ pub struct UpdateAgentSettingsRequest {
     /// `None` leaves the prompt untouched; `Some("")` clears it.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Per-agent tool working-set size (T1 tools pre-armed by retrieval).
+    /// Absent = unchanged; `null` = revert to the kernel default; `0` = pinned
+    /// tools only (small / low-TPM models).
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<usize>)]
+    pub working_set_size: Option<Option<usize>>,
+    /// Profile picture as a `data:image/{png,jpeg,webp,gif};base64,` URL, at most
+    /// 64 KB. Absent = unchanged; `""` = remove the picture.
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+/// Distinguish "field absent" (`None`) from "field is null" (`Some(None)`).
+fn double_option<'de, D>(d: D) -> Result<Option<Option<usize>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<usize>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

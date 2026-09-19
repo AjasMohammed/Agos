@@ -28,12 +28,16 @@ description = "Command to execute (e.g., 'cargo test', 'npm run build', 'python 
 type = "string"
 
 [payload_schema.properties.working_dir]
-description = "Working directory for the command (default: workspace root when `workspace` is set, otherwise agent data_dir). Must be inside the agent's accessible scope."
+description = "Absolute working directory (default: workspace root when `workspace` is set, otherwise the agent home). Must be inside the agent home, its managed workspaces, or a folder granted with --mode rwx."
 type = "string"
 
 [payload_schema.properties.workspace]
 description = "Optional managed workspace name (created via env-create). When set, the command runs with VIRTUAL_ENV and {ws}/venv/bin:{ws}/node_modules/.bin:{ws}/bin prepended to PATH so it can import packages installed via env-install."
 type = "string"
+
+[payload_schema.properties.allow_network]
+description = "Share the host network with the command (default false). Requires net.outbound:x. Commands otherwise run offline in a sandbox that sees only the agent home, its managed workspaces, and folders granted with --mode rwx."
+type = "boolean"
 
 [sandbox]
 network = false

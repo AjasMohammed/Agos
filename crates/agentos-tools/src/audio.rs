@@ -47,9 +47,24 @@ impl AgentTool for AudioTool {
             "list_capture_consents" => {
                 vec![("hardware.audio.capture".to_string(), PermissionOp::Read)]
             }
-            "playback" => vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)],
+            // Mirrors the driver: the lifecycle actions ride the same
+            // `playback:x` grant that started the session they address.
+            "playback" | "playback_pause" | "playback_resume" | "playback_stop"
+            | "playback_status" => {
+                vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)]
+            }
             "volume" => {
                 let op = if payload.get("volume").is_some() {
+                    PermissionOp::Write
+                } else {
+                    PermissionOp::Read
+                };
+                vec![("hardware.audio.volume".to_string(), op)]
+            }
+            // Must mirror the driver's own mapping: without this arm "mute"
+            // fell through to `audio.list:r`, gating a write on a read grant.
+            "mute" => {
+                let op = if payload.get("muted").is_some() {
                     PermissionOp::Write
                 } else {
                     PermissionOp::Read
@@ -67,6 +82,7 @@ impl AgentTool for AudioTool {
     ) -> Result<Value, AgentOSError> {
         let hal = context
             .hal
+            .clone()
             .ok_or_else(|| AgentOSError::ToolExecutionFailed {
                 tool_name: self.name().to_string(),
                 reason: "Hardware Abstraction Layer (HAL) not available in this context"
@@ -89,6 +105,17 @@ impl AgentTool for AudioTool {
         // (including an attempt to forge the reserved key itself).
         let mut payload = payload;
         if let Value::Object(map) = &mut payload {
+            // File tools hand out paths relative to the agent home
+            // (`file-glob` → `inbox/<id>/song.mp3`); the driver only takes
+            // absolute ones and writes wherever it is told.
+            crate::workspace::contain_hal_path(map, "audio_path", self.name(), &context, false)?;
+            crate::workspace::contain_hal_path(map, "output_path", self.name(), &context, true)?;
+            // Recordings with no `output_path` land in the agent home, not /tmp.
+            let capture_dir = crate::workspace::agent_capture_dir(self.name(), &context)?;
+            map.insert(
+                crate::workspace::HAL_OUTPUT_DIR_KEY.to_string(),
+                Value::String(capture_dir.to_string_lossy().into_owned()),
+            );
             map.remove("agent_id");
             map.remove("session_id");
             map.insert(
@@ -135,5 +162,32 @@ mod tests {
             tool.required_permissions_for(&json!({ "action": "volume", "volume": 0.5 })),
             vec![("hardware.audio.volume".to_string(), PermissionOp::Write)]
         );
+        // The wrapper gate is what the KERNEL validates the capability token
+        // against; the driver re-checks its own mapping. If these two drift, a
+        // write is admitted on a read grant. Without this arm "mute" fell
+        // through to the `_` case and was gated on hardware.audio.list:r.
+        assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "mute" })),
+            vec![("hardware.audio.volume".to_string(), PermissionOp::Read)]
+        );
+        assert_eq!(
+            tool.required_permissions_for(&json!({ "action": "mute", "muted": false })),
+            vec![("hardware.audio.volume".to_string(), PermissionOp::Write)]
+        );
+        // Same drift trap for the playback lifecycle: falling through to `_`
+        // would gate stopping a track on `audio.list:r`, which every agent has.
+        for action in [
+            "playback",
+            "playback_pause",
+            "playback_resume",
+            "playback_stop",
+            "playback_status",
+        ] {
+            assert_eq!(
+                tool.required_permissions_for(&json!({ "action": action })),
+                vec![("hardware.audio.playback".to_string(), PermissionOp::Execute)],
+                "{action} must ride the playback grant"
+            );
+        }
     }
 }

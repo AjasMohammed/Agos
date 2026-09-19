@@ -503,6 +503,10 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         "escalations.html",
         include_str!("templates/escalations.html"),
     )?;
+    env.add_template(
+        "partials/escalation_cards.html",
+        include_str!("templates/partials/escalation_cards.html"),
+    )?;
     env.add_template("mcp_page.html", include_str!("templates/mcp_page.html"))?;
     env.add_template("prefs.html", include_str!("templates/prefs.html"))?;
     env.add_template("profile.html", include_str!("templates/profile.html"))?;

@@ -1,6 +1,21 @@
 tags = ["read"]
 risk_class = "control_plane"
 
+# Per-action override. `capture`/`burst` keep the tool-level control_plane —
+# they declare only `hardware.webcam.capture:r`, so permission op alone would
+# not have told them apart from a read. That is why this table is authored, not
+# derived.
+#
+# `list` is deliberately NOT here, despite the name: it opens every
+# `/dev/video*` node with `O_RDWR` to issue `VIDIOC_QUERYCAP`, which resumes the
+# device from runtime-suspend and can contend with an exclusive user of the
+# node. `device_key` returns `None` for it and the action takes no `device`
+# param, so the per-device gate cannot cover it either. Only
+# `list_capture_consents` is a true read — it reads the in-process consent
+# store and touches no hardware.
+[risk_class_by_action]
+list_capture_consents = "readonly_external"
+
 [manifest]
 name        = "webcam"
 version     = "1.0.0"
@@ -25,11 +40,16 @@ output = "WebcamResult"
 
 [payload_schema]
 type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
 description = "Webcam operation request"
 
 [payload_schema.properties.action]
 type = "string"
-enum = ["list", "capture", "burst", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
+enum = ["list", "capture", "burst", "list_capture_consents"]
 default = "list"
 description = "Webcam action to execute."
 
@@ -39,7 +59,7 @@ description = "Absolute video device path like /dev/video0."
 
 [payload_schema.properties.output_path]
 type = "string"
-description = "Absolute output path for captured frame(s)."
+description = "capture only: where to save the frame. Relative paths land in your own files directory (e.g. captures/frame.jpg); absolute paths must be inside a granted folder. Omit (and for burst) frames are named automatically under captures/."
 
 [payload_schema.properties.width]
 type = "integer"
@@ -65,16 +85,6 @@ minimum = 0
 maximum = 10000
 description = "Inter-frame delay in milliseconds for burst capture."
 
-[payload_schema.properties.agent_id]
-type = "string"
-description = "Agent/session id used for capture consent tracking."
-
-[payload_schema.properties.ttl_seconds]
-type = "integer"
-minimum = 1
-maximum = 3600
-description = "Consent TTL in seconds."
-
 [sandbox]
 network       = false
 fs_write      = false
@@ -89,7 +99,7 @@ payload = { action = "list" }
 
 [[examples]]
 description = "Capture one frame"
-payload = { action = "capture", device = "/dev/video0", output_path = "/tmp/frame.jpg" }
+payload = { action = "capture", device = "/dev/video0", output_path = "captures/frame.jpg" }
 
 [[examples]]
 description = "Capture burst"

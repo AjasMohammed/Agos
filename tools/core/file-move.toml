@@ -4,13 +4,13 @@ risk_class = "write_scoped"
 [manifest]
 name        = "file-move"
 version     = "1.0.0"
-description = "Moves or renames a file within data_dir. Both source and destination must be within data_dir. Acquires write lock on source, creates destination parent directories automatically."
+description = "Moves or renames a file. Both source and destination must be under your home dir or inside a write-granted folder. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires write lock on source, creates destination parent directories automatically."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 
 [capabilities_required]
-permissions = ["fs.user_data:w"]
+permissions = ["fs.user_data:w", "fs.workspace:w"]
 
 [capabilities_provided]
 outputs = ["status"]

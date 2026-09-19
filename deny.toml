@@ -18,6 +18,25 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # --- Unmaintained transitive crates with no patched release (reviewed 2026-09-18).
+    # None is a vulnerability; each is pinned by an upstream we do not control.
+    # core2: every version yanked + unmaintained. Pulled by bitstream-io (rav1e /
+    # ravif AVIF encoding in `image`) and libflate (include-flate). No replacement
+    # until those upstreams migrate.
+    "RUSTSEC-2026-0105",
+    { crate = "core2@0.4.0", reason = "all versions yanked; pinned by bitstream-io and libflate, see RUSTSEC-2026-0105" },
+    # number_prefix: via indicatif (fastembed / hf-hub download progress bars).
+    "RUSTSEC-2025-0119",
+    # paste: proc-macro only, via rav1e and macro_rules_attribute. Build-time.
+    "RUSTSEC-2024-0436",
+    # proc-macro-error2: proc-macro only, via include-flate-codegen. Build-time.
+    "RUSTSEC-2026-0173",
+    # rustls-pemfile: via rumqttc 0.25.1 (opt-in mqtt feature), same upstream
+    # block as the four webpki advisories above.
+    "RUSTSEC-2025-0134",
+    # scc (unsound): dev-dependency only, via serial_test 3.x. Never in a shipped
+    # binary. Fix needs scc 3.8.4, which serial_test has not adopted.
+    "RUSTSEC-2026-0205",
 ]
 
 [licenses]
@@ -37,6 +56,12 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # Added 2026-09-18 after the first real `cargo deny check licenses` run. All
+    # are permissive and compatible with shipping under Apache-2.0:
+    "MIT-0",                # borrow-or-share (jsonschema URI handling)
+    "0BSD",                 # quoted_printable (mail parsing)
+    "CDLA-Permissive-2.0",  # webpki-roots / webpki-root-certs (Mozilla CA bundle data)
+    "NCSA",                 # libfuzzer-sys: "(MIT OR Apache-2.0) AND NCSA", fuzz-only
 ]
 confidence-threshold = 0.9
 # Per-crate license exceptions go here, each with a written rationale:
@@ -47,6 +72,10 @@ confidence-threshold = 0.9
 # post-v1 once deduplicated. Wildcard version requirements are never allowed.
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace crates reference each other by path with no version. They are all
+# `publish = false` (see [workspace.package]), so this is safe; registry
+# wildcards (`foo = "*"`) are still denied.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

@@ -12,6 +12,7 @@ pub mod capability_dispatch;
 pub mod capability_provider;
 pub mod capability_registry;
 pub mod channel_chat_bridge;
+pub mod chat_ingest;
 pub mod chat_memory;
 pub mod chat_store;
 pub mod checkpoint_store;
@@ -26,16 +27,20 @@ pub mod context_compactor;
 pub mod context_compiler;
 pub mod context_injector;
 pub mod context_memory_store;
+pub mod convo_runner;
 pub mod convo_store;
 pub mod core_manifests;
 pub mod cost_tracker;
 pub mod delivery_router;
 pub mod escalation;
+pub mod escalation_card;
 pub mod escalation_channel_sink;
+pub mod escalation_prompt;
 pub mod event_bus;
 pub mod event_dispatch;
 pub mod event_permissions;
 pub mod fallback_resolver;
+pub mod file_bindings;
 pub mod file_store;
 pub mod health;
 pub mod health_monitor;
@@ -125,7 +130,9 @@ pub use capability_registry::CapabilityRegistry;
 pub use config::{load_config, KernelConfig};
 pub use context::ContextManager;
 pub use context_compiler::ContextCompiler;
-pub use kernel::{resolve_boot_vault_passphrase, ChatStreamEvent, Kernel};
+pub use kernel::{
+    is_unreplayable_assistant_turn, resolve_boot_vault_passphrase, ChatStreamEvent, Kernel,
+};
 pub use otel_exporter::OtelExporter;
 pub use retrieval_gate::{
     IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,

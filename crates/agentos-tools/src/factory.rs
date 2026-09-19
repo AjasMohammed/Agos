@@ -20,6 +20,7 @@ const STATELESS_TOOL_NAMES: &[&str] = &[
     "datetime",
     "think",
     "file-reader",
+    "user-file-list",
     "user-file-reader",
     "file-writer",
     "file-editor",
@@ -72,6 +73,7 @@ const HAL_TOOL_NAMES: &[&str] = &[
     "raw-usb",
     "usb-storage",
     "webcam",
+    "wifi",
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
@@ -165,6 +167,72 @@ pub const META_TOOL_NAMES: &[&str] = &[
     "tool-detail",
 ];
 
+/// Tools whose identical call can legitimately return a different answer
+/// because the world moved: physical hardware, live kernel state, and the
+/// clock. Their results are never held in the chat dedup cache.
+///
+/// The cache exists to break *loops* — an agent repeating one call forever.
+/// Replaying a stale answer is a different thing: a `bluetooth list_adapters`
+/// reply of `powered: false` was served for 13 minutes after the radio came
+/// on, and a `scan` failure recorded while the adapter was rfkill-blocked was
+/// replayed after it was unblocked, so the agent could not recover inside the
+/// session (2026-09-08, session `f203e802`).
+///
+/// ponytail: a name list, because it is the smallest thing that closes the
+/// observed hole. It does not cover the wider class of *mutating* tools whose
+/// replay silently skips a side effect (a repeated `http-client` POST never
+/// happens; `agent-inbox-read` skips the mark-as-read). Gating on the call's
+/// `intent_type` — cache `Query` only — is the upgrade path, and both call
+/// sites already have that value in scope.
+pub const VOLATILE_TOOL_NAMES: &[&str] = &[
+    // Anything that shells out: `rfkill list`, `systemctl status`, `ps`,
+    // `git status`. The highest-traffic tool in the system and the one whose
+    // replayed output is hardest to spot as stale.
+    "shell-exec",
+    // Physical hardware — state changes underneath us.
+    "audio",
+    "bluetooth",
+    "display-config",
+    "hardware-get-twin",
+    "hardware-info",
+    "container-list",
+    "container-logs",
+    "iot-ha-state",
+    "network-monitor",
+    "network-sockets",
+    "printer",
+    "proc-list",
+    "proc-output",
+    "proc-wait",
+    "process-manager",
+    "raw-usb",
+    "sys-monitor",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
+    "usb-storage",
+    "webcam",
+    "wifi",
+    // Live kernel state — changes as the turn itself runs.
+    "agent-inbox-list",
+    "agent-list",
+    "agent-messages-list",
+    "await-agents",
+    "episodic-list",
+    "escalation-status",
+    "get-schedule-runs",
+    "get-task-logs",
+    "list-my-schedules",
+    "list-once-jobs",
+    "list-timers",
+    "log-reader",
+    "poll-agent",
+    "task-list",
+    "task-status",
+    // The clock is never the same twice.
+    "datetime",
+];
+
 /// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
 ///
 /// Chat does not carry a `capability_token.allowed_tools` filter, so without
@@ -183,6 +251,7 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "skill-create",
     // Filesystem
     "file-reader",
+    "user-file-list",
     "user-file-reader",
     "file-writer",
     "file-editor",
@@ -478,9 +547,13 @@ fn init_embedder(model_cache_dir: &Path) -> Result<Arc<Embedder>, AgentOSError> 
                 cache_dir = %model_cache_dir.display(),
                 "Failed to initialize sandbox embedder with configured cache dir; falling back to default cache"
             );
-            Ok(Arc::new(Embedder::new().map_err(|e| {
-                AgentOSError::StorageError(format!("Failed to initialize embedding model: {}", e))
-            })?))
+            // Mirrors the kernel's boot policy: never fail on the embedder.
+            // Vector retrieval degrades to FTS5 lexical search (also the
+            // behaviour of a build without the `embeddings` feature).
+            Ok(Arc::new(Embedder::new().unwrap_or_else(|e| {
+                warn!(error = %e, "Embedding model unavailable; using zero-vector embedder");
+                Embedder::noop()
+            })))
         }
     }
 }
@@ -523,6 +596,7 @@ fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError
         "raw-usb" => Box::new(crate::raw_usb::RawUsbTool::new()),
         "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
         "webcam" => Box::new(crate::webcam::WebcamTool::new()),
+        "wifi" => Box::new(crate::wifi::WifiTool::new()),
         _ => return Ok(None),
     };
     Ok(Some(tool))

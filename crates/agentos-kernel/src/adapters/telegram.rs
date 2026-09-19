@@ -165,6 +165,31 @@ pub struct TelegramDeliveryAdapter {
     on_chat_discovered: Arc<std::sync::Mutex<Option<mpsc::Sender<ChatDiscovered>>>>,
     /// When true, inbound messages arrive via webhook POST, not long-polling.
     webhook_mode: bool,
+    /// Escalation prompts that carry buttons, keyed by `thread_id`, so
+    /// [`DeliveryAdapter::retract_actions`] can strip them once the decision is
+    /// made elsewhere. See [`ActionThread`] for the retract-before-send race.
+    /// ponytail: in-memory — prompts sent before a kernel restart keep their
+    /// buttons (a tap still answers "already resolved").
+    action_messages: std::sync::Mutex<std::collections::HashMap<String, ActionThread>>,
+}
+
+/// How long an [`ActionThread`] entry lives. Must outlive the escalation
+/// timeout (5 min) plus a slow send, so a tombstone is still there when a
+/// delayed `sendMessage` finally returns.
+const ACTION_THREAD_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Buttons sent under one escalation thread.
+///
+/// `retracted` is a tombstone: resolution can land while `sendMessage` is still
+/// in flight (router fan-out is sequential, 429s are slept out), and a retract
+/// that finds nothing would otherwise leave that late prompt's buttons live.
+/// A send that records into a tombstoned thread strips its own buttons instead.
+struct ActionThread {
+    created: std::time::Instant,
+    retracted: bool,
+    /// `(chat_id, message_id)` — the chat the prompt went to, not whatever
+    /// `chat_id` holds at retract time.
+    messages: Vec<(String, i64)>,
 }
 
 impl TelegramDeliveryAdapter {
@@ -193,9 +218,16 @@ impl TelegramDeliveryAdapter {
             client,
             on_chat_discovered: Arc::new(std::sync::Mutex::new(on_chat_discovered)),
             webhook_mode: false,
+            action_messages: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
+    /// Bot API endpoint for `method`.
+    ///
+    /// The bot token is part of the path. Every `reqwest::Error` from a request
+    /// built on this URL therefore carries the token in its `Display`, so such
+    /// errors must always be replaced with a constant — never formatted into a
+    /// log line or a `DeliveryError`.
     fn api_url(&self, method: &str) -> String {
         format!(
             "https://api.telegram.org/bot{}/{method}",
@@ -229,6 +261,80 @@ impl TelegramDeliveryAdapter {
         )
         .await?;
         Ok(())
+    }
+
+    /// Remember a sent escalation prompt so its buttons can be retracted.
+    /// Only `escalation:` threads: nothing retracts any other thread.
+    ///
+    /// Returns the message id when the thread was already retracted — the
+    /// caller must strip that message's buttons itself.
+    fn record_action_message(&self, msg: &UserMessage, chat_id: &str, sent: &Value) -> Option<i64> {
+        let thread = msg.thread_id.as_deref()?;
+        let id = sent.pointer("/result/message_id").and_then(Value::as_i64)?;
+        if !thread.starts_with("escalation:") {
+            return None;
+        }
+        let mut map = self
+            .action_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, t| t.created.elapsed() < ACTION_THREAD_TTL);
+        let entry = map
+            .entry(thread.to_string())
+            .or_insert_with(|| ActionThread {
+                created: std::time::Instant::now(),
+                retracted: false,
+                messages: Vec::new(),
+            });
+        if entry.retracted {
+            return Some(id);
+        }
+        entry.messages.push((chat_id.to_string(), id));
+        None
+    }
+
+    /// Record a sent prompt; if its escalation was already decided, strip the
+    /// buttons now. Best-effort: the prompt itself was delivered either way.
+    async fn after_action_send(&self, msg: &UserMessage, chat_id: &str, sent: &Value) {
+        if let Some(id) = self.record_action_message(msg, chat_id, sent) {
+            if let Err(e) = self.strip_buttons(chat_id, id).await {
+                tracing::debug!(error = %e, "Late escalation prompt: button strip failed");
+            }
+        }
+    }
+
+    /// `editMessageReplyMarkup` with an empty keyboard: the prompt text stays
+    /// for the record, the buttons go.
+    async fn strip_buttons(&self, chat_id: &str, message_id: i64) -> Result<(), DeliveryError> {
+        let body = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": { "inline_keyboard": [] },
+        });
+        telegram_post_json_with_retry(&self.client, &self.api_url("editMessageReplyMarkup"), &body)
+            .await
+            .map(|_| ())
+    }
+
+    /// Tombstone `thread_id` and hand back the prompts to strip.
+    fn take_for_retract(&self, thread_id: &str) -> Vec<(String, i64)> {
+        if !thread_id.starts_with("escalation:") {
+            return Vec::new();
+        }
+        let mut map = self
+            .action_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, t| t.created.elapsed() < ACTION_THREAD_TTL);
+        let entry = map
+            .entry(thread_id.to_string())
+            .or_insert_with(|| ActionThread {
+                created: std::time::Instant::now(),
+                retracted: false,
+                messages: Vec::new(),
+            });
+        entry.retracted = true;
+        std::mem::take(&mut entry.messages)
     }
 
     /// Call Telegram `deleteWebhook` to unregister the webhook and revert to polling.
@@ -464,7 +570,11 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
             }
 
             match telegram_post_json_with_retry(&self.client, &url, &payload).await {
-                Ok(_) => {}
+                Ok(sent) => {
+                    if is_last && has_markup {
+                        self.after_action_send(msg, &chat_id, &sent).await;
+                    }
+                }
                 Err(e) => {
                     // Parse failure → resend the same segment as plain text.
                     let es = format!("{e}");
@@ -483,7 +593,10 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
                                 fb["reply_markup"] = reply_markup.clone();
                             }
                         }
-                        let _ = telegram_post_json_with_retry(&self.client, &url, &fb).await?;
+                        let sent = telegram_post_json_with_retry(&self.client, &url, &fb).await?;
+                        if is_last && has_markup {
+                            self.after_action_send(msg, &chat_id, &sent).await;
+                        }
                     } else {
                         return Err(e);
                     }
@@ -494,8 +607,85 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
         Ok(())
     }
 
+    /// Strip the buttons from every prompt sent under `thread_id` and leave a
+    /// tombstone, so a prompt whose send is still in flight strips its own
+    /// (see [`ActionThread`]). Ids are taken before the edits, so a failed edit
+    /// is not retried.
+    async fn retract_actions(&self, thread_id: &str) -> Result<(), DeliveryError> {
+        let messages = self.take_for_retract(thread_id);
+        let mut result = Ok(());
+        for (chat_id, message_id) in messages {
+            if let Err(e) = self.strip_buttons(&chat_id, message_id).await {
+                result = Err(e);
+            }
+        }
+        result
+    }
+
+    /// Telegram private chats have a positive numeric id; groups and channels
+    /// are negative, and a channel may also be addressed as `@username`.
+    /// Everyone in those would see the full request.
+    async fn is_private_chat(&self) -> bool {
+        is_private_chat_id(&self.chat_id.read().await)
+    }
+
     async fn is_available(&self) -> bool {
         !self.bot_token.is_empty() && !self.chat_id.read().await.is_empty()
+    }
+
+    /// `sendChatAction` with `action=typing`. Telegram clears the indicator
+    /// after ~5s or when the bot sends a message, whichever comes first, so the
+    /// caller re-pings on a timer and never has to stop it explicitly.
+    ///
+    /// Deliberately posts directly instead of going through
+    /// `telegram_post_json_with_retry`: that helper sleeps out a 429 flood-wait
+    /// for up to an hour, and a cosmetic ping must never hold a task that long.
+    /// A dropped indicator is invisible; a stalled one is a bug.
+    async fn typing(&self) -> Result<(), DeliveryError> {
+        let chat_id: String = {
+            let guard = self.chat_id.read().await;
+            if guard.is_empty() {
+                // Auto-discovery has not run yet — there is no one to show it to.
+                return Ok(());
+            }
+            guard.clone()
+        };
+
+        let resp = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&json!({ "chat_id": chat_id, "action": "typing" }))
+            .send()
+            .await
+            .map_err(|_| {
+                DeliveryError("Telegram sendChatAction failed (details redacted)".into())
+            })?;
+
+        // `reqwest` only errors on transport failures, so a revoked token (401),
+        // an unknown chat (400) and flood control (429) all arrive here as `Ok`.
+        //
+        // Always read the body, on success as well as failure. Two reasons:
+        // the status alone cannot tell "chat not found" from "bot was blocked by
+        // the user" from "not enough rights" — three different operator actions —
+        // and under HTTP/1.1 a response whose body is dropped unread costs the
+        // pooled connection, which would mean a fresh TLS handshake every 4s on
+        // the same client that delivers real messages.
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+
+        // Telegram also reports failure as HTTP 200 with `{"ok": false, …}`, so
+        // the status is necessary but not sufficient.
+        //
+        // `telegram_error_summary` is used rather than `error_for_status()`
+        // because it reads `description`/`error_code` out of the body: the URL
+        // carries the bot token and every reqwest error Displays the URL.
+        if !status.is_success() || body.get("error_code").is_some() {
+            return Err(DeliveryError(format!(
+                "sendChatAction: {}",
+                telegram_error_summary(&body)
+            )));
+        }
+        Ok(())
     }
 
     fn adapter_instance_id(&self) -> Option<String> {
@@ -967,12 +1157,27 @@ fn format_telegram_plain(msg: &UserMessage) -> String {
     let subject: String = msg.subject.chars().take(400).collect();
     let body: String = msg.body.chars().take(3600).collect();
 
-    let out = if body.trim().is_empty() {
+    // No action fallback here: `build_inline_keyboard` renders every control as
+    // a real button, so appending "reply /approve 42" would duplicate it.
+    let is_escalation = msg
+        .thread_id
+        .as_deref()
+        .is_some_and(|t| t.starts_with("escalation:"));
+    let out = if is_escalation && msg.body.starts_with(msg.subject.as_str()) {
+        // An escalation card opens with its own title: a second banner above
+        // it would print the header twice.
+        body
+    } else if body.trim().is_empty() {
         format!("{icon} AgentOS — {subject}")
     } else {
         format!("{icon} AgentOS — {subject}\n\n{body}")
     };
     out.chars().take(4090).collect()
+}
+
+/// Only a positive numeric id is a one-to-one chat.
+fn is_private_chat_id(chat_id: &str) -> bool {
+    chat_id.parse::<i64>().is_ok_and(|id| id > 0)
 }
 
 /// Truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a code point.
@@ -987,8 +1192,34 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     out
 }
 
-/// Build an inline keyboard for `Question` messages with defined options.
+/// Build an inline keyboard for a message carrying actionable controls, or for
+/// a `Question` with defined options.
+///
+/// `PromptAction.command` is used as `callback_data` verbatim — it is the same
+/// string `InboundRouter` accepts as typed text, and Telegram returns it as
+/// `InboundMessage.text` on a tap (see `extract_inbound_message`), so a button
+/// press needs no routing of its own. It must NOT be truncated here: a clipped
+/// `/approve 4` resolves a different escalation than the one displayed.
+/// `escalation_actions` already dropped anything over the 64-byte cap.
 fn build_inline_keyboard(msg: &UserMessage) -> serde_json::Value {
+    if !msg.actions.is_empty() {
+        let buttons: Vec<Vec<serde_json::Value>> = msg
+            .actions
+            .chunks(2)
+            .map(|row| {
+                row.iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "text": a.short_label(64),
+                            "callback_data": a.command,
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        return serde_json::json!({ "inline_keyboard": buttons });
+    }
+
     if let UserMessageKind::Question {
         options: Some(opts),
         ..
@@ -1340,5 +1571,164 @@ mod tests {
         let inbound =
             extract_inbound_message(&update, "42", ChannelInstanceID::new()).expect("inbound");
         assert_eq!(inbound.text, "hello");
+    }
+}
+
+#[cfg(test)]
+mod action_keyboard_tests {
+    use super::*;
+    use agentos_types::{
+        ActionStyle, NotificationID, NotificationPriority, NotificationSource, PromptAction,
+        TraceID, UserMessage, UserMessageKind,
+    };
+
+    fn msg(kind: UserMessageKind, actions: Vec<PromptAction>) -> UserMessage {
+        UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: None,
+            trace_id: TraceID::new(),
+            kind,
+            priority: NotificationPriority::Urgent,
+            subject: "AgentOS approval needed (#42)".into(),
+            body: "AgentOS approval needed (#42)\nDecision: install python3".into(),
+            interaction: None,
+            actions,
+            delivery_status: Default::default(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: Some("escalation:42".into()),
+            reply_to_external_id: None,
+            attachment: None,
+        }
+    }
+
+    fn escalation_actions() -> Vec<PromptAction> {
+        vec![
+            PromptAction::new("✅ Approve", "/approve 42", ActionStyle::Primary),
+            PromptAction::new("❌ Deny", "/deny 42", ActionStyle::Danger),
+            PromptAction::new(
+                "✅ Approve & always allow",
+                "/approve 42 always",
+                ActionStyle::Secondary,
+            ),
+        ]
+    }
+
+    #[test]
+    fn escalation_actions_become_an_inline_keyboard() {
+        // An escalation is a `Notification`, so before actions existed this
+        // fell through `build_inline_keyboard` and returned null.
+        let m = msg(UserMessageKind::Notification, escalation_actions());
+        let kb = build_inline_keyboard(&m);
+        let rows = kb["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["callback_data"], "/approve 42");
+        assert_eq!(rows[1][0]["callback_data"], "/approve 42 always");
+    }
+
+    #[test]
+    fn actions_win_over_question_options() {
+        let m = msg(
+            UserMessageKind::Question {
+                question: "pick".into(),
+                options: Some(vec!["yes".into(), "no".into()]),
+                free_text_allowed: true,
+            },
+            escalation_actions(),
+        );
+        let kb = build_inline_keyboard(&m);
+        assert_eq!(kb["inline_keyboard"][0][0]["callback_data"], "/approve 42");
+    }
+
+    #[test]
+    fn question_options_still_work_without_actions() {
+        let m = msg(
+            UserMessageKind::Question {
+                question: "pick".into(),
+                options: Some(vec!["yes".into(), "no".into()]),
+                free_text_allowed: true,
+            },
+            Vec::new(),
+        );
+        let kb = build_inline_keyboard(&m);
+        assert_eq!(kb["inline_keyboard"][0][0]["callback_data"], "yes");
+    }
+
+    #[test]
+    fn rendered_text_omits_the_commands_when_buttons_carry_them() {
+        // Buttons plus "reply /approve 42" would show the same thing twice.
+        let m = msg(UserMessageKind::Notification, escalation_actions());
+        let text = format_telegram_plain(&m);
+        assert!(!text.contains("/approve 42"), "got: {text}");
+        assert!(text.contains("install python3"));
+    }
+
+    #[test]
+    fn only_positive_numeric_chat_ids_are_private() {
+        assert!(is_private_chat_id("1130156019"));
+        for not_private in ["-1001234", "@mychannel", "", "0"] {
+            assert!(!is_private_chat_id(not_private), "{not_private}");
+        }
+    }
+
+    #[test]
+    fn retract_before_send_still_strips_the_late_prompt() {
+        let adapter =
+            TelegramDeliveryAdapter::new("t".into(), "1".into(), ChannelInstanceID::new(), None);
+        let mut m = msg(UserMessageKind::Notification, escalation_actions());
+        m.thread_id = Some("escalation:7".into());
+        let sent = json!({"ok": true, "result": {"message_id": 99}});
+
+        // Normal order: send, then retract hands the prompt back.
+        assert_eq!(adapter.record_action_message(&m, "1", &sent), None);
+        assert_eq!(
+            adapter.take_for_retract("escalation:7"),
+            vec![("1".to_string(), 99)]
+        );
+        // Retract again: nothing left to strip.
+        assert!(adapter.take_for_retract("escalation:7").is_empty());
+
+        // Race: retract lands first; the late send must strip itself.
+        m.thread_id = Some("escalation:8".into());
+        assert!(adapter.take_for_retract("escalation:8").is_empty());
+        assert_eq!(adapter.record_action_message(&m, "1", &sent), Some(99));
+
+        // Non-escalation threads are never tracked.
+        m.thread_id = Some("question:1".into());
+        assert_eq!(adapter.record_action_message(&m, "1", &sent), None);
+        assert!(adapter.take_for_retract("question:1").is_empty());
+        assert!(!adapter
+            .action_messages
+            .lock()
+            .unwrap()
+            .contains_key("question:1"));
+    }
+
+    #[test]
+    fn a_button_tap_round_trips_to_the_approve_command() {
+        // Telegram returns `callback_data` as the inbound text, which is what
+        // `InboundRouter::handle_approval_command` parses. This is the whole
+        // reason `PromptAction.command` and the button payload are one string.
+        let kb = build_inline_keyboard(&msg(UserMessageKind::Notification, escalation_actions()));
+        let tapped = kb["inline_keyboard"][0][0]["callback_data"]
+            .as_str()
+            .expect("callback_data");
+
+        let update: TelegramUpdate = serde_json::from_value(serde_json::json!({
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb1",
+                "data": tapped,
+                "message": { "message_id": 7, "chat": { "id": 12345 } }
+            }
+        }))
+        .expect("parse update");
+
+        let inbound = extract_inbound_message(&update, "12345", ChannelInstanceID::new())
+            .expect("callback must yield an inbound message");
+        assert_eq!(inbound.text, "/approve 42");
     }
 }

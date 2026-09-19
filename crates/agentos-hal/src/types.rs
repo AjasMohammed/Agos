@@ -25,6 +25,16 @@ pub struct SystemSnapshot {
     pub hostname: String,
     pub load_average: (f64, f64, f64),
     pub disk_usage: Vec<DiskInfo>,
+    /// Charge of the first battery, 0-100. `None` on a machine with no
+    /// battery. Serialized even when absent: an explicit `null` tells a model
+    /// "this host has no battery", where a missing key reads as "not reported".
+    #[serde(default)]
+    pub battery_percent: Option<u8>,
+    /// Raw sysfs charging state — `Charging`, `Discharging`, `Full`,
+    /// `Not charging`, `Unknown`. Independent of `battery_percent`: a driver
+    /// exporting only one of the two reports that one and leaves this `None`.
+    #[serde(default)]
+    pub battery_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

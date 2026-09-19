@@ -120,6 +120,18 @@ impl AgentTool for AgentSelfTool {
             tool_count: self.tool_count,
             subscriptions: vec![],
             active_tasks,
+            granted_folders: agentos_types::GrantedFoldersSummary {
+                read: context
+                    .workspace_paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                write: context
+                    .workspace_paths_writable
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+            },
         };
 
         serde_json::to_value(&view).map_err(|e| AgentOSError::ToolExecutionFailed {

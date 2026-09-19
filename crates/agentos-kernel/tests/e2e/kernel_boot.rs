@@ -205,3 +205,42 @@ async fn test_audit_log_rotation() {
     kernel.shutdown();
     handle.await.unwrap();
 }
+
+/// Boot wires the FileStore-backed `AttachmentSink`, not the no-op default.
+///
+/// Regression: the sink and image resolver were installed only by
+/// `WebServer::new`, so `agentos start` (kernel + REST API) and
+/// `agentos gateway run` logged "attachment sink declined; inbound media NOT
+/// persisted" and dropped every Telegram voice note, photo and document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_boot_wires_file_store_attachment_sink() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    let sink = kernel
+        .attachment_sink
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let file_id = sink
+        .store("voice.ogg", "audio/ogg", b"OggS-not-really".to_vec())
+        .await
+        .expect("boot-time sink must persist inbound media");
+
+    let record = kernel
+        .file_store
+        .get_file_by_id_unscoped(&file_id)
+        .expect("lookup")
+        .expect("row registered");
+    assert_eq!(record.mime, "audio/ogg");
+    // Load-bearing tag: the prune sweep and user-file-reader both key off it.
+    assert!(
+        record.tags.iter().any(|t| t == "inbound"),
+        "{:?}",
+        record.tags
+    );
+    assert!(std::path::Path::new(&record.path).exists(), "bytes on disk");
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}

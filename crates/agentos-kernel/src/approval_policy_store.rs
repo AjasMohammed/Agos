@@ -379,6 +379,20 @@ pub fn grant_from_escalation(
             "an exec-capable tool with no path cannot be remembered unscoped",
         ));
     }
+    // `risk` above is the class `ApprovalHook` RESOLVED for this call, which a
+    // per-action override may have lowered (`wifi` is control_plane, but its
+    // `scan` action resolves readonly_external). The grant this mints is keyed
+    // on `(tool_name, path_glob, agent_id)` — there is no action dimension — so
+    // remembering an approval the operator only ever saw for one read action
+    // would extend it to every other action of the same tool, including the
+    // writes the tool-level class exists to gate. Refuse instead: the operator
+    // can still approve each call, and a path-scoped grant is unaffected.
+    if path_glob.is_none() && meta.get("scoped_action").is_some_and(|a| a.is_string()) {
+        return Ok(NotApplicable(
+            "this approval covered a single action; an unscoped tool-wide grant \
+             would also cover the tool's other actions",
+        ));
+    }
 
     let expires_at = Some(Utc::now() + chrono::Duration::days(REMEMBER_GRANT_DAYS));
     let entry = match matcher.add(
@@ -667,6 +681,50 @@ mod tests {
         escalation_with(serde_json::json!({
             "kind": TOOL_APPROVAL_KIND, "tool_name": tool, "risk_class": risk, "path": path
         }))
+    }
+
+    /// An approval the operator only ever saw for ONE action must not become a
+    /// tool-wide standing grant. The matcher is keyed on
+    /// `(tool_name, path_glob, agent_id)` with no action dimension, so an
+    /// unscoped grant minted off `wifi`'s downgraded `scan` would also satisfy
+    /// `wifi connect` for `REMEMBER_GRANT_DAYS`.
+    ///
+    /// The `ExecCapable`/`Interactive` guard above does not cover this: the risk
+    /// string in the metadata is the class `ApprovalHook` RESOLVED, which the
+    /// per-action override already lowered to `ReadonlyExternal`.
+    #[tokio::test]
+    async fn action_scoped_approval_cannot_mint_an_unscoped_tool_wide_grant() {
+        let (_t, store) = fresh().await;
+        let matcher = ApprovalPolicyMatcher::load(store).unwrap();
+        let audit = test_audit();
+
+        let mut esc = tool_esc("wifi", "ReadonlyExternal", serde_json::Value::Null);
+        esc.metadata["scoped_action"] = "scan".into();
+        assert!(matches!(
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
+            RememberOutcome::NotApplicable(_)
+        ));
+
+        // Without the action marker the same escalation is remembered, which is
+        // what makes the marker (not the risk string) the thing doing the work.
+        let esc = tool_esc("wifi", "ReadonlyExternal", serde_json::Value::Null);
+        assert!(matches!(
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
+            RememberOutcome::Granted(_)
+        ));
+
+        // A path-scoped grant is unaffected: the glob already bounds it, so the
+        // action marker must not block it.
+        let mut esc = tool_esc(
+            "file-writer",
+            "WriteScoped",
+            "/home/alice/proj/src/main.rs".into(),
+        );
+        esc.metadata["scoped_action"] = "write".into();
+        assert!(matches!(
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
+            RememberOutcome::Granted(_)
+        ));
     }
 
     #[tokio::test]

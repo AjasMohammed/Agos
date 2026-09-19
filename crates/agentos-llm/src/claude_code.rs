@@ -675,6 +675,11 @@ impl ClaudeCodeCore {
             .arg("--verbose")
             .arg("--include-partial-messages");
 
+        // The kernel aborts this task when the chat reader disappears (Stop).
+        // Without `kill_on_drop` the CLI child survives that abort as an orphan,
+        // burning subscription quota on an answer nobody will read.
+        cmd.kill_on_drop(true);
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {

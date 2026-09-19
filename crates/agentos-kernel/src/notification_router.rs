@@ -81,6 +81,13 @@ pub struct InboundMediaUrl {
 ///
 /// Adapters that support receiving inbound messages from the user implement
 /// `supports_inbound() → true` and `start_listening(tx)`.
+/// How long a cosmetic "typing…" ping may take before it is abandoned.
+///
+/// Deliberately shorter than the ~5s an indicator lives for: a ping still in
+/// flight when the indicator has already expired cannot refresh anything, and
+/// waiting on it only delays the next attempt.
+const TYPING_PING_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[async_trait]
 pub trait DeliveryAdapter: Send + Sync {
     fn channel_id(&self) -> DeliveryChannel;
@@ -104,6 +111,36 @@ pub trait DeliveryAdapter: Send + Sync {
     /// Returns `None` for built-in adapters (CLI, SSE, Webhook, Slack, Desktop).
     fn adapter_instance_id(&self) -> Option<String> {
         None
+    }
+
+    /// Show the channel's native "typing…" indicator, if it has one.
+    ///
+    /// Purely cosmetic: it tells the user an agent is working on a turn that may
+    /// take minutes. Defaults to a no-op so an adapter without the concept — and
+    /// every adapter that predates this method — opts out by doing nothing.
+    ///
+    /// Indicators expire on their own (Telegram after ~5s), so this is called
+    /// repeatedly for the life of a turn and needs no matching "stop" call.
+    /// Implementations must be cheap and must never block on a rate-limit
+    /// backoff: a dropped ping costs nothing, a stalled one delays the reply.
+    async fn typing(&self) -> Result<(), DeliveryError> {
+        Ok(())
+    }
+
+    /// Whether this adapter delivers to a one-to-one chat with the operator,
+    /// so it may receive the full approval request (task text, target,
+    /// redacted payload). Defaults to `false`: a push service, webhook,
+    /// desktop banner or group chat gets only the summary.
+    async fn is_private_chat(&self) -> bool {
+        false
+    }
+
+    /// Strip the interactive controls from every message this adapter sent
+    /// under `thread_id`, because the decision they offered was already made
+    /// (possibly on another surface). Defaults to a no-op; a late tap on a
+    /// control left in place is still answered "already resolved".
+    async fn retract_actions(&self, _thread_id: &str) -> Result<(), DeliveryError> {
+        Ok(())
     }
 
     /// Start the background listener.
@@ -450,6 +487,14 @@ impl NotificationRouter {
             });
         }
 
+        // An expired question's asker has already taken its auto_action; storing
+        // a late answer would report "sent" for a reply no agent will read.
+        if msg.expires_at.is_some_and(|at| at < Utc::now()) {
+            return Err(AgentOSError::KernelError {
+                reason: format!("Question {notification_id} has expired"),
+            });
+        }
+
         // Atomically persist — set_response returns an error if already responded.
         self.inbox.set_response(&notification_id, &response).await?;
 
@@ -468,6 +513,48 @@ impl NotificationRouter {
     /// dead `oneshot::Sender`s do not accumulate in the map between sweep cycles.
     pub async fn remove_waiting_task(&self, id: &NotificationID) {
         self.waiting_tasks.write().await.remove(id);
+    }
+
+    /// Drop an `ask-user` waiter that timed out on the asker's side, with the
+    /// same audit row the periodic sweep writes.
+    pub async fn expire_waiter(
+        &self,
+        id: &NotificationID,
+        task_id: Option<agentos_types::TaskID>,
+        auto_action: &str,
+    ) {
+        if self.waiting_tasks.write().await.remove(id).is_none() {
+            return;
+        }
+        let _ = self.audit.append(AuditEntry {
+            timestamp: Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::NotificationAutoActioned,
+            agent_id: None,
+            task_id,
+            tool_id: None,
+            details: serde_json::json!({
+                "notification_id": id.to_string(),
+                "auto_action": auto_action,
+            }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+    }
+
+    /// Drop every waiter belonging to `task_id`. Called on task cancel: the
+    /// asker wakes with its fallback and aborts on the terminal state, and the
+    /// question stops counting as open for inbound channel replies.
+    pub async fn drop_waiters_for_task(&self, task_id: &agentos_types::TaskID) {
+        let ids: Vec<NotificationID> = self.waiting_tasks.read().await.keys().cloned().collect();
+        for id in ids {
+            let owned =
+                matches!(self.inbox.get(&id).await, Ok(Some(msg)) if msg.task_id == Some(*task_id));
+            if owned {
+                self.waiting_tasks.write().await.remove(&id);
+            }
+        }
     }
 
     /// Return the notification IDs of all blocking questions currently awaiting a response.
@@ -644,6 +731,56 @@ impl NotificationRouter {
             .await
     }
 
+    /// Split registered adapters for an escalation fan-out:
+    /// `(private chat instance ids, filter sets for everything else)`. The
+    /// second part is shaped for [`Self::deliver_filtered`] — instance ids for
+    /// instance-registered adapters, kinds for built-ins that have none.
+    pub async fn split_private_chats(
+        &self,
+    ) -> (
+        std::collections::HashSet<String>,
+        (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ),
+    ) {
+        let adapters = self.adapters.read().await.clone();
+        let mut private = std::collections::HashSet::new();
+        let mut others = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashSet::new();
+        for adapter in adapters {
+            match adapter.adapter_instance_id() {
+                Some(id) if adapter.is_private_chat().await => {
+                    private.insert(id);
+                }
+                Some(id) => {
+                    others.insert(id);
+                }
+                None => {
+                    kinds.insert(adapter.channel_id().as_str().to_string());
+                }
+            }
+        }
+        (private, (others, kinds))
+    }
+
+    /// Ask every adapter to strip the controls it sent under `thread_id`.
+    ///
+    /// Best-effort and bounded per adapter: the decision is already recorded,
+    /// so a failure here only leaves a stale button whose tap is answered
+    /// "already resolved".
+    pub async fn retract_actions(&self, thread_id: &str) {
+        const RETRACT_TIMEOUT: Duration = Duration::from_secs(10);
+        let adapters = self.adapters.read().await.clone();
+        for adapter in adapters {
+            match tokio::time::timeout(RETRACT_TIMEOUT, adapter.retract_actions(thread_id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!(thread_id, error = %e, "retract_actions failed"),
+                Err(_) => tracing::debug!(thread_id, "retract_actions timed out"),
+            }
+        }
+    }
+
     /// The `DeliveryAdapter` registered for `instance_id`, if this router owns it.
     async fn adapter_for(&self, instance_id: &str) -> Option<Arc<dyn DeliveryAdapter>> {
         self.adapters
@@ -652,6 +789,61 @@ impl NotificationRouter {
             .iter()
             .find(|a| a.adapter_instance_id().as_deref() == Some(instance_id))
             .cloned()
+    }
+
+    /// Ping the "typing…" indicator on `instance_id`'s channel, if it has one.
+    ///
+    /// Returns `false` when the keepalive driving this should give up for the
+    /// rest of the turn — no adapter owns the channel, or the ping failed.
+    /// Nothing here is ever fatal to a turn: the indicator is cosmetic and every
+    /// outcome is logged at debug, because this runs on a timer and a warn would
+    /// flood the log for a miss nobody can see.
+    ///
+    /// Unlike [`Self::send_to_channel`] this has **no `ChannelManager`
+    /// fallback**: it reaches only adapters this router owns. Manager-stack
+    /// kinds (Discord, Slack, WhatsApp, Webhook…) are therefore silently
+    /// indicator-free until the indicator is plumbed through that stack too.
+    pub async fn typing_on_channel(&self, instance_id: &str) -> bool {
+        // A turn parked on a blocking question or an approval is not working, it
+        // is waiting for the person reading the channel. Claiming "typing…" there
+        // reads as "sit tight, an answer is coming" and talks them out of the one
+        // action that can unblock it.
+        //
+        // ponytail: suppresses on *any* outstanding blocking interaction rather
+        // than one scoped to this channel, because `waiting_tasks` is keyed by
+        // NotificationID and holds no channel. `InboundRouter::run` serializes
+        // turns per channel only, so with two channels mid-turn one parked turn
+        // mutes the other's indicator. Cosmetic; key this by channel if
+        // multi-channel operators notice.
+        if !self.waiting_tasks.read().await.is_empty() {
+            return true;
+        }
+
+        let Some(adapter) = self.adapter_for(instance_id).await else {
+            tracing::trace!(instance_id, "No delivery adapter owns this channel");
+            return false;
+        };
+
+        // A ping that outlives the indicator it is refreshing is worse than no
+        // ping: it blanks the signal and stalls the keepalive behind it. The
+        // adapter's own HTTP client can allow far longer than that, so bound it
+        // here, once, for every adapter rather than in each impl.
+        match tokio::time::timeout(TYPING_PING_TIMEOUT, adapter.typing()).await {
+            Ok(Ok(())) => true,
+            // Stop rather than retry. A ping fails for reasons that do not heal
+            // within a turn — revoked token, blocked bot, flood control — and
+            // re-firing every 4s for the remaining 600s of a turn turns a
+            // cosmetic miss into ~165 futile requests, which for flood control
+            // actively lengthens the ban on the token that also delivers replies.
+            Ok(Err(e)) => {
+                tracing::debug!(instance_id, error = %e, "Typing indicator ping failed");
+                false
+            }
+            Err(_) => {
+                tracing::debug!(instance_id, "Typing indicator ping timed out");
+                false
+            }
+        }
     }
 
     /// Return a clone of the `UserInbox` handle for use by command handlers.
@@ -757,6 +949,7 @@ fn outbound_from(msg: &UserMessage, instance_id: &str) -> OutboundMessage {
     };
 
     OutboundMessage {
+        actions: msg.actions.clone(),
         channel_instance_id: instance_id.to_string(),
         content,
         thread_id: msg.reply_to_external_id.clone(),
@@ -905,6 +1098,10 @@ struct WebhookPayload<'a> {
     requires_response: bool,
     created_at: &'a str,
     agentos_version: &'static str,
+    /// Actionable controls, omitted entirely when there are none so existing
+    /// consumers see an unchanged payload shape.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    actions: &'a [agentos_types::PromptAction],
 }
 
 impl WebhookDeliveryAdapter {
@@ -958,6 +1155,10 @@ impl DeliveryAdapter for WebhookDeliveryAdapter {
             requires_response: msg.interaction.is_some(),
             created_at: &msg.created_at.to_rfc3339(),
             agentos_version: env!("CARGO_PKG_VERSION"),
+            // Structural rather than baked into `body`: a webhook consumer is
+            // usually a script, and these are the literal commands it POSTs
+            // back at the inbound webhook to resolve the escalation.
+            actions: &msg.actions,
         };
 
         let body_bytes = serde_json::to_vec(&payload).map_err(|e| DeliveryError(e.to_string()))?;
@@ -1158,7 +1359,19 @@ impl DeliveryAdapter for SlackDeliveryAdapter {
         })];
 
         if self.include_body && !msg.body.is_empty() {
-            let body_text: String = msg.body.chars().take(500).collect();
+            // Text fallback, not Block Kit buttons: a Slack button POSTs to an
+            // Interactivity Request URL that AgentOS does not expose yet, so a
+            // rendered button would be tapped and go nowhere while the
+            // escalation aged into auto-deny. See phase 08 of the
+            // approval-channel-fanout plan.
+            // Truncate the body, THEN append: truncating the concatenation
+            // could cut mid-command, and `/approve 4` resolves a different
+            // escalation than the `/approve 42` the operator was shown.
+            let truncated: String = msg.body.chars().take(500).collect();
+            let body_text = format!(
+                "{truncated}{}",
+                agentos_types::render_actions_fallback(&msg.actions)
+            );
             blocks.push(serde_json::json!({
                 "type": "section",
                 "text": { "type": "mrkdwn", "text": body_text }
@@ -1225,6 +1438,8 @@ mod tests {
         seen: Arc<RwLock<Vec<String>>>,
         /// Mirrors Telegram before `chat_id` discovery / the Email stub.
         available: bool,
+        /// Counts `typing()` calls so the indicator can be asserted on.
+        typings: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl RecordingAdapter {
@@ -1233,7 +1448,12 @@ mod tests {
                 instance_id: instance_id.to_string(),
                 seen,
                 available: true,
+                typings: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        fn typing_count(&self) -> usize {
+            self.typings.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -1252,10 +1472,16 @@ mod tests {
         fn adapter_instance_id(&self) -> Option<String> {
             Some(self.instance_id.clone())
         }
+        async fn typing(&self) -> Result<(), DeliveryError> {
+            self.typings
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     fn kernel_msg(body: &str) -> UserMessage {
         UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,
@@ -1445,5 +1671,62 @@ mod tests {
             .deliver_to_channel(kernel_msg("into the void"), "email-1")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn typing_on_channel_pings_only_the_named_adapter_and_never_errors() {
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        let target = Arc::new(RecordingAdapter::new("telegram-1", seen.clone()));
+        let bystander = Arc::new(RecordingAdapter::new("telegram-2", seen.clone()));
+        router.register_adapter(target.clone()).await;
+        router.register_adapter(bystander.clone()).await;
+
+        assert!(router.typing_on_channel("telegram-1").await);
+        assert!(router.typing_on_channel("telegram-1").await);
+
+        assert_eq!(target.typing_count(), 2);
+        // A ping must never fan out — the indicator belongs to one chat.
+        assert_eq!(bystander.typing_count(), 0);
+
+        // An unknown instance is a silent no-op, not a panic: the keepalive
+        // fires on a timer and can outlive a channel being disconnected. It
+        // reports `false` so the caller stops rather than spinning all turn.
+        assert!(!router.typing_on_channel("does-not-exist").await);
+
+        // Cosmetic pings must not be mistaken for delivered messages.
+        assert!(seen.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn typing_is_suppressed_while_a_blocking_question_is_outstanding() {
+        // A turn waiting on the operator is not working. Showing "typing…" there
+        // tells the user to keep waiting for a reply that cannot arrive until
+        // they answer the question sitting in the same chat.
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter::new("telegram-1", seen));
+        router.register_adapter(adapter.clone()).await;
+
+        assert!(router.typing_on_channel("telegram-1").await);
+        assert_eq!(adapter.typing_count(), 1);
+
+        let mut blocking = kernel_msg("approve this?");
+        blocking.interaction = Some(agentos_types::InteractionRequest {
+            blocking: true,
+            timeout_secs: 60,
+            auto_action: String::new(),
+            max_concurrent: 3,
+        });
+        let _rx = router.deliver(blocking).await.expect("deliver");
+
+        // Suppressed, but reported as `true`: the turn resumes once the user
+        // answers, and the indicator should come back with it.
+        assert!(router.typing_on_channel("telegram-1").await);
+        assert_eq!(
+            adapter.typing_count(),
+            1,
+            "indicator claimed the agent was working while it was blocked on a human"
+        );
     }
 }

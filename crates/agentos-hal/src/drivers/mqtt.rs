@@ -197,6 +197,8 @@ impl HalDriver for MqttDriver {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| AgentOSError::HalError("Missing 'topic' parameter".into()))?;
 
+                validate_topic(topic)?;
+
                 self.client
                     .unsubscribe(topic)
                     .await

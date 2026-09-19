@@ -141,3 +141,43 @@ fn test_zeroizing_string_takes_ownership() {
     );
     assert_eq!(secret.as_str(), "super-secret-value");
 }
+
+/// The escalations page polls `?partial=list` every 5s and swaps the result in,
+/// so the partial has to be a standalone template that still carries the CSRF
+/// token — a swapped-in form without it posts an empty `_csrf` and the
+/// operator's decision is rejected. Also pins the escaping, since
+/// `context_summary` is agent-controlled text.
+#[test]
+fn test_escalation_cards_partial_renders_csrf_and_escapes() {
+    let env = build_template_engine().unwrap();
+    let tmpl = env.get_template("partials/escalation_cards.html").unwrap();
+
+    let escalations = vec![context! {
+        id => 7u64,
+        task_id => "12345678-1234-1234-1234-123456789abc",
+        reason => "AuthorizationRequired",
+        context_summary => "<script>alert('xss')</script>",
+        decision_point => "Approve shell access",
+        options => vec!["approve", "deny"],
+        urgency => "high",
+        resolved => false,
+        resolution => "",
+        metadata => minijinja::Value::from_serialize(serde_json::json!({})),
+    }];
+    let rendered = tmpl
+        .render(context! { escalations, csrf_token => "tok-123" })
+        .unwrap();
+
+    assert!(
+        rendered.contains(r#"value="tok-123""#),
+        "partial dropped the CSRF token, so a polled-in resolve form would be rejected"
+    );
+    assert!(
+        rendered.contains("/escalations/7/resolve"),
+        "resolve form missing from the partial"
+    );
+    assert!(
+        !rendered.contains("<script>alert('xss')</script>"),
+        "context_summary XSS payload was not escaped"
+    );
+}

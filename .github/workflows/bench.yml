@@ -24,10 +24,16 @@ jobs:
       - name: Run benchmarks
         run: cargo bench -p agentos-kernel 2>&1 | tee bench-output.txt
 
+      - name: Footprint (binary size, cold start, idle RSS) of the shipped profile
+        run: |
+          cargo build --profile dist -p agentos-cli
+          bash scripts/bench-footprint.sh target/dist/agentos 5 | tee footprint.txt
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
             bench-output.txt
+            footprint.txt
             target/criterion/

@@ -4,10 +4,10 @@ risk_class = "exec_capable"
 [manifest]
 name        = "channel-send"
 version     = "1.0.0"
-description = "Send a message to one connected channel (Telegram, Slack, …). Pick by display name or ID. The agent's connected channels are listed in its system prompt under '## Channels'. Per-platform features: 'agent-manual section=channel-<kind>'. Distinct from notify-user, which fans out to all delivery adapters."
+description = "Send a message — text and/or one media item — to one connected channel (Telegram, Slack, …). Pick by display name or ID. Media: 'file_path' sends one of your own files (e.g. a webcam frame under captures/), 'file_id' re-sends a file the user gave you, 'image_url'/'document_url'/'image_urls' send by public URL; file_path/file_id uploads are Telegram-only (other channels return an error); URL media is posted natively on Telegram/WhatsApp and as a link elsewhere. The agent's connected channels are listed in its system prompt under '## Channels'. Per-platform features: 'agent-manual section=channel-<kind>'. Distinct from notify-user, which fans out to all delivery adapters."
 author      = "agentos-core"
 trust_tier  = "core"
-search_hints = ["post to slack", "send on telegram", "message the discord channel"]
+search_hints = ["post to slack", "send on telegram", "message the discord channel", "send the photo to the user", "send a file over telegram", "share the screenshot"]
 tags        = ["write", "network", "channel"]
 
 [capabilities_required]
@@ -22,7 +22,7 @@ output = "ChannelSendResult"
 
 [payload_schema]
 type = "object"
-required = ["channel", "text"]
+required = ["channel"]
 
 [payload_schema.properties.channel]
 type        = "string"
@@ -35,6 +35,36 @@ description = "Message body. Markdown rendering is platform-aware: Telegram conv
 [payload_schema.properties.thread_id]
 type        = "string"
 description = "Optional thread or reply target — platform-specific format (Slack ts, Discord thread id, Matrix event id)."
+
+[payload_schema.properties.file_path]
+type        = "string"
+description = "One of your own files to upload, relative to your files directory (e.g. captures/frame.jpg, or a path another tool returned). Telegram only. Images up to 10 MB are sent as photos, everything else as a document. Max 20 MB. Use exactly one of file_path / file_id / image_url / document_url / image_urls."
+
+[payload_schema.properties.file_id]
+type        = "string"
+description = "Re-send a file the user uploaded or sent over a channel — the file_id from user-file-list. Telegram only."
+
+[payload_schema.properties.image_url]
+type        = "string"
+description = "Public https URL of an image to send as a photo; the channel fetches it."
+
+[payload_schema.properties.document_url]
+type        = "string"
+description = "Public https URL of a file to send as a document; the channel fetches it."
+
+[payload_schema.properties.image_urls]
+type        = "array"
+description = "2–10 public image URLs sent as one album (Telegram)."
+[payload_schema.properties.image_urls.items]
+type = "string"
+
+[payload_schema.properties.caption]
+type        = "string"
+description = "Caption shown under the media. Long explanations go in 'text' instead, which is sent as a separate message."
+
+[payload_schema.properties.filename]
+type        = "string"
+description = "Filename shown to the recipient for file_path / file_id uploads. Defaults to the file's own name."
 
 [sandbox]
 network       = true
@@ -49,3 +79,17 @@ description = "Send a message to a connected Slack channel"
 [examples.payload]
 channel = "general"
 text = "Build completed successfully"
+
+[[examples]]
+description = "Send a webcam frame you just captured to the user on Telegram"
+[examples.payload]
+channel = "telegram-main"
+file_path = "captures/frame.jpg"
+caption = "Here is the snapshot"
+
+[[examples]]
+description = "Send back a document the user uploaded"
+[examples.payload]
+channel = "telegram-main"
+file_id = "<file_id from user-file-list>"
+text = "Signed copy attached"

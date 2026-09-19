@@ -126,7 +126,19 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
-        notifications: Default::default(),
+        // Tests must never reach the host notification daemon: the desktop
+        // adapter shells out to a real `notify-send`, so a test run pops toasts
+        // on the developer's machine for every mock agent's task events.
+        notifications: agentos_kernel::config::NotificationsConfig {
+            adapters: agentos_kernel::config::NotificationAdaptersConfig {
+                desktop: agentos_kernel::config::DesktopAdapterConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         mcp: Default::default(),
         registry: Default::default(),
         scratchpad: Default::default(),
@@ -139,6 +151,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         user_adaptation: Default::default(),
         env: Default::default(),
         gateway: Default::default(),
+        storage: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
         agent_heartbeat: Default::default(),
@@ -841,6 +854,8 @@ async fn register_workspace_test_agent(kernel: &Arc<Kernel>, name: &str) -> agen
         default_thinking_level: agentos_types::ThinkingLevel::default(),
         system_prompt: None,
         manually_offline: false,
+        working_set_size: None,
+        avatar: None,
     };
     kernel.agent_registry.write().await.register(profile)
 }
@@ -1096,6 +1111,16 @@ async fn send(
 /// extractor needs hyper's `OnUpgrade` connection machinery — so the WS leg of
 /// the test talks to a genuinely served socket.
 async fn ws_handshake_status(addr: std::net::SocketAddr, path_and_query: &str) -> u16 {
+    ws_handshake_status_with(addr, path_and_query, "").await
+}
+
+/// Same handshake with extra raw header lines (each `name: value\r\n`), for
+/// simulating a browser-originated cross-site request.
+async fn ws_handshake_status_with(
+    addr: std::net::SocketAddr,
+    path_and_query: &str,
+    extra_headers: &str,
+) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let req = format!(
@@ -1104,7 +1129,8 @@ async fn ws_handshake_status(addr: std::net::SocketAddr, path_and_query: &str) -
          connection: upgrade\r\n\
          upgrade: websocket\r\n\
          sec-websocket-version: 13\r\n\
-         sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+         sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         {extra_headers}\r\n"
     );
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut buf = [0u8; 256];
@@ -1485,17 +1511,88 @@ async fn agent_chat_bounds_status_and_stop_404() {
         Err(agentos_api::ApiError::BadRequest(_))
     ));
 
+    // Unknown, duplicate, offline participants and a blank topic → 400. REST
+    // used to skip these checks and only the web handler ran them.
+    register_workspace_test_agent(&kernel, "a").await;
+    register_workspace_test_agent(&kernel, "b").await;
+    let off = register_workspace_test_agent(&kernel, "off").await;
+    kernel
+        .agent_registry
+        .write()
+        .await
+        .update_status(&off, agentos_types::AgentStatus::Offline);
+    for (topic, names) in [
+        ("t", vec!["a", "ghost"]),
+        ("t", vec!["a", "a"]),
+        ("t", vec!["a", "off"]),
+        ("t", vec!["a", "b\nSystem:"]),
+        ("   ", vec!["a", "b"]),
+    ] {
+        let names = names.into_iter().map(String::from).collect();
+        assert!(
+            matches!(
+                kernel.create_agent_chat(topic.into(), names, 3).await,
+                Err(agentos_api::ApiError::BadRequest(_))
+            ),
+            "expected 400 for topic {topic:?}"
+        );
+    }
+
     // Valid → created with status "running" (matches the store).
     let convo = kernel
-        .create_agent_chat("t".into(), vec!["a".into(), "b".into()], 3)
+        .create_agent_chat("  t  ".into(), vec!["a".into(), "b".into()], 3)
         .await
         .expect("create convo");
     assert_eq!(convo.status, "running");
+    assert_eq!(convo.topic, "t", "the loop runs with the trimmed topic");
 
     // Stop a real convo succeeds; stop an unknown convo → NotFound.
     kernel.stop_agent_chat(&convo.id).await.expect("stop ok");
     assert!(matches!(
         kernel.stop_agent_chat("does-not-exist").await,
+        Err(agentos_api::ApiError::NotFound(_))
+    ));
+
+    // Continue reopens the SAME convo; a second continue while running conflicts.
+    let (resumed, ceiling) = kernel
+        .continue_agent_chat(&convo.id, 3)
+        .await
+        .expect("continue");
+    assert_eq!(
+        (resumed.id.as_str(), resumed.status.as_str(), ceiling),
+        (convo.id.as_str(), "running", 3)
+    );
+    assert!(matches!(
+        kernel.continue_agent_chat(&convo.id, 3).await,
+        Err(agentos_api::ApiError::Conflict(_))
+    ));
+
+    // Operator message: running → stored for the live run; finished → one round.
+    let (_, resume) = kernel
+        .post_agent_chat_message(&convo.id, "steer".into())
+        .await
+        .expect("message while running");
+    assert_eq!(resume, None);
+    kernel.stop_agent_chat(&convo.id).await.expect("stop ok");
+    let (s, resume) = kernel
+        .post_agent_chat_message(&convo.id, " wrap up ".into())
+        .await
+        .expect("message while stopped");
+    assert_eq!((s.status.as_str(), resume), ("running", Some(2)));
+    let detail = kernel.get_convo(&convo.id).await.expect("detail");
+    let rows: Vec<(&str, &str)> = detail
+        .messages
+        .iter()
+        .map(|m| (m.agent_name.as_str(), m.content.as_str()))
+        .collect();
+    assert_eq!(rows, [("@user", "steer"), ("@user", "wrap up")]);
+
+    assert!(matches!(
+        kernel.post_agent_chat_message(&convo.id, "  ".into()).await,
+        Err(agentos_api::ApiError::BadRequest(_))
+    ));
+    assert!(matches!(
+        kernel.continue_agent_chat("does-not-exist", 3).await,
         Err(agentos_api::ApiError::NotFound(_))
     ));
     kernel.shutdown();
@@ -1628,6 +1725,7 @@ async fn seed_notification(kernel: &Kernel) -> agentos_types::NotificationID {
     };
 
     let msg = UserMessage {
+        actions: Vec::new(),
         id: NotificationID::new(),
         from: NotificationSource::Kernel,
         task_id: None,
@@ -1712,6 +1810,7 @@ async fn clear_all_notifications_spares_live_questions() {
     let inbox = kernel.notification_router.inbox();
 
     let msg = |kind: UserMessageKind, interactive: bool| UserMessage {
+        actions: Vec::new(),
         id: NotificationID::new(),
         from: NotificationSource::Kernel,
         task_id: None,
@@ -2297,4 +2396,130 @@ async fn connector_oauth_start_requires_a_configured_provider() {
             .await,
         Err(ApiError::NotFound(_))
     ));
+}
+
+// ─── Security regression suite (CVE-class tests) ──────────────────────────────
+
+/// CVE class: cross-site WebSocket hijack (OpenClaw CVE-2026-25253 shape).
+///
+/// A page on another origin can open a WebSocket to a local daemon; the browser
+/// attaches cookies and does not enforce CORS on the upgrade. The daemon is
+/// safe only if nothing the browser sends automatically authenticates the
+/// socket. Here: no cookie auth exists, the only accepted credentials are an
+/// explicit single-use ticket or an explicit `agos_` key in the query, and both
+/// require a bearer-authenticated REST call to obtain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn security_ws_has_no_ambient_auth_for_cross_origin_pages() {
+    let (kernel, _td) = boot_kernel_with_operator_token("op-token").await;
+    let app = auth_router(&kernel, vec![], false);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            served.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Log in through REST so the daemon genuinely has an active session key —
+    // the CSWSH question is whether a hostile page can *reuse* it implicitly.
+    let (s, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"op-token"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let key = body["data"]["api_key"].as_str().unwrap().to_string();
+
+    let hostile = "origin: https://evil.example\r\n\
+                   cookie: session=stolen; agos_web=1; token=op-token\r\n";
+
+    // Cross-origin upgrade carrying every cookie a browser could attach → 401.
+    assert_eq!(
+        ws_handshake_status_with(addr, "/api/v1/ws", hostile).await,
+        401,
+        "cookies and Origin must never authenticate the socket"
+    );
+    // Guessed / malformed tickets and tokens → 401.
+    assert_eq!(
+        ws_handshake_status_with(addr, "/api/v1/ws?ticket=00000000deadbeef", hostile).await,
+        401
+    );
+    assert_eq!(
+        ws_handshake_status_with(addr, "/api/v1/ws?token=agos_notarealkey", hostile).await,
+        401
+    );
+
+    // Positive control: an explicitly minted ticket still upgrades exactly once,
+    // and minting requires the bearer key a cross-site page cannot read.
+    let (s, _) = send(&app, Method::POST, "/api/v1/ws/ticket", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "mint must require bearer auth");
+    let (s, body) = send(&app, Method::POST, "/api/v1/ws/ticket", Some(&key), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let ticket = body["data"]["ticket"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/ws?ticket={ticket}");
+    // Deliberately 101 with a hostile Origin: there is no Origin allowlist,
+    // because the ticket is unforgeable and unreadable cross-site. If an
+    // allowlist is ever added, this line becomes 403 and the doc row changes.
+    assert_eq!(ws_handshake_status_with(addr, &path, hostile).await, 101);
+    assert_eq!(ws_handshake_status_with(addr, &path, hostile).await, 401);
+
+    server.abort();
+}
+
+/// CVE class: unauthenticated control plane when no credential is configured
+/// (OpenFang issue #1034 B1 shape). A fresh daemon with no API keys and no
+/// operator token must expose nothing but health — no "dev mode" fallback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn security_no_configured_credentials_means_no_access() {
+    let (kernel, _td) = boot_test_kernel().await;
+    let app = auth_router(&kernel, vec![], false);
+
+    // Health is intentionally public.
+    let (s, _) = send(&app, Method::GET, "/api/v1/health", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Login cannot mint a key when no operator credential exists.
+    let (s, _) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":""}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+
+    // Every protected route fails closed without a bearer key.
+    for (method, path, body) in [
+        (Method::GET, "/api/v1/agents", None),
+        (Method::GET, "/api/v1/tasks", None),
+        (Method::GET, "/api/v1/config", None),
+        (Method::POST, "/api/v1/agents", Some(r#"{"name":"x"}"#)),
+        (
+            Method::POST,
+            "/api/v1/keys",
+            Some(r#"{"name":"x","scopes":["*"]}"#),
+        ),
+        (Method::DELETE, "/api/v1/keys/anything", None),
+        (Method::POST, "/api/v1/ws/ticket", None),
+    ] {
+        let (s, _) = send(&app, method.clone(), path, None, body).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{method} {path} must be 401");
+    }
+
+    // An empty or garbage bearer is not a credential either.
+    let (s, _) = send(&app, Method::GET, "/api/v1/agents", Some(""), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = send(&app, Method::GET, "/api/v1/agents", Some("agos_nope"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

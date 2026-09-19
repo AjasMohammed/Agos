@@ -24,7 +24,7 @@ required = ["binary"]
 type = "object"
 
 [payload_schema.properties.binary]
-description = "Binary name to execute. Without `workspace`, must be a bare name (no slashes) on the allowed list. With `workspace`, resolved from {ws}/venv/bin, {ws}/node_modules/.bin, {ws}/bin before falling back to PATH; the workspace acts as the sandbox so the global allowlist is bypassed for workspace-resolved binaries."
+description = "Binary name to execute. Without `workspace`, must be a bare name (no slashes) on the allowed list. With `workspace`, resolved from {ws}/venv/bin, {ws}/node_modules/.bin, {ws}/bin before falling back to PATH; the global allowlist is bypassed for workspace-resolved binaries. Every process runs in a bwrap sandbox with a cleared environment; signals terminate the whole sandbox."
 type = "string"
 
 [payload_schema.properties.args]
@@ -33,12 +33,16 @@ type = "array"
 items = { type = "string" }
 
 [payload_schema.properties.working_dir]
-description = "Working directory (default: workspace root when `workspace` is set, otherwise agent data_dir)"
+description = "Absolute working directory (default: workspace root when `workspace` is set, otherwise the agent home). Must be inside the agent home, its managed workspaces, or a folder granted with --mode rwx."
 type = "string"
 
 [payload_schema.properties.workspace]
 description = "Optional managed workspace name (created via env-create). Activates VIRTUAL_ENV and the workspace-local bin paths so long-running processes like uvicorn, jest, or cargo-installed CLIs work."
 type = "string"
+
+[payload_schema.properties.allow_network]
+description = "Share the host network with the command (default false). Requires net.outbound:x. Commands otherwise run offline in a sandbox that sees only the agent home, its managed workspaces, and folders granted with --mode rwx."
+type = "boolean"
 
 [sandbox]
 network = false

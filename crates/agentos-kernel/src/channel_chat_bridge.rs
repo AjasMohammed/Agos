@@ -31,6 +31,32 @@ const MAX_HISTORY_ROUNDS: usize = 12;
 /// a timeout while the escalation is still live and about to run the tool.
 const CHANNEL_CHAT_TIMEOUT_SECS: u64 = 660;
 
+/// How often to re-assert the channel's "typing…" indicator while a turn runs.
+///
+/// Telegram clears the indicator after ~5s, so this must stay under that or the
+/// signal flickers. Even at the [`CHANNEL_CHAT_TIMEOUT_SECS`] ceiling that is
+/// only ~165 pings, and `sendChatAction` is not a message — it does not count
+/// against the per-chat message rate limit.
+const TYPING_PING_INTERVAL_SECS: u64 = 4;
+
+// `tokio::time::interval` panics on a zero period, and the keepalive's handle is
+// never joined — that panic would be swallowed and the indicator would simply
+// never appear again, with nothing in the log. Make it a compile error instead.
+const _: () = assert!(TYPING_PING_INTERVAL_SECS > 0);
+
+/// Aborts the typing keepalive when the turn ends, however it ends.
+///
+/// Dropping a bare `JoinHandle` detaches the task rather than cancelling it, so
+/// without this an early `return Err(..)` would leave a loop pinging Telegram
+/// forever about a turn that is already over.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Stable identity of one channel conversation: the channel instance plus the
 /// agent bound to it. Rebinding the channel to another agent therefore starts a
 /// new thread rather than splicing two agents into one transcript.
@@ -123,10 +149,14 @@ impl KernelChatBridge {
             .map_err(|e| e.to_string())?;
 
         // Tool rows are machine payloads and blank turns are rejected by several
-        // providers, so neither is replayed.
+        // providers, so neither is replayed; nor are stored non-answers.
         let mut history: Vec<(String, String)> = prior
             .into_iter()
-            .filter(|m| (m.role == "user" || m.role == "assistant") && !m.content.trim().is_empty())
+            .filter(|m| match m.role.as_str() {
+                "user" => !m.content.trim().is_empty(),
+                "assistant" => !crate::kernel::is_unreplayable_assistant_turn(&m.content),
+                _ => false,
+            })
             .map(|m| (m.role, m.content))
             .collect();
         let cap = MAX_HISTORY_ROUNDS * 2;
@@ -140,6 +170,78 @@ impl KernelChatBridge {
             history.remove(0);
         }
         Ok((session_id, history))
+    }
+
+    /// Ping the channel's "typing…" indicator until the returned guard drops.
+    ///
+    /// Best-effort and entirely off the critical path: the first ping is sent
+    /// from the spawned task, not awaited here, so a wedged channel delays the
+    /// reply by exactly nothing. Adapters without an indicator (the trait
+    /// default) turn every ping into a cheap no-op.
+    fn spawn_typing_indicator(
+        router: Arc<crate::notification_router::NotificationRouter>,
+        instance_id: String,
+    ) -> AbortOnDrop {
+        AbortOnDrop(tokio::spawn(async move {
+            // A ticker, not `ping().await; sleep(N)` — the latter has a real
+            // period of `N + round-trip`, which against a ~5s expiry drifts the
+            // refresh past the deadline it exists to beat. The first tick
+            // completes immediately, so the eager first ping is preserved.
+            let mut ticker = tokio::time::interval(Duration::from_secs(TYPING_PING_INTERVAL_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                // `false` means the channel has no indicator, or pinging it has
+                // stopped working. Either way it will not start working before
+                // the turn ends, so stop instead of retrying ~165 times.
+                if !router.typing_on_channel(&instance_id).await {
+                    break;
+                }
+            }
+        }))
+    }
+
+    /// Record a failed turn as the session's assistant reply.
+    ///
+    /// Keeps the transcript alternating and, more importantly, distinguishes
+    /// "answered with an error" from "killed mid-inference" — the latter is what
+    /// `Kernel::interrupted_channel_turns` looks for.
+    async fn persist_failed_turn(k: &Arc<Kernel>, session_id: Option<&str>, error: &str) {
+        let Some(sid) = session_id else {
+            return;
+        };
+        let store = Arc::clone(&k.chat_store);
+        let (sid_owned, text) = (
+            sid.to_string(),
+            format!("{} {error})", crate::kernel::FAILED_TURN_PREFIX),
+        );
+        match tokio::task::spawn_blocking(move || {
+            store.add_assistant_message(&sid_owned, &text, None, None)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "Failed to persist channel turn failure"),
+            Err(e) => tracing::warn!(error = %e, "spawn_blocking panicked persisting turn failure"),
+        }
+        Self::notify_panel(k, Some(sid), "assistant").await;
+    }
+
+    /// Wake open panel tabs on the `chat` realtime channel. The panel refetches
+    /// the transcript on this event; the API path already emits it, and without
+    /// the same call here a channel turn only showed up after a reload.
+    async fn notify_panel(k: &Arc<Kernel>, session_id: Option<&str>, role: &str) {
+        let Some(session_id) = session_id else {
+            return;
+        };
+        k.emit_event(
+            agentos_types::EventType::ChatMessageAdded,
+            agentos_types::EventSource::AgentMessageBus,
+            agentos_types::EventSeverity::Info,
+            serde_json::json!({ "session_id": session_id, "role": role }),
+            0,
+        )
+        .await;
     }
 
     /// Run chat inference for a channel message, persisting the turn.
@@ -156,6 +258,18 @@ impl KernelChatBridge {
         let k = self
             .upgrade_kernel()
             .ok_or_else(|| "Kernel is not ready for channel chat".to_string())?;
+
+        // Tell the channel an agent is working on this. Slow backends run for
+        // minutes across several tool iterations, and from the user's side that
+        // is indistinguishable from a dead bot — they re-send, which queues yet
+        // another multi-minute turn. Started before the history load and the
+        // user-row write, because those are two `chat.db` round-trips that under
+        // contention are the first seconds the user spends waiting. Held until
+        // this function returns, however it returns.
+        let _typing = Self::spawn_typing_indicator(
+            Arc::clone(&k.notification_router),
+            channel_id.to_string(),
+        );
 
         // A store hiccup must not cost the user their reply — degrade to a
         // stateless turn instead of failing the message outright.
@@ -186,9 +300,10 @@ impl KernelChatBridge {
                     tracing::error!(error = %e, "spawn_blocking panicked persisting user turn")
                 }
             }
+            Self::notify_panel(&k, session_id.as_deref(), "user").await;
         }
 
-        let result = tokio::time::timeout(
+        let result = match tokio::time::timeout(
             Duration::from_secs(CHANNEL_CHAT_TIMEOUT_SECS),
             k.chat_infer_with_tools(
                 agent_name,
@@ -199,9 +314,24 @@ impl KernelChatBridge {
             ),
         )
         .await
-        .map_err(|_| {
-            format!("Chat inference timed out after {CHANNEL_CHAT_TIMEOUT_SECS}s — try again")
-        })??;
+        {
+            Ok(Ok(r)) => r,
+            // A failed turn must still close its transcript entry. Left as a bare
+            // trailing `user` row it reads exactly like a turn the kernel was
+            // killed in the middle of, and the boot sweep would then tell the user
+            // to resend a message that was already answered with an error.
+            Ok(Err(e)) => {
+                Self::persist_failed_turn(&k, session_id.as_deref(), &e).await;
+                return Err(e);
+            }
+            Err(_) => {
+                let e = format!(
+                    "Chat inference timed out after {CHANNEL_CHAT_TIMEOUT_SECS}s — try again"
+                );
+                Self::persist_failed_turn(&k, session_id.as_deref(), &e).await;
+                return Err(e);
+            }
+        };
 
         if let Some(sid) = &session_id {
             // Tool rows before the assistant turn so the timeline orders
@@ -247,6 +377,7 @@ impl KernelChatBridge {
                     tracing::error!(error = %e, "spawn_blocking panicked persisting assistant turn")
                 }
             }
+            Self::notify_panel(&k, session_id.as_deref(), "assistant").await;
         }
 
         Ok(result.answer)
@@ -319,5 +450,183 @@ mod tests {
         assert_ne!(sid2, sid);
         assert_eq!(store.get_messages(&sid).unwrap().len(), 2);
         assert!(store.get_messages(&sid2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stored_non_answers_are_not_replayable() {
+        use crate::kernel::{is_unreplayable_assistant_turn as bad, EMPTY_LLM_ANSWER_PLACEHOLDER};
+        assert!(bad("   "));
+        assert!(bad(EMPTY_LLM_ANSWER_PLACEHOLDER));
+        assert!(bad(&format!(
+            "{EMPTY_LLM_ANSWER_PLACEHOLDER}\n\n[Note: limit]"
+        )));
+        assert!(bad("(turn failed: provider timeout)"));
+        assert!(bad(
+            "analysisUser wants audio.assistantcommentary to=functions.audio json{\"action\":\"list\"}"
+        ));
+        assert!(bad("We need to check.assistantfinalDone!"));
+        assert!(!bad("Hey! What would you like to do next?"));
+        assert!(!bad("The audio file has been played. Enjoy!"));
+    }
+
+    /// The whole point of the guard: a dropped `JoinHandle` detaches its task,
+    /// so without `Drop` an early `return Err(..)` would leave the keepalive
+    /// pinging the channel forever about a turn that already ended.
+    #[tokio::test]
+    async fn abort_on_drop_stops_the_keepalive() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pings = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&pings);
+        let guard = AbortOnDrop(tokio::spawn(async move {
+            loop {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let while_running = pings.load(Ordering::SeqCst);
+        assert!(while_running > 0, "keepalive never ran");
+
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            pings.load(Ordering::SeqCst),
+            while_running,
+            "keepalive kept running after the guard dropped"
+        );
+    }
+
+    /// A `DeliveryAdapter` whose only job is to count indicator pings.
+    struct CountingAdapter {
+        instance_id: String,
+        pings: Arc<std::sync::atomic::AtomicUsize>,
+        /// When set, every ping fails — used to prove the keepalive gives up.
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::notification_router::DeliveryAdapter for CountingAdapter {
+        fn channel_id(&self) -> agentos_types::DeliveryChannel {
+            agentos_types::DeliveryChannel::custom("telegram".to_string())
+        }
+        async fn deliver(
+            &self,
+            _msg: &agentos_types::UserMessage,
+        ) -> Result<(), crate::notification_router::DeliveryError> {
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn adapter_instance_id(&self) -> Option<String> {
+            Some(self.instance_id.clone())
+        }
+        async fn typing(&self) -> Result<(), crate::notification_router::DeliveryError> {
+            self.pings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(crate::notification_router::DeliveryError("nope".into()));
+            }
+            Ok(())
+        }
+    }
+
+    async fn router_with(
+        adapter: Arc<CountingAdapter>,
+    ) -> Arc<crate::notification_router::NotificationRouter> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = Arc::new(
+            crate::user_inbox::UserInbox::new(&dir.path().join("inbox.db"), 100).expect("inbox"),
+        );
+        let audit =
+            Arc::new(agentos_audit::AuditLog::open(&dir.path().join("audit.db")).expect("audit"));
+        Box::leak(Box::new(dir));
+        let router = Arc::new(crate::notification_router::NotificationRouter::new(
+            inbox, audit,
+        ));
+        router.register_adapter(adapter).await;
+        router
+    }
+
+    /// The load-bearing claim behind moving the spawn ahead of `load_session`:
+    /// the indicator must be up *before* the first `chat.db` round-trip, which
+    /// only holds if `interval`'s first tick fires immediately. If it did not,
+    /// every turn would start with a full interval of silence and no other test
+    /// in this file would notice.
+    #[tokio::test(start_paused = true)]
+    async fn typing_indicator_pings_immediately_then_every_interval() {
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = Arc::new(CountingAdapter {
+            instance_id: "chan-1".to_string(),
+            pings: Arc::clone(&pings),
+            fail: false,
+        });
+        let router = router_with(adapter).await;
+
+        let _guard = KernelChatBridge::spawn_typing_indicator(router, "chan-1".to_string());
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            pings.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "first tick must be immediate — the indicator has to beat the session load"
+        );
+
+        tokio::time::advance(Duration::from_secs(TYPING_PING_INTERVAL_SECS)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            pings.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "indicator must refresh once per interval or it expires mid-turn"
+        );
+    }
+
+    /// A ping that fails will keep failing for the rest of the turn (revoked
+    /// token, blocked bot, flood control). Retrying it ~165 times is what
+    /// lengthens a flood ban on the token that also delivers the replies.
+    #[tokio::test(start_paused = true)]
+    async fn typing_indicator_gives_up_after_a_failed_ping() {
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = Arc::new(CountingAdapter {
+            instance_id: "chan-1".to_string(),
+            pings: Arc::clone(&pings),
+            fail: true,
+        });
+        let router = router_with(adapter).await;
+
+        let _guard = KernelChatBridge::spawn_typing_indicator(router, "chan-1".to_string());
+
+        tokio::task::yield_now().await;
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(TYPING_PING_INTERVAL_SECS)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            pings.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "keepalive kept pinging an adapter that already rejected it"
+        );
+    }
+
+    /// An unknown channel — every `ChannelManager`-stack kind (Discord, Slack,
+    /// WhatsApp…) — must not leave a loop spinning for the whole turn.
+    #[tokio::test(start_paused = true)]
+    async fn typing_indicator_stops_when_no_adapter_owns_the_channel() {
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = Arc::new(CountingAdapter {
+            instance_id: "chan-1".to_string(),
+            pings: Arc::clone(&pings),
+            fail: false,
+        });
+        let router = router_with(adapter).await;
+
+        let _guard =
+            KernelChatBridge::spawn_typing_indicator(router, "some-other-chan".to_string());
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(TYPING_PING_INTERVAL_SECS * 4)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(pings.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

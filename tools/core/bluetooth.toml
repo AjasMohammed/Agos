@@ -1,10 +1,25 @@
 tags = ["read", "write", "network"]
 risk_class = "control_plane"
 
+# Per-action overrides. Only the two enumerations are read-only; everything
+# else keeps the tool-level control_plane.
+#
+# `scan` is deliberately NOT here. `BluetoothDriver::scan_devices` calls
+# `ensure_adapter_powered` first, which sets `Adapter1.Powered = true` and never
+# reverts it — so a "read" would turn the radio on and leave it on, reaching the
+# same capability as the `power` action through a path that also returns `None`
+# from `device_key` (no per-device gate). Downgrading it would take both gates
+# off powering the adapter.
+#
+# `list_paired` works with the radio off, so neither entry can power anything.
+[risk_class_by_action]
+list_adapters = "readonly_external"
+list_paired = "readonly_external"
+
 [manifest]
 name        = "bluetooth"
 version     = "1.0.0"
-description = "Scan, pair, connect, disconnect, and perform GATT read/write operations via the HAL bluetooth driver."
+description = "Power the adapter on/off, scan, pair, connect, disconnect, and perform GATT read/write operations via the HAL bluetooth driver."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "hal"
@@ -12,6 +27,7 @@ category    = "hal"
 [capabilities_required]
 permissions = [
   "hardware.bluetooth.list:r",
+  "hardware.bluetooth.power:x",
   "hardware.bluetooth.scan:o",
   "hardware.bluetooth.pair:x",
   "hardware.bluetooth.connection:x",
@@ -28,13 +44,22 @@ output = "BluetoothResult"
 
 [payload_schema]
 type = "object"
+# Advisory only — payload_schema is not validated at execution. This is the
+# schema native tool-calling shows the model, so declaring `action` required
+# stops it emitting `{}` and relying on the driver's default, which the
+# approval gate cannot resolve and therefore prompts for.
+required = ["action"]
 description = "Bluetooth operation request"
 
 [payload_schema.properties.action]
 type = "string"
-enum = ["list_adapters", "scan", "pair", "connect", "disconnect", "gatt_read", "gatt_write"]
+enum = ["list_adapters", "list_paired", "power", "scan", "pair", "connect", "disconnect", "gatt_read", "gatt_write"]
 default = "list_adapters"
 description = "Bluetooth action to execute."
+
+[payload_schema.properties.enabled]
+type = "boolean"
+description = "Adapter power state for action='power': true powers the adapter on, false powers it off (disconnects every device on it). Powering on clears an rfkill soft block by itself and reports rfkill_cleared, so no shell command is needed; a hard block is a physical switch and is reported as unclearable."
 
 [payload_schema.properties.adapter]
 type = "string"
@@ -69,6 +94,9 @@ description = "Base64 payload alternative for gatt_write."
 
 [sandbox]
 network       = false
+# Powering on may write /dev/rfkill to clear a soft block. That is a device
+# node, not the filesystem this flag gates — it feeds seccomp policy for
+# sandboxed execution, and HAL drivers run in-process.
 fs_write      = false
 gpu           = false
 max_memory_mb = 256
@@ -78,6 +106,14 @@ syscalls      = []
 [[examples]]
 description = "List adapters"
 payload = { action = "list_adapters" }
+
+[[examples]]
+description = "Turn the adapter off"
+payload = { action = "power", enabled = false }
+
+[[examples]]
+description = "List already-paired devices (no radio needed, no scan wait)"
+payload = { action = "list_paired" }
 
 [[examples]]
 description = "Scan for nearby devices"

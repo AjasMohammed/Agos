@@ -8,7 +8,7 @@
 //! up in its own chat prompt. These helpers give both chat paths the same
 //! behaviour with one call at each lifecycle point.
 
-use crate::kernel::Kernel;
+use crate::kernel::{ChatTurnScope, Kernel};
 use agentos_memory::{EpisodeRecordInput, EpisodeType};
 use agentos_types::{AgentID, HookEvent, HookResult, TaskID, TraceID};
 
@@ -52,6 +52,13 @@ impl Kernel {
 
     /// Start of a chat turn: fire `TaskStart` (a `Pre` hook — `Abort` is
     /// honoured) and record the user prompt to episodic memory.
+    ///
+    /// The prompt's `origin` is `"chat"` for a human turn and `"convo"` for a
+    /// [`ChatTurnScope::ConvoTurn`], whose "user message" is another agent's
+    /// transcript. `UserAdaptationHook` learns operator preferences from
+    /// `origin == "chat"` prompts only; before this split it mined 85
+    /// proposals in one hour from two agents role-playing at each other
+    /// (convo `118d7b90…`, 2026-09-16).
     pub(crate) async fn chat_turn_begin(
         &self,
         agent_id: AgentID,
@@ -59,6 +66,7 @@ impl Kernel {
         trace_id: TraceID,
         user_message: &str,
         session_id: Option<&str>,
+        scope: ChatTurnScope,
     ) -> Result<(), String> {
         if let HookResult::Abort(reason) = self
             .hook_registry
@@ -67,6 +75,10 @@ impl Kernel {
         {
             return Err(format!("Chat turn aborted by hook: {reason}"));
         }
+        let origin = match scope {
+            ChatTurnScope::Full => "chat",
+            ChatTurnScope::ConvoTurn => "convo",
+        };
         self.record_chat_episode(EpisodeRecordInput {
             task_id: &task_id,
             agent_id: &agent_id,
@@ -74,7 +86,7 @@ impl Kernel {
             content: user_message,
             summary: Some("User prompt received (chat)"),
             metadata: Some(serde_json::json!({
-                "origin": "chat",
+                "origin": origin,
                 "session_id": session_id,
             })),
             trace_id: &trace_id,

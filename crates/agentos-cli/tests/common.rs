@@ -108,7 +108,19 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
-        notifications: Default::default(),
+        // Tests must never reach the host notification daemon: the desktop
+        // adapter shells out to a real `notify-send`, so a test run pops toasts
+        // on the developer's machine for every mock agent's task events.
+        notifications: agentos_kernel::config::NotificationsConfig {
+            adapters: agentos_kernel::config::NotificationAdaptersConfig {
+                desktop: agentos_kernel::config::DesktopAdapterConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         mcp: Default::default(),
         registry: Default::default(),
         scratchpad: Default::default(),
@@ -122,6 +134,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         user_adaptation: Default::default(),
         env: Default::default(),
         gateway: Default::default(),
+        storage: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
         agent_heartbeat: Default::default(),

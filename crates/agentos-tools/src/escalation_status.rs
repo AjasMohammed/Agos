@@ -59,9 +59,9 @@ impl AgentTool for EscalationStatusTool {
             })?;
             return match query.get_escalation(id) {
                 Some(e) => {
-                    // Defense-in-depth: the snapshot should already be scoped to this
-                    // agent (see task_executor.rs), but we re-check here in case a
-                    // non-snapshot EscalationQuery implementation is injected.
+                    // Defense-in-depth: the snapshot is already scoped to this agent
+                    // (see `Kernel::escalation_snapshot_for`), but re-check in case a
+                    // different EscalationQuery implementation is injected.
                     if e.agent_id != context.agent_id {
                         return Ok(serde_json::json!({
                             "found": false,
@@ -71,7 +71,6 @@ impl AgentTool for EscalationStatusTool {
                     }
                     Ok(serde_json::json!({
                         "found": true,
-                        "note": "Snapshot reflects state at task-dispatch time; resolution state may be stale.",
                         "escalation": {
                             "id": e.id,
                             "task_id": e.task_id.to_string(),
@@ -117,7 +116,6 @@ impl AgentTool for EscalationStatusTool {
 
         Ok(serde_json::json!({
             "count": serialized.len(),
-            "note": "Snapshot reflects state at task-dispatch time; resolution state may be stale.",
             "pending_escalations": serialized,
         }))
     }

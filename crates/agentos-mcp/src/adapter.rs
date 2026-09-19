@@ -28,7 +28,7 @@ impl McpToolAdapter {
         server_name: String,
         tool_def: McpToolDef,
     ) -> Self {
-        let permission = format!("mcp.{}", sanitize_tool_name(&tool_def.name));
+        let permission = server_permission_resource(&server_name);
         Self {
             supervisor,
             security_gate,
@@ -39,11 +39,23 @@ impl McpToolAdapter {
     }
 }
 
-/// Sanitize an MCP tool name into a valid AgentOS permission resource component.
+/// Permission resource gating every tool of one MCP server: `mcp:<server>/`.
+///
+/// Grants are per server, not per tool — an agent granted a server gets all of
+/// its tools, including ones the server adds later. The trailing `/` is
+/// load-bearing: `PermissionSet::check` prefix-matches, so without a terminator
+/// a grant for server `git` would also open `github`.
 ///
 /// Public because the kernel synthesizes each MCP tool's *manifest* permission
 /// string separately from the adapter's *enforced* one; both must land on the
 /// same resource or the tool is advertised under a name nothing grants.
+/// Names differing only in non-alphanumerics (`a-b`/`a_b`) map to one resource;
+/// `cmd_mcp_attach` refuses the second so a grant never spans two servers.
+pub fn server_permission_resource(server_name: &str) -> String {
+    format!("mcp:{}/", sanitize_tool_name(server_name))
+}
+
+/// Sanitize an MCP server/tool name into a valid AgentOS permission resource component.
 pub fn sanitize_tool_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -164,6 +176,14 @@ impl AgentTool for McpToolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_grant_does_not_open_a_prefix_named_server() {
+        let mut perms = agentos_types::PermissionSet::default();
+        perms.grant(server_permission_resource("git"), false, false, true, None);
+        assert!(perms.check(&server_permission_resource("git"), PermissionOp::Execute));
+        assert!(!perms.check(&server_permission_resource("github"), PermissionOp::Execute));
+    }
 
     #[test]
     fn sanitize_tool_name_handles_special_chars() {

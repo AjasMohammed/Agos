@@ -40,7 +40,7 @@ impl AgentTool for ChannelSendTool {
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let channel = payload
             .get("channel")
@@ -80,6 +80,38 @@ impl AgentTool for ChannelSendTool {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
+        // One of the agent's own files (relative to its home, e.g. a webcam
+        // frame under `captures/`). Contained here, where the home is known;
+        // the kernel reads the bytes and uploads them like a `file_id`.
+        let file_path = payload
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|raw| {
+                if raw.split(['/', '\\']).any(|seg| seg == "..") {
+                    return Err(AgentOSError::PermissionDenied {
+                        resource: format!("file_path:{raw}"),
+                        operation: "path traversal ('..') is not allowed".to_string(),
+                    });
+                }
+                // The home doubles as the only "workspace" root so an absolute
+                // path a tool returned (webcam's `image_path`) is accepted too.
+                let home = context.agent_files_dir()?;
+                let (resolved, _) = crate::workspace::resolve_path_existing(
+                    raw,
+                    self.name(),
+                    &home,
+                    std::slice::from_ref(&home),
+                )?;
+                if !resolved.is_file() {
+                    return Err(AgentOSError::SchemaValidation(format!(
+                        "channel-send: 'file_path' {raw} is not a file"
+                    )));
+                }
+                Ok(resolved.to_string_lossy().into_owned())
+            })
+            .transpose()?;
+
         // An album of image URLs (Telegram sendMediaGroup): 2–10 items.
         let image_urls: Vec<String> = payload
             .get("image_urls")
@@ -102,11 +134,12 @@ impl AgentTool for ChannelSendTool {
             image_url.is_some(),
             document_url.is_some(),
             file_id.is_some(),
+            file_path.is_some(),
             !image_urls.is_empty(),
         ];
         if url_sources.iter().filter(|s| **s).count() > 1 {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send: provide only one of 'image_url', 'document_url', 'file_id', or 'image_urls'"
+                "channel-send: provide only one of 'image_url', 'document_url', 'file_id', 'file_path', or 'image_urls'"
                     .into(),
             ));
         }
@@ -116,10 +149,11 @@ impl AgentTool for ChannelSendTool {
             && image_url.is_none()
             && document_url.is_none()
             && file_id.is_none()
+            && file_path.is_none()
             && image_urls.is_empty()
         {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'/'file_id'/'image_urls'"
+                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'/'file_id'/'file_path'/'image_urls'"
                     .into(),
             ));
         }
@@ -148,6 +182,7 @@ impl AgentTool for ChannelSendTool {
             "image_url": image_url,
             "document_url": document_url,
             "file_id": file_id,
+            "file_path": file_path,
             "image_urls": image_urls,
             "caption": caption,
             "filename": filename,
@@ -217,6 +252,101 @@ mod tests {
         assert!(run(serde_json::json!({ "channel": "tg", "text": "" }))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn file_path_is_contained_to_the_agent_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.data_dir = dir.path().to_path_buf();
+        let home = context.agent_files_dir().unwrap();
+        std::fs::create_dir_all(home.join("captures")).unwrap();
+        std::fs::write(home.join("captures/frame.jpg"), b"\xFF\xD8\xFF").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"x").unwrap();
+
+        let out = ChannelSendTool::new()
+            .execute(
+                serde_json::json!({ "channel": "tg", "file_path": "captures/frame.jpg" }),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out["file_path"].as_str().unwrap(),
+            home.canonicalize()
+                .unwrap()
+                .join("captures/frame.jpg")
+                .to_string_lossy()
+        );
+
+        // The absolute form a tool hands back (webcam `image_path`) works too.
+        let out = ChannelSendTool::new()
+            .execute(
+                serde_json::json!({
+                    "channel": "tg",
+                    "file_path": home.join("captures/frame.jpg").to_str().unwrap()
+                }),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(out["file_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("captures/frame.jpg"));
+
+        // `..` out of the home and an absolute path elsewhere are both refused.
+        for bad in [
+            "../../secret.txt",
+            dir.path().join("secret.txt").to_str().unwrap(),
+        ] {
+            let err = ChannelSendTool::new()
+                .execute(
+                    serde_json::json!({ "channel": "tg", "file_path": bad }),
+                    context.clone(),
+                )
+                .await
+                .expect_err(bad);
+            assert!(
+                matches!(
+                    err,
+                    AgentOSError::PermissionDenied { .. }
+                        | AgentOSError::ToolExecutionFailed { .. }
+                ),
+                "{bad}: {err}"
+            );
+        }
+
+        // `..` is refused outright, even when it would stay inside the home.
+        let err = ChannelSendTool::new()
+            .execute(
+                serde_json::json!({ "channel": "tg", "file_path": "captures/../captures/frame.jpg" }),
+                context.clone(),
+            )
+            .await
+            .expect_err("'..' must be refused");
+        assert!(
+            matches!(err, AgentOSError::PermissionDenied { .. }),
+            "{err}"
+        );
+
+        // A symlink inside the home pointing out of it is not a way out.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("secret.txt"), home.join("link.txt"))
+                .unwrap();
+            let err = ChannelSendTool::new()
+                .execute(
+                    serde_json::json!({ "channel": "tg", "file_path": "link.txt" }),
+                    context.clone(),
+                )
+                .await
+                .expect_err("symlink out of the home must be refused");
+            assert!(
+                matches!(err, AgentOSError::PermissionDenied { .. }),
+                "{err}"
+            );
+        }
     }
 
     #[tokio::test]

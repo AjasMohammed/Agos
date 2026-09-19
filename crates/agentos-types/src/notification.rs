@@ -43,6 +43,19 @@ pub struct UserMessage {
     /// others fall back to appending the URL to the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<MessageAttachment>,
+    /// Actionable controls (approve / deny / …). Adapters with an interactive
+    /// primitive render these natively; the rest append
+    /// [`crate::render_actions_fallback`] to the body.
+    ///
+    /// `serde(default)` keeps any JSON round-trip of a pre-existing message
+    /// working. Note that `UserInbox` stores messages **columnar**, not as a
+    /// JSON blob, and has no `actions` column — so controls survive the live
+    /// fan-out but are absent when a message is read back from the inbox
+    /// (`GET /api/v1/notifications`, `agentos notifications list`), exactly as
+    /// `attachment` is. The escalation queue, not the notification mirror, is
+    /// the surface that offers the operator a way to act.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<crate::PromptAction>,
 }
 
 /// An outbound media attachment carried by a [`UserMessage`].

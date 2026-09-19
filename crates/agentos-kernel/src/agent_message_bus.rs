@@ -1,6 +1,8 @@
-use agentos_types::{AgentID, AgentMessage, AgentOSError, EventSeverity, EventType, GroupID};
+use agentos_types::{
+    AgentID, AgentMessage, AgentOSError, EventSeverity, EventType, GroupID, MessageContent,
+};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
@@ -19,6 +21,10 @@ pub struct CommNotification {
     pub event_type: EventType,
     pub severity: EventSeverity,
     pub payload: serde_json::Value,
+    /// Event-chain depth of the activity that produced this notification.
+    /// Non-zero only for messages sent by a task that was itself event-triggered,
+    /// so `max_chain_depth` can terminate an A→B→A reply loop.
+    pub chain_depth: u32,
 }
 
 pub struct AgentMessageBus {
@@ -28,8 +34,13 @@ pub struct AgentMessageBus {
     inboxes: RwLock<HashMap<AgentID, mpsc::Sender<AgentMessage>>>,
     /// Agent group memberships.
     groups: RwLock<HashMap<GroupID, Vec<AgentID>>>,
-    /// Message history for audit and retrieval.
-    history: RwLock<Vec<AgentMessage>>,
+    /// Group name -> id, so operator commands can address a group by its name.
+    /// ponytail: in-memory like `groups` itself — groups are re-created after a
+    /// kernel restart. Persist both maps together if that becomes a real cost.
+    group_names: RwLock<HashMap<String, GroupID>>,
+    /// Message history for audit and retrieval. `VecDeque` so evicting the oldest
+    /// entry at `MAX_HISTORY` is O(1) rather than a memmove of the whole ring.
+    history: RwLock<VecDeque<AgentMessage>>,
     /// Agent public keys for signature verification (hex-encoded).
     pub_keys: RwLock<HashMap<AgentID, String>>,
     /// Optional channel for notifying the kernel of communication events.
@@ -42,7 +53,8 @@ impl AgentMessageBus {
         Self {
             inboxes: RwLock::new(HashMap::new()),
             groups: RwLock::new(HashMap::new()),
-            history: RwLock::new(Vec::new()),
+            group_names: RwLock::new(HashMap::new()),
+            history: RwLock::new(VecDeque::new()),
             pub_keys: RwLock::new(HashMap::new()),
             notification_sender: RwLock::new(None),
         }
@@ -61,12 +73,24 @@ impl AgentMessageBus {
         severity: EventSeverity,
         payload: serde_json::Value,
     ) {
+        self.notify_at_depth(event_type, severity, payload, 0).await
+    }
+
+    /// `notify` carrying the sender's event-chain depth (see `CommNotification`).
+    async fn notify_at_depth(
+        &self,
+        event_type: EventType,
+        severity: EventSeverity,
+        payload: serde_json::Value,
+        chain_depth: u32,
+    ) {
         let sender = self.notification_sender.read().await;
         if let Some(ref sender) = *sender {
             let notification = CommNotification {
                 event_type,
                 severity,
                 payload,
+                chain_depth,
             };
             if let Err(e) = sender.try_send(notification) {
                 tracing::warn!(error = %e, "Failed to send communication notification (possibly full or closed)");
@@ -193,7 +217,20 @@ impl AgentMessageBus {
     }
 
     /// Send a direct message to a specific agent.
-    pub async fn send_direct(&self, message: AgentMessage) -> Result<(), AgentOSError> {
+    ///
+    /// The caller owns the existence check: this method does not know the agent
+    /// registry, so a message to an unknown `AgentID` is accepted and lands in
+    /// history addressed to nobody. Both kernel callers resolve the target
+    /// through `AgentRegistry` first.
+    ///
+    /// `chain_depth` is the event-chain depth of the sending task (0 for
+    /// operator-initiated sends); it rides on the emitted `DirectMessageReceived`
+    /// so a reply loop between two agents hits `max_chain_depth`.
+    pub async fn send_direct(
+        &self,
+        message: AgentMessage,
+        chain_depth: u32,
+    ) -> Result<(), AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
         if message.is_expired() {
             return Err(AgentOSError::KernelError {
@@ -228,6 +265,7 @@ impl AgentMessageBus {
 
         let from = message.from;
         let msg_id = message.id;
+        let preview = content_preview(&message.content);
 
         let inboxes = self.inboxes.read().await;
         if let Some(tx) = inboxes.get(&agent_id) {
@@ -265,44 +303,54 @@ impl AgentMessageBus {
                     );
                 }
             }
+            drop(inboxes);
             self.push_history(message).await;
-            self.notify(
+            self.notify_at_depth(
                 EventType::DirectMessageReceived,
                 EventSeverity::Info,
                 serde_json::json!({
                     "from_agent": from.to_string(),
                     "to_agent": agent_id.to_string(),
                     "message_id": msg_id.to_string(),
+                    "message_content": preview,
+                    "live_listener": true,
                 }),
+                chain_depth,
             )
             .await;
             Ok(())
         } else {
-            self.notify(
-                EventType::MessageDeliveryFailed,
-                EventSeverity::Warning,
+            // No live mpsc listener. That is the normal case: durable delivery is the
+            // SQLite inbox written by `AgentInboxWriter` before we are called, and the
+            // recipient reads it via agent-messages-list/read. The mpsc inbox is only a
+            // fast path for a process that is actively draining it.
+            // ponytail: treat a missing inbox as "no live listener", not a failure.
+            // Callers already verified the target exists in the agent registry.
+            drop(inboxes);
+            self.push_history(message).await;
+            self.notify_at_depth(
+                EventType::DirectMessageReceived,
+                EventSeverity::Info,
                 serde_json::json!({
                     "from_agent": from.to_string(),
                     "to_agent": agent_id.to_string(),
-                    "error": format!("Agent {} not found", agent_id),
+                    "message_id": msg_id.to_string(),
+                    "message_content": preview,
+                    "live_listener": false,
                 }),
+                chain_depth,
             )
             .await;
-            self.notify(
-                EventType::AgentUnreachable,
-                EventSeverity::Warning,
-                serde_json::json!({
-                    "unreachable_agent": agent_id.to_string(),
-                    "from_agent": from.to_string(),
-                    "reason": "not_registered",
-                }),
-            )
-            .await;
-            Err(AgentOSError::AgentNotFound(agent_id.to_string()))
+            Ok(())
         }
     }
 
-    /// Broadcast a message to all connected agents (except sender).
+    /// Broadcast a message to all agents with a live mpsc listener (except sender).
+    ///
+    /// ponytail: reaches only agents that registered an mpsc inbox — nothing does in
+    /// production today, so this is test-only. Operator fan-out goes through
+    /// `send_to_group`, whose caller writes the durable SQLite inbox per member. Wire
+    /// a durable write here too before using this for a real all-agents announcement.
     pub async fn broadcast(&self, message: AgentMessage) -> Result<u32, AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
         if message.is_expired() {
@@ -386,10 +434,13 @@ impl AgentMessageBus {
         Ok(count)
     }
 
-    /// Send to a group.
+    /// Send to a group. `members` is the caller's already-resolved membership
+    /// snapshot — the same list it wrote durable inbox entries for — so the two
+    /// can never disagree if the group is replaced concurrently.
     pub async fn send_to_group(
         &self,
         group_id: &GroupID,
+        members: &[AgentID],
         message: AgentMessage,
     ) -> Result<u32, AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
@@ -436,35 +487,32 @@ impl AgentMessageBus {
         }
 
         let from = message.from;
-        let msg_id = message.id;
-
-        let groups = self.groups.read().await;
-        let members = groups
-            .get(group_id)
-            .ok_or_else(|| AgentOSError::KernelError {
-                reason: format!("Group {} not found", group_id),
-            })?;
+        let preview = content_preview(&message.content);
 
         let mut count = 0u32;
         let inboxes = self.inboxes.read().await;
 
-        for &id in members {
+        for &id in members.iter() {
             if id != from {
+                // Every member is a recipient: durable delivery is the SQLite inbox
+                // written by the caller. The mpsc push below is only the live-listener
+                // fast path, so its absence must not change the count.
+                count += 1;
                 if let Some(tx) = inboxes.get(&id) {
                     match tx.try_send(message.clone()) {
-                        Ok(()) => count += 1,
+                        Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
+                            // No MessageDeliveryFailed: the durable inbox row is
+                            // already written, so only the live push was lost.
                             tracing::warn!(
                                 agent_id = %id,
-                                "Group send: agent inbox full — message skipped for this recipient"
+                                "Group send: agent inbox full — live delivery skipped for this recipient"
                             );
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
-                            // Agent disconnected; count as recipient (inbox was registered).
-                            count += 1;
                             tracing::debug!(
                                 agent_id = %id,
-                                "Group send: agent inbox closed — message dropped for disconnected agent"
+                                "Group send: agent inbox closed — live delivery dropped for disconnected agent"
                             );
                         }
                     }
@@ -474,7 +522,6 @@ impl AgentMessageBus {
 
         // Release locks before notifying
         drop(inboxes);
-        drop(groups);
 
         self.push_history(message).await;
         self.notify(
@@ -484,20 +531,40 @@ impl AgentMessageBus {
                 "from_agent": from.to_string(),
                 "group_id": group_id.to_string(),
                 "recipient_count": count,
-                "message_id": msg_id.to_string(),
+                // No message_id: one bus id covers N distinct inbox rows, so it
+                // would resolve to "not found" via agent-messages-read. Carry
+                // the body preview instead (same as DirectMessageReceived).
+                "message_content": preview,
             }),
         )
         .await;
         Ok(count)
     }
 
-    /// Create a named group of agents.
-    pub async fn create_group(&self, group_id: GroupID, members: Vec<AgentID>) {
-        self.groups.write().await.insert(group_id, members);
+    /// Create a named group of agents. Re-creating an existing name replaces it.
+    ///
+    /// Both maps are swapped under held guards: two concurrent creates of the same
+    /// name would otherwise interleave and strand the loser's `GroupID` in `groups`
+    /// with no name pointing at it and no way to delete it.
+    pub async fn create_group(&self, group_id: GroupID, name: String, members: Vec<AgentID>) {
+        let mut group_names = self.group_names.write().await;
+        let mut groups = self.groups.write().await;
+        if let Some(old_id) = group_names.insert(name, group_id) {
+            groups.remove(&old_id);
+        }
+        groups.insert(group_id, members);
+    }
+
+    /// Resolve a group name to its id and members.
+    pub async fn group_by_name(&self, name: &str) -> Option<(GroupID, Vec<AgentID>)> {
+        let id = *self.group_names.read().await.get(name)?;
+        let members = self.groups.read().await.get(&id).cloned()?;
+        Some((id, members))
     }
 
     /// Get recent message history for an agent.
     pub async fn get_history(&self, agent_id: &AgentID, limit: usize) -> Vec<AgentMessage> {
+        let groups = self.groups.read().await;
         let history = self.history.read().await;
         history
             .iter()
@@ -506,7 +573,10 @@ impl AgentMessageBus {
                     || match m.to {
                         agentos_types::MessageTarget::Direct(to) => to == *agent_id,
                         agentos_types::MessageTarget::Broadcast => true,
-                        _ => false, // Can handle groups later if needed
+                        agentos_types::MessageTarget::Group(gid) => groups
+                            .get(&gid)
+                            .is_some_and(|members| members.contains(agent_id)),
+                        agentos_types::MessageTarget::DirectByName(_) => false,
                     }
             })
             .rev()
@@ -532,10 +602,9 @@ impl AgentMessageBus {
     /// Oldest entries are discarded when the cap is exceeded.
     async fn push_history(&self, message: AgentMessage) {
         let mut history = self.history.write().await;
-        history.push(message);
-        if history.len() > MAX_HISTORY {
-            let excess = history.len() - MAX_HISTORY;
-            history.drain(0..excess);
+        history.push_back(message);
+        while history.len() > MAX_HISTORY {
+            history.pop_front();
         }
     }
 }
@@ -547,11 +616,28 @@ impl Default for AgentMessageBus {
     }
 }
 
+/// Body preview for `DirectMessageReceived`. `trigger_prompt` renders it under
+/// `Message:` so the recipient answers in one inference instead of spending a
+/// tool round-trip on `agent-messages-read`. Text only; structured payloads
+/// stay behind the read. Capped so the event (and its inbox copy) stays small.
+const CONTENT_PREVIEW_CHARS: usize = 400;
+
+fn content_preview(content: &MessageContent) -> serde_json::Value {
+    match content {
+        MessageContent::Text(t) if t.chars().count() <= CONTENT_PREVIEW_CHARS => t.as_str().into(),
+        MessageContent::Text(t) => {
+            let head: String = t.chars().take(CONTENT_PREVIEW_CHARS).collect();
+            format!("{head}...(truncated)").into()
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use agentos_types::{EventSeverity, EventType};
-    use agentos_types::{MessageContent, MessageID, MessageTarget, TraceID};
+    use agentos_types::{MessageID, MessageTarget, TraceID};
     use ed25519_dalek::{Signer, SigningKey};
 
     /// Helper: create a signed message from a given signing key.
@@ -606,7 +692,7 @@ mod tests {
             "Hello from A",
             60,
         );
-        bus.send_direct(msg).await.unwrap();
+        bus.send_direct(msg, 0).await.unwrap();
 
         let received = inbox_b.recv().await.unwrap();
         assert_eq!(received.from, agent_a);
@@ -634,14 +720,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_to_nonexistent_agent_fails() {
+    async fn test_message_without_live_listener_still_delivers() {
+        // Durable delivery is the SQLite inbox; the mpsc inbox is only a live-listener
+        // fast path. No registered inbox must NOT fail the send, or agent-message is
+        // broken for every agent (nothing registers an mpsc inbox in production).
         let bus = AgentMessageBus::new();
         let from = AgentID::new();
+        let to = AgentID::new();
         let (sk, pk) = make_keypair();
         bus.register_pubkey_internal(from, pk).await.unwrap();
 
-        let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "ping", 60);
-        assert!(bus.send_direct(msg).await.is_err());
+        let msg = make_signed_msg(&sk, from, MessageTarget::Direct(to), "ping", 60);
+        assert!(bus.send_direct(msg, 0).await.is_ok());
+        assert_eq!(bus.get_history(&to, 10).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_group_send_by_name_counts_every_member() {
+        let bus = AgentMessageBus::new();
+        let from = AgentID::new();
+        let member = AgentID::new();
+        let outsider = AgentID::new();
+        let (sk, pk) = make_keypair();
+        bus.register_pubkey_internal(from, pk).await.unwrap();
+
+        let gid = GroupID::new();
+        bus.create_group(gid, "team".to_string(), vec![from, member])
+            .await;
+        let (resolved, members) = bus.group_by_name("team").await.expect("group by name");
+        assert_eq!(resolved, gid);
+        assert_eq!(members.len(), 2);
+
+        // No mpsc listener registered: the count must still be the member count
+        // minus the sender, because durable delivery is the SQLite inbox.
+        let msg = make_signed_msg(&sk, from, MessageTarget::Group(gid), "standup", 60);
+        assert_eq!(bus.send_to_group(&gid, &members, msg).await.unwrap(), 1);
+
+        assert_eq!(bus.get_history(&member, 10).await.len(), 1);
+        assert!(bus.get_history(&outsider, 10).await.is_empty());
     }
 
     #[tokio::test]
@@ -667,7 +783,7 @@ mod tests {
             expires_at: Some(past + chrono::Duration::seconds(5)),
         };
 
-        let result = bus.send_direct(msg).await;
+        let result = bus.send_direct(msg, 0).await;
         assert!(result.is_err(), "expired message should be rejected");
         assert!(result.unwrap_err().to_string().contains("expired"));
     }
@@ -694,7 +810,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(60)),
         };
 
-        let result = bus.send_direct(msg).await;
+        let result = bus.send_direct(msg, 0).await;
         assert!(result.is_err(), "unsigned message should be rejected");
         assert!(result.unwrap_err().to_string().contains("no signature"));
     }
@@ -725,7 +841,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(60)),
         };
 
-        let result = bus.send_direct(msg).await;
+        let result = bus.send_direct(msg, 0).await;
         assert!(
             result.is_err(),
             "message with invalid signature should be rejected"
@@ -754,7 +870,7 @@ mod tests {
             "signed msg",
             60,
         );
-        bus.send_direct(msg).await.unwrap();
+        bus.send_direct(msg, 0).await.unwrap();
 
         let received = inbox_b.recv().await.unwrap();
         assert_eq!(received.from, agent_a);
@@ -786,7 +902,7 @@ mod tests {
             "event test",
             60,
         );
-        bus.send_direct(msg).await.unwrap();
+        bus.send_direct(msg, 0).await.unwrap();
 
         let notif = notif_rx
             .try_recv()
@@ -801,6 +917,25 @@ mod tests {
             notif.payload["to_agent"].as_str().unwrap(),
             agent_b.to_string()
         );
+        assert_eq!(notif.payload["message_content"], "event test");
+    }
+
+    #[test]
+    fn content_preview_truncates_text_and_skips_structured() {
+        let short = MessageContent::Text("hi".into());
+        assert_eq!(content_preview(&short), "hi");
+
+        let long = MessageContent::Text("é".repeat(CONTENT_PREVIEW_CHARS + 5));
+        let v = content_preview(&long);
+        let s = v.as_str().unwrap();
+        assert!(s.ends_with("...(truncated)"));
+        assert_eq!(
+            s.chars().count(),
+            CONTENT_PREVIEW_CHARS + "...(truncated)".chars().count()
+        );
+
+        let structured = MessageContent::Structured(serde_json::json!({"k": "v"}));
+        assert!(content_preview(&structured).is_null());
     }
 
     #[tokio::test]
@@ -831,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delivery_failure_emits_event() {
+    async fn test_delivery_without_listener_emits_received_event() {
         let bus = AgentMessageBus::new();
         let (notif_tx, mut notif_rx) = mpsc::channel(64);
         bus.set_notification_sender(notif_tx).await;
@@ -841,24 +976,14 @@ mod tests {
         bus.register_pubkey_internal(from, pk).await.unwrap();
 
         let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "fail", 60);
-        assert!(bus.send_direct(msg).await.is_err());
+        assert!(bus.send_direct(msg, 0).await.is_ok());
 
         let notif = notif_rx
             .try_recv()
-            .expect("should receive MessageDeliveryFailed notification");
-        assert_eq!(notif.event_type, EventType::MessageDeliveryFailed);
-        assert_eq!(notif.severity, EventSeverity::Warning);
-        assert!(notif.payload["error"]
-            .as_str()
-            .unwrap()
-            .contains("not found"));
-
-        let notif2 = notif_rx
-            .try_recv()
-            .expect("should receive AgentUnreachable notification after delivery failure");
-        assert_eq!(notif2.event_type, EventType::AgentUnreachable);
-        assert_eq!(notif2.severity, EventSeverity::Warning);
-        assert_eq!(notif2.payload["reason"].as_str().unwrap(), "not_registered");
+            .expect("should receive DirectMessageReceived notification");
+        assert_eq!(notif.event_type, EventType::DirectMessageReceived);
+        assert_eq!(notif.severity, EventSeverity::Info);
+        assert!(!notif.payload["live_listener"].as_bool().unwrap());
     }
 
     #[tokio::test]
@@ -882,7 +1007,7 @@ mod tests {
             "no sender",
             60,
         );
-        bus.send_direct(msg).await.unwrap();
+        bus.send_direct(msg, 0).await.unwrap();
         assert!(inbox_b.try_recv().is_ok());
 
         let msg = make_signed_msg(&sk_a, agent_a, MessageTarget::Broadcast, "no sender bc", 60);

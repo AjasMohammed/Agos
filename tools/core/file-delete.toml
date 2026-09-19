@@ -4,13 +4,13 @@ risk_class = "exec_capable"
 [manifest]
 name        = "file-delete"
 version     = "1.0.0"
-description = "Deletes a file within data_dir after acquiring an exclusive write lock. Refuses to delete directories. Path traversal is blocked via canonicalize + starts_with check."
+description = "Deletes a file under your home dir or inside a write-granted folder after acquiring an exclusive write lock. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Refuses to delete directories. Path traversal is blocked via canonicalize + starts_with check."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 
 [capabilities_required]
-permissions = ["fs.user_data:w"]
+permissions = ["fs.user_data:w", "fs.workspace:w"]
 
 [capabilities_provided]
 outputs = ["status"]
@@ -25,7 +25,7 @@ required = ["path"]
 
 [payload_schema.properties.path]
 type = "string"
-description = "Relative file path under data directory"
+description = "File path: relative (under your home dir) or absolute inside a write-granted folder"
 
 [sandbox]
 network       = false

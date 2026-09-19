@@ -20,6 +20,7 @@
 #   - bluez + dbus                (bluetooth)
 #   - x11-xserver-utils           (display)
 #   - v4l-utils                   (webcam)
+#   - network-manager             (wifi)
 set -euo pipefail
 
 # Always run from the repo root
@@ -107,6 +108,7 @@ command -v bluetoothctl &>/dev/null && echo "    [ok] bluez (bluetooth)"      ||
 command -v xrandr       &>/dev/null && echo "    [ok] xrandr (display)"       || echo "    [--] xrandr not found (display HAL limited)"
 command -v v4l2-ctl     &>/dev/null && echo "    [ok] v4l-utils (webcam)"     || echo "    [--] v4l-utils not found (webcam HAL disabled)"
 command -v lsusb        &>/dev/null && echo "    [ok] usbutils (usb)"         || echo "    [--] usbutils not found (USB HAL disabled)"
+command -v nmcli        &>/dev/null && echo "    [ok] NetworkManager (wifi)"  || echo "    [--] nmcli not found (wifi HAL disabled)"
 echo ""
 
 # Check Ollama

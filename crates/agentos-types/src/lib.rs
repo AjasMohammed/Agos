@@ -16,6 +16,7 @@ pub mod notification;
 pub mod path;
 pub mod plugin;
 pub mod profile;
+pub mod prompt;
 pub mod registry_query;
 pub mod role;
 pub mod schedule;
@@ -31,7 +32,7 @@ pub mod skill;
 pub use agent::{AgentProfile, AgentStatus, LLMProvider};
 pub use agent_inbox::{AgentInboxEntry, AgentInboxKind, AgentMessageEntry};
 pub use agent_message::{AgentMessage, MessageContent, MessageTarget};
-pub use agent_self::{AgentSelfView, BudgetSummary, SubscriptionSummary};
+pub use agent_self::{AgentSelfView, BudgetSummary, GrantedFoldersSummary, SubscriptionSummary};
 pub use capability::{
     CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp, PermissionSet,
 };
@@ -63,6 +64,7 @@ pub use notification::{
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
 pub use profile::{ProfileCategory, ProfileEntry, ProfileEntryStatus, ProfilePatch, ProfileSource};
+pub use prompt::{render_actions_fallback, ActionStyle, PromptAction};
 pub use registry_query::{
     AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, CapabilityDescriptorSummary,
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityRegistryQuery,

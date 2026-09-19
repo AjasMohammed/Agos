@@ -1,4 +1,4 @@
-use agentos_types::AgentOSError;
+use agentos_types::{AgentOSError, PermissionOp};
 use std::path::{Component, Path, PathBuf};
 
 /// Indicates which access zone a resolved path falls in.
@@ -154,6 +154,114 @@ pub fn resolve_path_writable(
     }
 
     Ok((normalized, PathZone::DataDir))
+}
+
+/// Reserved payload key: where a HAL driver puts captures when the agent
+/// gave no `output_path`. Stamped by the tool wrapper from the agent home so
+/// frames and recordings never default to a world-readable `/tmp`.
+pub const HAL_OUTPUT_DIR_KEY: &str = "__output_dir";
+
+/// The agent's `captures/` directory, created and canonical.
+pub fn agent_capture_dir(
+    tool_name: &str,
+    context: &crate::traits::ToolExecutionContext,
+) -> Result<PathBuf, AgentOSError> {
+    let dir = context.agent_files_dir()?.join("captures");
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| dir.canonicalize())
+        .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: tool_name.to_string(),
+            reason: format!("Cannot create {}: {e}", dir.display()),
+        })
+}
+
+/// Contain a HAL payload path (`output_path`, `audio_path`) before it reaches
+/// a driver. Drivers read and write wherever they are told, so this is their
+/// only containment: a relative path lands in the agent home; an absolute one
+/// must already lie in the home or a granted workspace folder (which also
+/// needs the `fs.workspace` permission, as for the file tools). A write
+/// target gets its parent directory created and re-checked after
+/// canonicalization, so a symlink inside the home cannot point the write out.
+pub fn contain_hal_path(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    tool_name: &str,
+    context: &crate::traits::ToolExecutionContext,
+    writable: bool,
+) -> Result<(), AgentOSError> {
+    let Some(raw) = map.get(key).and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if raw.is_empty() {
+        // The driver reports the empty string itself.
+        return Ok(());
+    }
+    let home = context.agent_files_dir()?;
+    let home = home
+        .canonicalize()
+        .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: tool_name.to_string(),
+            reason: format!("Agent home error: {} ({e})", home.display()),
+        })?;
+    let (granted, op) = if writable {
+        (&context.workspace_paths_writable, PermissionOp::Write)
+    } else {
+        (&context.workspace_paths, PermissionOp::Read)
+    };
+    let roots: Vec<PathBuf> = std::iter::once(home.clone())
+        .chain(granted.iter().cloned())
+        .collect();
+    let (mut resolved, zone) = if writable {
+        resolve_path_writable(raw, tool_name, &home, &roots)?
+    } else {
+        resolve_path_existing(raw, tool_name, &home, &roots)?
+    };
+    if zone == PathZone::Workspace
+        && !resolved.starts_with(&home)
+        && !context.permissions.check(WORKSPACE_PERMISSION, op)
+    {
+        return Err(AgentOSError::PermissionDenied {
+            resource: WORKSPACE_PERMISSION.into(),
+            operation: format!("Workspace access denied: {raw}"),
+        });
+    }
+    if writable {
+        let Some(parent) = resolved.parent().map(Path::to_path_buf) else {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "fs.user_data".into(),
+                operation: format!("Path traversal denied: {raw}"),
+            });
+        };
+        std::fs::create_dir_all(&parent)
+            .and_then(|_| parent.canonicalize())
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                tool_name: tool_name.to_string(),
+                reason: format!("Cannot create {}: {e}", parent.display()),
+            })
+            .and_then(|canonical_parent| {
+                let inside = roots.iter().any(|root| {
+                    root.canonicalize()
+                        .map(|r| canonical_parent.starts_with(r))
+                        .unwrap_or(false)
+                });
+                let name = resolved.file_name().map(|n| n.to_os_string());
+                match (inside, name) {
+                    (true, Some(name)) => {
+                        resolved = canonical_parent.join(name);
+                        Ok(())
+                    }
+                    _ => Err(AgentOSError::PermissionDenied {
+                        resource: "fs.user_data".into(),
+                        operation: format!("Path traversal denied: {raw}"),
+                    }),
+                }
+            })?;
+    }
+    map.insert(
+        key.to_string(),
+        serde_json::Value::String(resolved.to_string_lossy().into_owned()),
+    );
+    Ok(())
 }
 
 /// Lexically normalize a path by resolving `.` and `..` without touching the

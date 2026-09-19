@@ -5,7 +5,8 @@ use agentos_types::{EventSeverity, EventSource, EventType};
 /// Capture-consent window opened when an operator approves a webcam/audio
 /// device for an agent. Generous compared to the old per-session TTLs because
 /// the grant is an explicit operator action; revoking the device closes it.
-const OPERATOR_CAPTURE_CONSENT_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub(crate) const OPERATOR_CAPTURE_CONSENT_TTL: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
 
 impl Kernel {
     /// List all registered hardware devices.

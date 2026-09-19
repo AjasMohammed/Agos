@@ -4,7 +4,7 @@ risk_class = "exec_capable"
 [manifest]
 name = "proc-signal"
 version = "1.0.0"
-description = "Send a signal to a managed process (SIGTERM, SIGKILL, etc.)"
+description = "Send a signal to a managed process (SIGTERM, SIGKILL, etc.). Processes run in a sandbox: any of these signals stops the whole sandbox immediately (no graceful shutdown handler runs)."
 author = "agentos-core"
 trust_tier = "core"
 category    = "process"

@@ -62,11 +62,20 @@ impl AgentTool for AskUserTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
 
-        let priority = payload
+        // Models reach for low/medium/high — the near-universal severity words —
+        // and used to lose a whole call to a schema rejection. Accept them and
+        // fold them onto the canonical levels so downstream stays unchanged.
+        let priority = match payload
             .get("priority")
             .and_then(|v| v.as_str())
             .unwrap_or("info")
-            .to_string();
+        {
+            "low" => "info",
+            "medium" => "warning",
+            "high" => "urgent",
+            other => other,
+        }
+        .to_string();
 
         let auto_action = payload
             .get("auto_action")
@@ -88,5 +97,72 @@ impl AgentTool for AskUserTool {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_types::*;
+    use serde_json::json;
+
+    fn ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
+
+    async fn priority_of(payload: serde_json::Value) -> String {
+        let out = AskUserTool::new()
+            .execute(payload, ctx())
+            .await
+            .expect("ask-user builds a kernel action");
+        out["priority"].as_str().expect("priority").to_string()
+    }
+
+    /// A model reaching for "high" used to lose a whole call to a schema
+    /// rejection (2026-09-08). Aliases fold onto the canonical levels so
+    /// nothing downstream has to learn the new words.
+    #[tokio::test]
+    async fn severity_aliases_fold_onto_canonical_levels() {
+        assert_eq!(
+            priority_of(json!({"question": "q", "priority": "high"})).await,
+            "urgent"
+        );
+        assert_eq!(
+            priority_of(json!({"question": "q", "priority": "medium"})).await,
+            "warning"
+        );
+        assert_eq!(
+            priority_of(json!({"question": "q", "priority": "low"})).await,
+            "info"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_levels_and_the_default_are_untouched() {
+        assert_eq!(
+            priority_of(json!({"question": "q", "priority": "critical"})).await,
+            "critical"
+        );
+        assert_eq!(priority_of(json!({"question": "q"})).await, "info");
     }
 }

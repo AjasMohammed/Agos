@@ -271,6 +271,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

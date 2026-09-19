@@ -405,6 +405,15 @@ impl Kernel {
                     }
                 }
                 self.cleanup_task_subscriptions(&task_id).await;
+                // Cancel is cooperative: a task parked on an approval or an
+                // ask-user question would otherwise leave a live prompt whose
+                // "approve" still runs the tool for a cancelled task.
+                self.escalation_manager
+                    .resolve_for_task(&task_id, "Task cancelled")
+                    .await;
+                self.notification_router
+                    .drop_waiters_for_task(&task_id)
+                    .await;
                 // Release in-memory context so the ContextManager map doesn't leak.
                 self.context_manager.remove_context(&task_id).await;
                 // Finalise trace so the active-trace map doesn't leak the entry.

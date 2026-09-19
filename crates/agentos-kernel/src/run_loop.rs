@@ -3135,6 +3135,7 @@ impl Kernel {
                             _ => NotificationPriority::Info,
                         };
                         let msg = UserMessage {
+                            actions: Vec::new(),
                             id: NotificationID::new(),
                             from: NotificationSource::Kernel,
                             task_id: None,
@@ -3315,6 +3316,7 @@ impl Kernel {
                             _ => NotificationPriority::Info,
                         };
                         let msg = UserMessage {
+                            actions: Vec::new(),
                             id: NotificationID::new(),
                             from: NotificationSource::Kernel,
                             task_id: None,
@@ -3442,6 +3444,7 @@ impl Kernel {
                 _ => NotificationPriority::Info,
             };
             UserMessage {
+                actions: Vec::new(),
                 id: NotificationID::new(),
                 from: NotificationSource::Kernel,
                 task_id: None,
@@ -3695,6 +3698,7 @@ impl Kernel {
         crate::task_executor::enforce_tool_pre(
             &self.hook_registry,
             &self.escalation_manager,
+            &self.zone_table,
             agent.id,
             task_id,
             &tool_name,
@@ -3741,7 +3745,8 @@ impl Kernel {
             workspace_paths_executable: ws_sched.executable,
             capability_registry: None,
             capability_dispatcher: None,
-            storage_zone_query: None,
+            storage_zone_query: Some(std::sync::Arc::new(self.zone_table.clone())
+                as std::sync::Arc<dyn agentos_types::StorageZoneQuery>),
             cancellation_token: self.cancellation_token.child_token(),
             tool_categories: None,
         };

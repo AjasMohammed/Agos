@@ -4,14 +4,14 @@ risk_class = "write_scoped"
 [manifest]
 name        = "file-writer"
 version     = "1.1.0"
-description = "Writes content to files with exclusive locking, atomic overwrite, append, and create_only modes. Blocks concurrent readers and writers with a FileLocked error."
+description = "Writes content to files with exclusive locking, atomic overwrite, append, and create_only modes. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Blocks concurrent readers and writers with a FileLocked error."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
 search_hints = ["write a file", "save text to disk", "create a new file"]
 
 [capabilities_required]
-permissions = ["fs.user_data:w"]
+permissions = ["fs.user_data:w", "fs.workspace:w"]
 
 [capabilities_provided]
 outputs = ["status"]
@@ -26,7 +26,7 @@ required = ["path", "content"]
 
 [payload_schema.properties.path]
 type = "string"
-description = "Relative file path under data directory"
+description = "File path: relative (under your home dir) or absolute inside a write-granted folder"
 
 [payload_schema.properties.content]
 type = "string"

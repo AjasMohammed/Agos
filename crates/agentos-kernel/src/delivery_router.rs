@@ -211,6 +211,7 @@ impl Kernel {
             NotifyTarget::UserInbox => {
                 let prio = parse_priority_str(&priority);
                 let msg = UserMessage {
+                    actions: Vec::new(),
                     id: NotificationID::new(),
                     from: NotificationSource::Kernel,
                     task_id: run.task_id,
@@ -241,6 +242,7 @@ impl Kernel {
                 // schedule delivering to a Telegram or Ntfy channel used to
                 // error on every single fire.
                 let msg = UserMessage {
+                    actions: Vec::new(),
                     id: NotificationID::new(),
                     from: NotificationSource::Kernel,
                     task_id: run.task_id,

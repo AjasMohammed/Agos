@@ -776,6 +776,7 @@ impl Kernel {
         }
 
         let test_msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,

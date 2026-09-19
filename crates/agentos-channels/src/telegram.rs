@@ -28,6 +28,11 @@ struct TelegramUpdate {
 struct TelegramCallbackQuery {
     #[allow(dead_code)]
     id: String,
+    /// The user who tapped the button. NOT `message.from`, which is the bot
+    /// that posted the keyboard — attributing a tap to the bot would check the
+    /// bot's own id against the pairing allowlist.
+    #[serde(default)]
+    from: Option<TelegramUser>,
     #[serde(default)]
     data: Option<String>,
     #[serde(default)]
@@ -201,20 +206,28 @@ impl ChannelAdapter for TelegramAdapter {
         // markdown (`**bold**`, `*italic*`, code, links, fenced blocks). The
         // converter HTML-escapes raw input first so plain text with `<`/`>`/`&`
         // remains safe.
+        // Actionable controls render as an inline keyboard, so `as_text()` is
+        // used rather than `text_with_actions()` — a tap already delivers the
+        // command via `callback_query` (see the listener below), and the text
+        // instructions would only duplicate the buttons.
         let raw = msg.content.as_text();
         let raw: String = raw.chars().take(TELEGRAM_MAX_TEXT).collect();
         let html = crate::telegram_format::markdown_to_telegram_html(&raw);
+        let reply_markup = inline_keyboard(&msg.actions);
         let chat_id = self.chat_id.clone();
         let policy = crate::retry::RetryPolicy::default();
 
         crate::retry::with_retry(&policy, "telegram", || async {
             // Try HTML mode first; on Telegram parse errors fall back to plain.
-            let html_payload = json!({
+            let mut html_payload = json!({
                 "chat_id": chat_id,
                 "text": html,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": true,
             });
+            if !reply_markup.is_null() {
+                html_payload["reply_markup"] = reply_markup.clone();
+            }
             let v = match self.post_telegram("sendMessage", &html_payload).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -222,15 +235,17 @@ impl ChannelAdapter for TelegramAdapter {
                     let msg = format!("{e}");
                     if msg.contains("can't parse entities") || msg.contains("HTTP 400") {
                         warn!(error = %e, "Telegram HTML parse failed; resending as plain text");
-                        self.post_telegram(
-                            "sendMessage",
-                            &json!({
-                                "chat_id": chat_id,
-                                "text": raw,
-                                "disable_web_page_preview": true,
-                            }),
-                        )
-                        .await?
+                        let mut plain_payload = json!({
+                            "chat_id": chat_id,
+                            "text": raw,
+                            "disable_web_page_preview": true,
+                        });
+                        // The plain-text retry must keep the keyboard, or the
+                        // operator loses every control to an HTML parse error.
+                        if !reply_markup.is_null() {
+                            plain_payload["reply_markup"] = reply_markup.clone();
+                        }
+                        self.post_telegram("sendMessage", &plain_payload).await?
                     } else {
                         return Err(e);
                     }
@@ -375,17 +390,22 @@ impl ChannelAdapter for TelegramAdapter {
                             if data.is_empty() {
                                 continue;
                             }
+                            // Attribute the tap to whoever pressed it. `m.from`
+                            // is the *bot* (it posted the keyboard), so using it
+                            // would authorise against the bot's own id and match
+                            // neither the pairing allowlist nor the convention
+                            // the plain-message branch above uses.
+                            let presser = cq.from;
                             let inbound = InboundMessage {
                                 id: m.message_id.to_string(),
                                 channel_type: "telegram".to_string(),
                                 channel_instance_id: instance_id.clone(),
                                 sender: ChannelIdentity {
-                                    platform_id: m
-                                        .from
+                                    platform_id: presser
                                         .as_ref()
                                         .map(|f| f.id.to_string())
                                         .unwrap_or_default(),
-                                    display_name: m.from.map(|f| f.first_name),
+                                    display_name: presser.map(|f| f.first_name),
                                 },
                                 content: MessageContent::Text(data),
                                 thread_id: None,
@@ -459,5 +479,63 @@ mod tests {
             MessageContent::Markdown("**bold**".into()).as_text(),
             "**bold**"
         );
+    }
+}
+
+/// Build a Telegram inline keyboard from actionable controls.
+///
+/// `command` becomes `callback_data` verbatim: the listener below turns a
+/// `callback_query` straight back into an `InboundMessage`, so a tap reaches
+/// the same handler as the typed command. Never truncate it — a clipped
+/// `/approve 4` resolves a different escalation than the one displayed.
+///
+// ponytail: six lines duplicated from the delivery-stack adapter in
+// `agentos-kernel/src/adapters/telegram.rs`. Sharing them would mean a new
+// crate hop for less code than the hop costs; revisit if a third Telegram
+// surface appears.
+fn inline_keyboard(actions: &[agentos_types::PromptAction]) -> serde_json::Value {
+    if actions.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let rows: Vec<Vec<serde_json::Value>> = actions
+        .chunks(2)
+        .map(|row| {
+            row.iter()
+                .map(|a| json!({ "text": a.short_label(64), "callback_data": a.command }))
+                .collect()
+        })
+        .collect();
+    json!({ "inline_keyboard": rows })
+}
+
+#[cfg(test)]
+mod action_keyboard_tests {
+    use super::*;
+    use agentos_types::{ActionStyle, PromptAction};
+
+    #[test]
+    fn no_actions_yields_null_so_no_reply_markup_is_attached() {
+        assert!(inline_keyboard(&[]).is_null());
+    }
+
+    #[test]
+    fn callback_data_is_the_command_verbatim_and_rows_hold_two() {
+        let actions = vec![
+            PromptAction::new("✅ Approve", "/approve 42", ActionStyle::Primary),
+            PromptAction::new("❌ Deny", "/deny 42", ActionStyle::Danger),
+            PromptAction::new(
+                "✅ Approve & always allow",
+                "/approve 42 always",
+                ActionStyle::Secondary,
+            ),
+        ];
+        let kb = inline_keyboard(&actions);
+        let rows = kb["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["callback_data"], "/approve 42");
+        assert_eq!(rows[0][1]["callback_data"], "/deny 42");
+        assert_eq!(rows[1][0]["callback_data"], "/approve 42 always");
+        // Telegram caps button text at 64 chars; the emoji must not be split.
+        assert_eq!(rows[0][0]["text"], "✅ Approve");
     }
 }

@@ -1,6 +1,6 @@
 use crate::ids::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 /// Trust tier assigned to a tool manifest.
@@ -124,6 +124,26 @@ pub struct ToolManifest {
     /// a human approval request before execution.
     #[serde(default)]
     pub risk_class: RiskClass,
+    /// Per-action overrides for [`Self::risk_class`], keyed by the payload's
+    /// `action` field (trimmed). Absent action, absent key, or a payload that
+    /// is not a JSON object with a string `action` => the tool-level class.
+    ///
+    /// Exists because `risk_class` is one value per *tool*, while a multi-action
+    /// tool spans classes: `wifi` must prompt to join a network, but its
+    /// `status` and `scan` actions read state and prompted identically — 13
+    /// escalations in 15 minutes in one observed session, which trains the
+    /// operator to rubber-stamp the one call that mattered.
+    ///
+    /// Only the two read-only classes may appear here; `verify_manifest`
+    /// rejects anything else. That is what keeps this from becoming a
+    /// downgrade path to `Interactive`/`WriteAgentState` (auto-allowed, and
+    /// deliberately `Core`-only), and it is signed as part of the manifest
+    /// payload so an author cannot bolt one onto a validly-signed manifest.
+    ///
+    /// `BTreeMap`, not `HashMap`: the signing payload must serialise
+    /// byte-identically on every run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub risk_class_by_action: BTreeMap<String, RiskClass>,
     /// Hints for the LLM on when to use this tool and what to avoid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_hints: Option<UsageHints>,

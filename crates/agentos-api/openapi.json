@@ -4,7 +4,8 @@
     "title": "AgentOS API",
     "description": "REST + WebSocket control-plane API for AgentOS.\n\n**Response envelope:** all success responses are wrapped in `{ \"data\": ... }`; paginated list endpoints also include a `{ \"meta\": { \"total\": N } }` block. Errors use `{ \"error\": { \"code\", \"message\", \"status\" } }`.\n\n**Auth:** send `Authorization: Bearer agos_<key>` on protected routes. The WebSocket endpoint authenticates via a `?token=agos_<key>` query parameter.\n\nThe OpenAI-compatible `POST /api/v1/chat/completions` returns its native shape (not the `{ data }` envelope) and streams `text/event-stream` chunks when `stream` is true.",
     "license": {
-      "name": ""
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
     },
     "version": "0.1.0"
   },
@@ -124,6 +125,170 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Envelope_ApiConvoDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-chats/{id}/continue": {
+      "post": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`POST /api/v1/agent-chats/{id}/continue` — Resume a finished conversation in\nplace for more turns, picking up after its last speaker.",
+        "operationId": "agent_chats_continue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContinueConvoRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Conversation resumed (running)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConvoSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conversation is still running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-chats/{id}/messages": {
+      "post": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`POST /api/v1/agent-chats/{id}/messages` — Post an operator message. A running\nconversation answers it on its next turn; a finished one resumes for one round.",
+        "operationId": "agent_chats_post_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostConvoMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Message stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConvoSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
                 }
               }
             }
@@ -4066,7 +4231,7 @@
           {
             "name": "channel",
             "in": "query",
-            "description": "Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,\n`system`, or `events`). Subscribing requires the matching `<channel>:r`\nscope on the API key.",
+            "description": "Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,\n`system`, `escalations`, or `events`). Subscribing requires the matching\n`<channel>:r` scope on the API key.",
             "required": true,
             "schema": {
               "type": "string"
@@ -9978,6 +10143,13 @@
           "connected_at"
         ],
         "properties": {
+          "avatar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Profile picture as a `data:image/...;base64,` URL, usable directly as an\n`<img src>`. Absent when none is set."
+          },
           "connected_at": {
             "type": "string",
             "format": "date-time"
@@ -10537,7 +10709,7 @@
         "properties": {
           "agent_name": {
             "type": "string",
-            "description": "Agent that produced this turn."
+            "description": "Agent that produced this turn, or `@user` for an operator message."
           },
           "content": {
             "type": "string",
@@ -10896,6 +11068,7 @@
         "description": "A running MCP server merged with its persisted attachment record.",
         "required": [
           "name",
+          "permission",
           "tool_count",
           "args",
           "has_auth_token",
@@ -10952,6 +11125,10 @@
               "null"
             ],
             "description": "OAuth connector id backing this server, if any."
+          },
+          "permission": {
+            "type": "string",
+            "description": "Permission that grants an agent every tool of this server\n(`mcp:<server>/:x`); pass it to the agent grant/revoke endpoints."
           },
           "state": {
             "type": [
@@ -12438,6 +12615,21 @@
           }
         }
       },
+      "ContinueConvoRequest": {
+        "type": "object",
+        "description": "Request body for continuing a finished conversation in place.",
+        "properties": {
+          "turns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Additional agent turns to run (clamped to 1..=50; default 8).",
+            "minimum": 0
+          }
+        }
+      },
       "CostBudget": {
         "type": "object",
         "description": "A per-agent daily budget snapshot.",
@@ -13069,6 +13261,13 @@
               "connected_at"
             ],
             "properties": {
+              "avatar": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Profile picture as a `data:image/...;base64,` URL, usable directly as an\n`<img src>`. Absent when none is set."
+              },
               "connected_at": {
                 "type": "string",
                 "format": "date-time"
@@ -15194,6 +15393,13 @@
                 "connected_at"
               ],
               "properties": {
+                "avatar": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Profile picture as a `data:image/...;base64,` URL, usable directly as an\n`<img src>`. Absent when none is set."
+                },
                 "connected_at": {
                   "type": "string",
                   "format": "date-time"
@@ -15825,6 +16031,7 @@
               "description": "A running MCP server merged with its persisted attachment record.",
               "required": [
                 "name",
+                "permission",
                 "tool_count",
                 "args",
                 "has_auth_token",
@@ -15881,6 +16088,10 @@
                     "null"
                   ],
                   "description": "OAuth connector id backing this server, if any."
+                },
+                "permission": {
+                  "type": "string",
+                  "description": "Permission that grants an agent every tool of this server\n(`mcp:<server>/:x`); pass it to the agent grant/revoke endpoints."
                 },
                 "state": {
                   "type": [
@@ -17937,6 +18148,19 @@
           }
         }
       },
+      "PostConvoMessageRequest": {
+        "type": "object",
+        "description": "Request body for posting an operator message into a conversation.",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Message text (max 4000 chars)."
+          }
+        }
+      },
       "PrefProposalQuery": {
         "type": "object",
         "description": "Query filter for `GET /api/v1/prefs/proposals`.",
@@ -18243,6 +18467,13 @@
           "text"
         ],
         "properties": {
+          "file_ids": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Comma-separated upload ids attached to this message (from\n`GET /api/v1/files`). Resolved into context parts — extracted text for\ndocuments, image parts for a vision-capable agent."
+          },
           "text": {
             "type": "string"
           }
@@ -18480,6 +18711,13 @@
           "agent_name": {
             "type": "string"
           },
+          "avatar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Profile picture as a `data:image/{png,jpeg,webp,gif};base64,` URL, at most\n64 KB. Absent = unchanged; `\"\"` = remove the picture."
+          },
           "description": {
             "type": [
               "string",
@@ -18498,6 +18736,14 @@
               "string",
               "null"
             ]
+          },
+          "working_set_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Per-agent tool working-set size (T1 tools pre-armed by retrieval).\nAbsent = unchanged; `null` = revert to the kernel default; `0` = pinned\ntools only (small / low-TPM models).",
+            "minimum": 0
           }
         }
       },

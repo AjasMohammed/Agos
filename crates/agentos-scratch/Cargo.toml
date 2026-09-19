@@ -2,8 +2,10 @@
 name = "agentos-scratch"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "[experimental] Agent scratchpad: markdown pages, wikilinks, backlink graph. API may change before v2."
 
 [dependencies]
 rusqlite = { workspace = true }

@@ -204,6 +204,11 @@ pub trait KernelService: Send + Sync {
     /// The WhatsApp webhook GET verify-token for a channel, if configured.
     async fn whatsapp_verify_token(&self, channel_id: &str) -> Result<Option<String>, ApiError>;
 
+    /// Acknowledge a Telegram inline-keyboard tap so the client drops the
+    /// button spinner. Best-effort — the default no-op keeps the spinner, never
+    /// the approval, since only the kernel impl can reach the bot token.
+    async fn telegram_ack_callback(&self, _channel_id: &str, _callback_query_id: &str) {}
+
     // ── Control-plane auth (React control panel) ─────────────────────────────
 
     /// Verify an operator login credential (constant-time) against the configured
@@ -688,10 +693,22 @@ pub trait KernelService: Send + Sync {
 
     /// Send a user message to a session, run inference, persist both turns, and
     /// return the assistant reply (non-streaming).
+    ///
+    /// `file_ids` is a comma-separated list of upload ids the composer attached.
+    /// They are resolved into typed context parts (text extraction, vision) the
+    /// same way the web chat resolves them — without this the panel could attach
+    /// a file and the agent would never learn it existed.
+    ///
+    /// `owner_principal` must be the caller's file-owner identity — the API key
+    /// id, which is what `POST /api/v1/files` stamps on every upload. Passing an
+    /// empty principal matches only unowned rows (channel media and CLI writes),
+    /// so the panel's own attachments would resolve to nothing at all.
     async fn send_chat_message(
         &self,
         session_id: &str,
         text: String,
+        file_ids: Option<String>,
+        owner_principal: &str,
     ) -> Result<ApiChatMessage, ApiError>;
 
     /// Streaming variant of [`Self::send_chat_message`]: forwards
@@ -702,6 +719,8 @@ pub trait KernelService: Send + Sync {
         &self,
         session_id: &str,
         text: String,
+        file_ids: Option<String>,
+        owner_principal: &str,
         out_tx: mpsc::Sender<ChatStreamEvent>,
     ) -> Result<(), ApiError>;
 
@@ -733,6 +752,24 @@ pub trait KernelService: Send + Sync {
 
     /// Request a running conversation to stop after its current turn.
     async fn stop_agent_chat(&self, id: &str) -> Result<(), ApiError>;
+
+    /// Reopen a finished conversation for `turns` more agent turns. Returns its
+    /// summary and the new turn ceiling to pass to [`Self::run_agent_chat`].
+    /// `Conflict` while it is still running (or finishing a stopped turn).
+    async fn continue_agent_chat(
+        &self,
+        id: &str,
+        turns: u32,
+    ) -> Result<(ApiConvoSummary, u32), ApiError>;
+
+    /// Post an operator message into a conversation. A running conversation
+    /// answers it on its next turn (returns `None`); a finished one is reopened
+    /// for one round and the new ceiling is returned for the caller to run.
+    async fn post_agent_chat_message(
+        &self,
+        id: &str,
+        content: String,
+    ) -> Result<(ApiConvoSummary, Option<u32>), ApiError>;
 
     // ── Realtime (Phase 08) ───────────────────────────────────────────────────
 

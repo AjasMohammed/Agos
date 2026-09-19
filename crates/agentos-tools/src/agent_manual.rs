@@ -429,7 +429,7 @@ impl ManualSection {
             ("artifacts", "artifact publish document report deck slides dashboard shareable url render html markdown present"),
             ("channels", "channel discord slack telegram teams matrix mattermost line whatsapp dm pair approve"),
             ("mcp", "mcp model-context-protocol attach external tool server"),
-            ("hal", "hardware sensor audio display network printer usb camera bluetooth host process-manager system-services system-mounts system-open-files network-sockets"),
+            ("hal", "hardware sensor audio display network wifi wireless ssid printer usb camera bluetooth host process-manager system-services system-mounts system-open-files network-sockets"),
             ("plugins", "plugin manifest discord slack telegram teams enable disable"),
             ("skills", "skill installed bundle inventory drill-down researcher secops cost-optimizer alert-builder monitor specialist trigger schedule events tools required permissions budget"),
             ("notifications", "notification user message inbox response priority delivery"),
@@ -466,8 +466,8 @@ impl ManualSection {
             "scratchpad" => Some("Persistent agent notebook with wikilinks and backlink graph for working memory."),
             "artifacts" => Some("Publish a document the user will look at — report, deck, dashboard. Returns a shareable url; sandboxed rendering, no external assets."),
             "channels" => Some("Discord/Slack/Telegram/Teams/Matrix outbound, DM pairing, and inbound slash-commands."),
-            "mcp" => Some("Attach external Model Context Protocol servers; their tools appear in your registry at runtime."),
-            "hal" => Some("Hardware Abstraction Layer: process-manager, network-sockets, system-services, system-mounts, audio, display, USB, etc. Use these for HOST inspection — shell-exec is sandboxed."),
+            "mcp" => Some("External Model Context Protocol servers the operator has granted you; their tools appear in your registry."),
+            "hal" => Some("Hardware Abstraction Layer: process-manager, network-sockets, system-services, system-mounts, audio, display, USB, WiFi, etc. Use these for HOST inspection — shell-exec is sandboxed."),
             "plugins" => Some("Manifest-driven plugins (Discord, Slack, …). Enable/disable; trust tier governs signature checks."),
             "skills" => Some("Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} for its required tools, permissions, triggers, and budget."),
             "notifications" => Some("UserMessage inbox, priorities, response routing, auto-action on timeout."),
@@ -1151,7 +1151,7 @@ impl AgentManualTool {
                 {"name": "coordination", "description": "Multi-agent coordination: spawn sub-agents, await results, verify outputs, run teams"},
                 {"name": "scratchpad", "description": "Obsidian-style markdown scratchpad: pages, wikilinks, backlink graph"},
                 {"name": "channels", "description": channels_index_description(connected)},
-                {"name": "mcp", "description": "Attached MCP servers (inventory). Drill into one with {section: mcp, server: <name>} to see its tools."},
+                {"name": "mcp", "description": "MCP servers granted to you (inventory). Drill into one with {section: mcp, server: <name>} to see its tools."},
                 {"name": "hal", "description": "Hardware abstraction tools (live, this agent's available drivers)"},
                 {"name": "plugins", "description": "Tools contributed by enabled plugins (live)"},
                 {"name": "skills", "description": "Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} to see its required tools, permissions, triggers, and budget."},
@@ -1277,7 +1277,7 @@ impl AgentManualTool {
             "section": "permissions",
             "model": "resource:rwx — each permission grants read (r), write (w), and/or execute (x) on a resource class.",
             "resource_classes": [
-                {"resource": "fs.user_data", "description": "Read/write files in the agent's data directory", "typical_ops": "r, w"},
+                {"resource": "fs.user_data", "description": "Read/write files in the agent's own home dir (relative paths)", "typical_ops": "r, w"},
                 {"resource": "memory.semantic", "description": "Search and write to long-term semantic memory", "typical_ops": "r, w"},
                 {"resource": "memory.episodic", "description": "Search and write to task-scoped episodic memory", "typical_ops": "r, w"},
                 {"resource": "memory.blocks", "description": "Read/write/delete named memory blocks", "typical_ops": "r, w"},
@@ -1287,7 +1287,7 @@ impl AgentManualTool {
                 {"resource": "hal.devices", "description": "Access hardware devices via HAL", "typical_ops": "r, x"},
                 {"resource": "audit.read", "description": "Read the audit log", "typical_ops": "r"},
                 {"resource": "memory.procedural", "description": "Read/write reusable step-by-step procedures", "typical_ops": "r, w"},
-                {"resource": "fs.workspace", "description": "Access workspace directories beyond data_dir (configured by operator)", "typical_ops": "r, w"},
+                {"resource": "fs.workspace", "description": "Use absolute paths inside operator-granted host folders (Folder access / `agentos workspace grant`). Needs BOTH this permission and a grant; see agent-self granted_folders", "typical_ops": "r, w"},
             ],
             "deny_entries": "Deny rules take precedence over grants. Example: grant fs:/home/user/ but deny fs:/home/user/.ssh/ blocks SSH key access.",
             "path_prefix_matching": "Grants like fs:/home/user/ match all paths under that prefix. Partial segment matches are blocked (fs:/home/user does NOT match fs:/home/username).",
@@ -1468,10 +1468,10 @@ impl AgentManualTool {
                         {"name": "file-reader", "description": "Read files, list directories, with pagination", "tool": "file-reader", "kernel_only": false},
                         {"name": "file-writer", "description": "Write files with create_only/overwrite modes and size guards", "tool": "file-writer", "kernel_only": false},
                         {"name": "file-editor", "description": "Apply line-range edits (insert, replace, delete) to existing files", "tool": "file-editor", "kernel_only": false},
-                        {"name": "file-delete", "description": "Delete a file from the data directory", "tool": "file-delete", "kernel_only": false},
-                        {"name": "file-move", "description": "Move or rename a file within the data directory", "tool": "file-move", "kernel_only": false},
+                        {"name": "file-delete", "description": "Delete a file (home dir or write-granted folder)", "tool": "file-delete", "kernel_only": false},
+                        {"name": "file-move", "description": "Move or rename a file (home dir or write-granted folder)", "tool": "file-move", "kernel_only": false},
                         {"name": "file-diff", "description": "Compute unified diff between two files or between file and string", "tool": "file-diff", "kernel_only": false},
-                        {"name": "file-glob", "description": "Find files matching a glob pattern in the data directory", "tool": "file-glob", "kernel_only": false},
+                        {"name": "file-glob", "description": "Find files matching a glob pattern (home dir or granted folder; absolute base path allowed)", "tool": "file-glob", "kernel_only": false},
                         {"name": "file-grep", "description": "Search file contents by regex pattern", "tool": "file-grep", "kernel_only": false}
                     ]
                 },
@@ -2341,7 +2341,7 @@ impl AgentManualTool {
         if by_server.is_empty() {
             return Ok(serde_json::json!({
                 "section": "mcp",
-                "summary": "No MCP servers currently attached. The operator must attach one before MCP tools become callable.",
+                "summary": "No MCP servers are granted to you. The operator must attach one and grant it to you before its tools become callable.",
                 "servers": [],
                 "total_tools": 0,
             }));
@@ -2378,7 +2378,7 @@ impl AgentManualTool {
                     let known: Vec<&String> = by_server.keys().collect();
                     Ok(serde_json::json!({
                         "section": "mcp",
-                        "unavailable": format!("MCP server '{target}' not attached"),
+                        "unavailable": format!("MCP server '{target}' is not attached or not granted to you"),
                         "attached_servers": known,
                         "usage": "Call agent-manual {\"section\": \"mcp\"} for the server inventory, then drill in with {\"section\": \"mcp\", \"server\": \"<name>\"}."
                     }))
@@ -2399,7 +2399,7 @@ impl AgentManualTool {
 
         Ok(serde_json::json!({
             "section": "mcp",
-            "summary": "Attached MCP servers. To see a server's tools, call again with {\"section\": \"mcp\", \"server\": \"<name>\"}.",
+            "summary": "MCP servers granted to you. To see a server's tools, call again with {\"section\": \"mcp\", \"server\": \"<name>\"}.",
             "servers": servers,
             "total_tools": mcp_tools.len(),
         }))
@@ -2834,7 +2834,7 @@ impl AgentTool for AgentManualTool {
         //
         // Used by the two "what can I call" surfaces — `tools` (the catalogue,
         // mirroring `list-tools`) and `suggest` (ranked search, mirroring
-        // `search-tools`). The per-domain sections below (`mcp`, `hal`,
+        // `search-tools`) and `mcp`. The other per-domain sections below (`hal`,
         // `capabilities`, `scheduling`, …) deliberately stay UNFILTERED: they
         // are the map of what the install offers and therefore what the agent
         // can ask an operator to grant. Hiding a KMC or HAL tool there would
@@ -2928,7 +2928,9 @@ impl AgentTool for AgentManualTool {
             ManualSection::Channels => self.section_channels(channels_snapshot.as_deref()),
             ManualSection::Mcp => {
                 let server_filter = payload.get("server").and_then(|v| v.as_str());
-                Self::section_mcp(&summaries, server_filter)
+                // Filtered, unlike the other domain sections: MCP access is
+                // granted per server, so an agent lists only servers it holds.
+                Self::section_mcp(&visible, server_filter)
             }
             ManualSection::Hal => Self::section_hal(&summaries),
             ManualSection::Plugins => Self::section_plugins(&summaries),

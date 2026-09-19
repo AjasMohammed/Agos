@@ -12,13 +12,16 @@ use std::path::Path;
 /// With directory embedding, every shipped manifest is always seeded.
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../../tools/core/"]
-struct EmbeddedCoreManifests;
+pub(crate) struct EmbeddedCoreManifests;
 
 impl Kernel {
-    /// Install bundled core tool manifests into the runtime directory if not
-    /// already present. Seeds **every** embedded `tools/core/*.toml`, so no
-    /// shipped tool's manifest (and thus `risk_class`) can be missing on a
-    /// fresh data dir.
+    /// Install bundled core tool manifests into the runtime directory, seeding
+    /// **every** embedded `tools/core/*.toml` so no shipped tool's manifest
+    /// (and thus `risk_class`) can be missing on a fresh data dir.
+    ///
+    /// Not "if not already present" — an on-disk copy whose bytes differ from
+    /// the embedded one is overwritten, so a manifest fix reaches existing
+    /// installs on the next boot and not only fresh data dirs.
     pub(crate) fn install_core_manifests(core_dir: &Path) -> Result<(), anyhow::Error> {
         let mut updated = 0usize;
         for filename in EmbeddedCoreManifests::iter() {
@@ -136,6 +139,75 @@ mod tests {
             "expected to scan every core manifest, scanned only {checked} — \
              did the embed folder path break?"
         );
+    }
+
+    /// Every `risk_class_by_action` entry a shipped manifest declares must name
+    /// `readonly_external` AND an action the tool's own `payload_schema` accepts.
+    ///
+    /// The class bound is enforced at load by `verify_manifest`, so a violation
+    /// there is a boot failure, not a silent downgrade. The *key* bound is not
+    /// enforced anywhere and cannot be: an unknown action simply never matches,
+    /// so `list_adapter` for `list_adapters` fails open into "still prompts
+    /// forever" — the exact annoyance the table exists to remove, and invisible
+    /// because nothing errors. This test is that check.
+    #[test]
+    fn per_action_risk_overrides_are_readonly_and_name_real_actions() {
+        let mut with_overrides = Vec::new();
+        for name in EmbeddedCoreManifests::iter() {
+            let asset = EmbeddedCoreManifests::get(&name).unwrap();
+            let text = std::str::from_utf8(asset.data.as_ref()).unwrap_or("");
+            let Ok(manifest) = agentos_tools::parse_manifest(text) else {
+                continue;
+            };
+            if manifest.risk_class_by_action.is_empty() {
+                continue;
+            }
+            let tool = manifest.manifest.name.clone();
+            with_overrides.push(tool.clone());
+
+            let declared: Vec<&str> = manifest
+                .payload_schema
+                .as_ref()
+                .and_then(|s| s.pointer("/properties/action/enum"))
+                .and_then(|e| e.as_array())
+                .map(|e| e.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            assert!(
+                !declared.is_empty(),
+                "{tool}: declares risk_class_by_action but its payload_schema has                  no action enum — the keys can never match a real call"
+            );
+
+            for (action, class) in &manifest.risk_class_by_action {
+                assert!(
+                    matches!(class, agentos_types::RiskClass::ReadonlyExternal),
+                    "{tool}: risk_class_by_action[{action}] = {class:?}; only \
+                     readonly_external is permitted (readonly_scoped is Allow \
+                     under `deny` too, so it is a bypass, not less friction)"
+                );
+                assert!(
+                    declared.contains(&action.as_str()),
+                    "{tool}: risk_class_by_action names action '{action}', which is                      not in its payload_schema enum {declared:?} — it would never                      match, and the action would keep prompting silently"
+                );
+            }
+        }
+
+        // Regression guard: these six were downgraded because their read-only
+        // actions were prompting exactly like their state-changing ones (one
+        // observed session burned 13 approvals in 15 minutes). Dropping a table
+        // in a manifest rewrite restores that with no other signal.
+        for expected in [
+            "wifi",
+            "bluetooth",
+            "audio",
+            "webcam",
+            "raw-usb",
+            "display-config",
+        ] {
+            assert!(
+                with_overrides.iter().any(|t| t == expected),
+                "{expected} lost its risk_class_by_action table; its read-only                  actions now prompt like its writes. Present: {with_overrides:?}"
+            );
+        }
     }
 
     /// Generalized guard (W1): EVERY `tools/core/*.toml` that declares a

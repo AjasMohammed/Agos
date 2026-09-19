@@ -61,6 +61,11 @@ cargo build --workspace
 # Release build
 cargo build --workspace --release
 
+# Shipped-artifact profile (thin LTO, what release.yml builds) and the lite build
+# (no ONNX/MiniLM vector search; FTS5 only). Numbers: docs/guide/benchmarks.md
+cargo build --profile dist -p agentos-cli
+cargo build --profile dist -p agentos-cli --no-default-features
+
 # Run all tests
 cargo test --workspace
 
@@ -533,18 +538,21 @@ The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired 
 
 ## Active / Planned Work
 
-| Plan | Status | Notes |
-|------|--------|-------|
-| Web UI Overhaul | planned | Chat streaming, template fixes, CLI parity |
-| WebUI Redesign | planned | Dashboard, task management, audit viewer |
-| MCP Catalog Installer | planned | `agentos mcp install <id>`, runtime resolver, 8 seed entries |
-| Gmail MCP Server | planned | Standalone Rust repo, 9 phases |
-| Graceful Degradation Chains | planned | Tool fallback in manifests, kernel resolver |
-| Capability Discoverability | planned | Semantic tool search, capability tags |
-| Production Stability Fixes | planned | Memory resilience, health monitor, graceful shutdown |
-| Logging & Observability | planned | Span instrumentation, structured logs |
-| Agent Web Search | planned | DDG instant answers, SearXNG |
-| Sandbox Execution Policy | planned | SandboxPolicy config, trust-aware dispatch |
+**Scope freeze (2026-09-16):** no new surface area (crates, channels, providers, tools, endpoints) lands before `v1.0.0` is tagged. Only release blockers in `plans/production-release-v1/` and `plans/real-world-relevance/`, security fixes, and bug fixes are in scope. Every row below is gated `post-v1.0.0`; a session asked to start one should say so and stop.
+
+| Plan | Status | Gate | Notes |
+|------|--------|------|-------|
+| Web UI Overhaul | planned | post-v1.0.0 | Chat streaming, template fixes, CLI parity |
+| WebUI Redesign | planned | post-v1.0.0 | Dashboard, task management, audit viewer |
+| MCP Catalog Installer | planned | post-v1.0.0 | `agentos mcp install <id>`, runtime resolver, 8 seed entries |
+| Gmail MCP Server | planned | post-v1.0.0 | Standalone Rust repo, 9 phases |
+| Graceful Degradation Chains | planned | post-v1.0.0 | Tool fallback in manifests, kernel resolver |
+| Capability Discoverability | planned | post-v1.0.0 | Semantic tool search, capability tags |
+| Production Stability Fixes | planned | post-v1.0.0 | Memory resilience, health monitor, graceful shutdown |
+| Logging & Observability | planned | post-v1.0.0 | Span instrumentation, structured logs |
+| Agent Web Search | planned | post-v1.0.0 | DDG instant answers, SearXNG |
+| Slack Socket Mode Buttons | planned | post-v1.0.0 | Block Kit approve/deny buttons via `xapp-` token; `plans/slack-socket-mode-buttons/` |
+| Sandbox Execution Policy | planned | post-v1.0.0 | SandboxPolicy config, trust-aware dispatch |
 
 ## Key Feedback Rules
 - Never auto-commit — only commit when explicitly asked

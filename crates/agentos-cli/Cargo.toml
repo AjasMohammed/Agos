@@ -2,6 +2,8 @@
 name = "agentos-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "agentos"
@@ -46,8 +48,16 @@ subtle = "2"
 zeroize = { workspace = true }
 
 [features]
-default = []
+# `embeddings` is the ONNX/MiniLM vector-search runtime (~100 MB of binary).
+# Lite build: `cargo build -p agentos-cli --no-default-features` → FTS5-only.
+default = ["embeddings"]
+embeddings = ["agentos-kernel/embeddings", "agentos-api/embeddings", "agentos-tools/embeddings"]
 otel = ["agentos-kernel/otel"]
+# Peripheral passthroughs: the HAL drivers are feature-gated in agentos-kernel,
+# and the registry drops their manifests unless the matching feature is on.
+bluetooth = ["agentos-kernel/bluetooth"]
+wifi = ["agentos-kernel/wifi"]
+all-peripherals = ["agentos-kernel/all-peripherals"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

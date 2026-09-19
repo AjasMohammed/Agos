@@ -1839,4 +1839,40 @@ mod tests {
         let after_resume = scheduler.dequeue().await.expect("task survives the skip");
         assert_eq!(after_resume.id, paused_id);
     }
+
+    /// C2 (2026-07-20 audit): a child completion must never re-enqueue a
+    /// parent that is still `Running`, or the executor spawns a second loop.
+    #[tokio::test]
+    async fn requeue_skips_running_task() {
+        let scheduler = TaskScheduler::new(10);
+        let id = scheduler.enqueue(make_task(5, "parent")).await;
+        // Take it off the queue and mark it live.
+        assert!(scheduler.dequeue().await.is_some());
+        scheduler
+            .update_state(&id, TaskState::Running)
+            .await
+            .unwrap();
+
+        scheduler.requeue(&id).await.unwrap();
+
+        let task = scheduler.get_task(&id).await.unwrap();
+        assert_eq!(
+            task.state,
+            TaskState::Running,
+            "requeue must not touch a Running task"
+        );
+        assert!(scheduler.dequeue().await.is_none(), "nothing re-enqueued");
+
+        // Parked tasks do get woken.
+        scheduler
+            .update_state(&id, TaskState::Waiting)
+            .await
+            .unwrap();
+        scheduler.requeue(&id).await.unwrap();
+        assert_eq!(
+            scheduler.get_task(&id).await.unwrap().state,
+            TaskState::Queued
+        );
+        assert_eq!(scheduler.dequeue().await.unwrap().id, id);
+    }
 }

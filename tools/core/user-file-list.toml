@@ -1,0 +1,61 @@
+tags = ["read", "fs"]
+risk_class = "readonly_external"
+
+[manifest]
+name        = "user-file-list"
+version     = "1.0.0"
+description = "Lists the files the user has uploaded or sent over a chat channel, newest first. Call this FIRST whenever the user refers to a file they gave you ('the audio I sent', 'the PDF', 'that attachment') instead of asking them for a filename or a file id — it returns the file_id that user-file-reader needs. Each entry carries readable_as: 'text' means user-file-reader returns its contents; 'image' means it can only be seen if attached to the conversation; 'binary' means read it with mode=\"handle\" to get a path and pass that path to another tool (for example the audio tool for playback). source is 'upload' for a file the operator uploaded and 'channel' for media a chat sender pushed; files sent over a channel are only addressable by file_id, never by name."
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "fs"
+search_hints = [
+  "what files did the user upload",
+  "list uploaded files",
+  "find the attachment the user sent",
+  "the audio file the user sent me",
+  "get the file id for an upload",
+]
+group = "fs"
+
+[capabilities_required]
+permissions = ["fs.user_data:r"]
+
+[capabilities_provided]
+outputs = ["file.metadata"]
+
+[intent_schema]
+input  = "UserFileListIntent"
+output = "UserFileList"
+
+[payload_schema]
+type = "object"
+
+[payload_schema.properties.query]
+type        = "string"
+description = "Optional substring to match against the file name. Omit to list everything."
+
+[payload_schema.properties.mime_prefix]
+type        = "string"
+description = "Optional MIME prefix filter, e.g. 'audio/' for audio files or 'image/' for pictures."
+
+[payload_schema.properties.limit]
+type        = "integer"
+description = "Maximum entries to return (default 20, capped at 100)."
+
+# Metadata only — this tool never opens a file, so no converter runs and no
+# bytes are read.
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 5000
+syscalls      = []
+
+[[examples]]
+description = "See what the user has uploaded before guessing at a filename"
+payload = { }
+
+[[examples]]
+description = "Find the audio file the user sent over a chat channel"
+payload = { mime_prefix = "audio/" }

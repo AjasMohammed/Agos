@@ -1,3 +1,4 @@
+#[cfg(feature = "embeddings")]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::path::Path;
 
@@ -16,6 +17,7 @@ pub const EMBED_BATCH_SIZE: usize = 16;
 enum Backend {
     // Boxed so the enum's discriminant size isn't dominated by the
     // `TextEmbedding` variant (clippy::large_enum_variant).
+    #[cfg(feature = "embeddings")]
     Onnx(Box<TextEmbedding>),
     /// Returns a zero vector of [`EMBED_DIMS`] floats per input. Used when
     /// the host can't load onnxruntime safely (see `memory.disable_embedder`
@@ -30,6 +32,7 @@ pub struct Embedder {
 
 impl Embedder {
     /// Downloads and initializes the embedding model during construction (~23MB for MiniLM).
+    #[cfg(feature = "embeddings")]
     pub fn new() -> Result<Self, anyhow::Error> {
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
@@ -42,6 +45,16 @@ impl Embedder {
     }
 
     /// Downloads and initializes the embedding model with an explicit cache directory.
+    /// Built without the `embeddings` feature: no ONNX runtime is linked, so
+    /// callers take their existing `Err` → zero-vector fallback path.
+    #[cfg(not(feature = "embeddings"))]
+    pub fn new() -> Result<Self, anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "vector embeddings unavailable: built without the `embeddings` feature"
+        ))
+    }
+
+    #[cfg(feature = "embeddings")]
     pub fn with_cache_dir(cache_dir: &Path) -> Result<Self, anyhow::Error> {
         std::fs::create_dir_all(cache_dir)?;
         let model = TextEmbedding::try_new(
@@ -57,6 +70,11 @@ impl Embedder {
 
     /// Construct an embedder that returns zero vectors and never touches
     /// onnxruntime. Use this when `memory.disable_embedder = true`.
+    #[cfg(not(feature = "embeddings"))]
+    pub fn with_cache_dir(_cache_dir: &Path) -> Result<Self, anyhow::Error> {
+        Self::new()
+    }
+
     pub fn noop() -> Self {
         Self {
             backend: Backend::Noop,
@@ -71,6 +89,7 @@ impl Embedder {
     /// Embed one or many texts — batched for efficiency.
     pub fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, anyhow::Error> {
         match &self.backend {
+            #[cfg(feature = "embeddings")]
             Backend::Onnx(model) => model.embed(texts.to_vec(), Some(EMBED_BATCH_SIZE)),
             Backend::Noop => Ok(vec![vec![0.0_f32; EMBED_DIMS]; texts.len()]),
         }
@@ -161,6 +180,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "embeddings")]
     #[ignore = "downloads ONNX model and initializes onnxruntime; skip in default CI \
                 because graph optimization crashes on some Zen-class CPUs (SIGFPE)"]
     fn test_embed_single_text_returns_correct_dimension() {

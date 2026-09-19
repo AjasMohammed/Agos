@@ -756,6 +756,7 @@ These tools wrap the HAL drivers — each one runs through the device approval w
 | `raw-usb` | `hardware.raw-usb:x` | Open USB devices and run bulk/interrupt/control transfers |
 | `usb-storage` | `hardware.usb:rx` | Mount, unmount, and eject USB mass storage |
 | `webcam` | `hardware.webcam:x` | Single-frame capture and burst capture via Video4Linux |
+| `wifi` | `hardware.wifi.*` | Radio/interface status, AP scan, connect/disconnect, radio toggle |
 | `sys-monitor` | `hardware.system:r` | Streaming system metrics (CPU, memory, disk I/O) |
 
 #### Utilities

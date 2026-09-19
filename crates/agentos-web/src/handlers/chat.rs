@@ -1,7 +1,6 @@
 use crate::auth::file_owner_principal;
 use crate::auth::AuthToken;
 use crate::chat_inflight::InFlightInference;
-use crate::handlers::files;
 use crate::state::AppState;
 use agentos_kernel::kernel::ChatStreamEvent;
 use agentos_types::ContentPart;
@@ -81,6 +80,14 @@ fn spawn_streaming_inference(
             let inflight = Arc::clone(&inflight_for_task);
             tokio::spawn(async move {
                 while let Some(event) = kernel_rx.recv().await {
+                    // Reasoning deltas are panel-facing — the legacy UI renders the
+                    // pass marker only. This buffer is replayed to late subscribers
+                    // under a hard event cap and coalesces TextChunk alone, so one
+                    // turn with a large thinking budget would evict the tool cards
+                    // and text the replay exists to preserve.
+                    if matches!(event, ChatStreamEvent::Thinking { text: Some(_), .. }) {
+                        continue;
+                    }
                     inflight.push(event).await;
                 }
             })
@@ -188,43 +195,17 @@ async fn expand_user_message_for_llm(
         }
     };
 
-    let with_mentions =
-        files::resolve_at_mentions(content, state, owner_principal, session_id).await;
-
-    let file_parts = match file_ids {
-        Some(ids) if !ids.trim().is_empty() => {
-            files::resolve_file_ids_to_context(ids, state, owner_principal, supports_images).await
-        }
-        _ => Vec::new(),
-    };
-
-    if file_parts.is_empty() {
-        return (with_mentions, None);
-    }
-
-    let mut parts: Vec<ContentPart> = vec![ContentPart::Text {
-        text: with_mentions,
-    }];
-    parts.extend(file_parts);
-
-    let display = parts_display_for_chat_log(&parts);
-    (display, Some(parts))
-}
-
-fn parts_display_for_chat_log(parts: &[ContentPart]) -> String {
-    let mut s = String::new();
-    for p in parts {
-        match p {
-            ContentPart::Text { text } => s.push_str(text),
-            ContentPart::Image { .. } => {
-                if !s.is_empty() && !s.ends_with('\n') {
-                    s.push('\n');
-                }
-                s.push_str("[image attachment]\n");
-            }
-        }
-    }
-    s
+    let entities = super::mentions::AppStateEntities(state);
+    agentos_kernel::chat_ingest::build_user_turn(
+        content,
+        file_ids,
+        &state.file_store,
+        Some(&entities),
+        owner_principal,
+        session_id,
+        supports_images,
+    )
+    .await
 }
 
 /// GET /chat — session list + new session compose form.
@@ -894,12 +875,15 @@ pub async fn send(
                 history.push(("user".to_string(), text));
             }
             "assistant" => {
+                // Stored non-answers are dropped; pending tool summaries still flush.
+                let content = (!agentos_kernel::is_unreplayable_assistant_turn(&m.content))
+                    .then_some(m.content);
                 flush_to_assistant(
                     &mut history,
                     &mut pending_tool_summaries,
                     &mut pending_tool_summaries_bytes,
                     &mut pending_meta_summary,
-                    Some(m.content),
+                    content,
                 );
             }
             _ => continue,
@@ -1083,7 +1067,8 @@ pub async fn message_stream(
 
     let stream = ReceiverStream::new(rx).map(move |event| {
         let frame = match event {
-            ChatStreamEvent::Thinking { iteration } => ChatStreamFrame::Thinking { iteration },
+            // The legacy UI renders the pass marker only; `text` is panel-facing.
+            ChatStreamEvent::Thinking { iteration, .. } => ChatStreamFrame::Thinking { iteration },
             ChatStreamEvent::TextChunk { text } => ChatStreamFrame::TextDelta { text },
             ChatStreamEvent::ToolStart {
                 tool_name,

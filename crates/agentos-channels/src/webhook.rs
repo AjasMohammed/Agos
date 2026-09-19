@@ -75,10 +75,15 @@ impl ChannelAdapter for WebhookAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
+        // `actions` is a new sibling key, not a `content` variant: the
+        // `content` discriminant is a published contract consumers key off.
+        // A consumer that ignores `actions` is unaffected; one that reads it
+        // gets the literal commands to POST back at the inbound webhook.
         let body = serde_json::json!({
             "channel_instance_id": msg.channel_instance_id,
             "content": msg.content,
             "thread_id": msg.thread_id,
+            "actions": msg.actions,
         });
         let body_bytes =
             serde_json::to_vec(&body).map_err(|e| AgentOSError::ToolExecutionFailed {

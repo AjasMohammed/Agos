@@ -198,8 +198,8 @@ impl ChatStore {
                 let result_json = v.get("result").cloned().map(|x| x.to_string());
                 let success = v.get("success").and_then(|x| x.as_bool()).or_else(|| {
                     v.get("result")
-                        .and_then(|r| r.as_object())
-                        .map(|obj| !obj.contains_key("error"))
+                        .filter(|r| r.is_object())
+                        .map(|r| !crate::kernel::tool_result_is_error(r))
                 });
 
                 let _ = conn.execute(
@@ -541,6 +541,43 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Channel sessions with no assistant reply after their last inbound turn,
+    /// newer than `since_rfc3339` — i.e. a channel turn the kernel was killed in
+    /// the middle of. Returns `(session_id, channel_key)`.
+    ///
+    /// Chat turns are not checkpointed (unlike `AgentTask`), so a restart mid-turn
+    /// drops the reply silently and the user is left waiting forever. The boot
+    /// sweep uses this to tell them to resend.
+    ///
+    /// A trailing `tool` row counts too: tool calls are persisted just before the
+    /// assistant turn (`channel_chat_bridge::channel_chat`), so a kill landing
+    /// between the two writes leaves `user → tool` and still means "no answer".
+    /// A turn that merely *failed* is excluded, because the failure is itself
+    /// persisted as an assistant row.
+    ///
+    /// `since_rfc3339` must use the same UTC offset spelling as the stored
+    /// timestamps (`chrono::Utc::now().to_rfc3339()`, i.e. `+00:00`) — the
+    /// comparison is lexicographic.
+    pub fn channel_sessions_awaiting_reply(
+        &self,
+        since_rfc3339: &str,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.channel_key
+             FROM chat_sessions s
+             JOIN chat_messages m
+               ON m.id = (SELECT MAX(id) FROM chat_messages WHERE session_id = s.id)
+             WHERE s.channel_key IS NOT NULL
+               AND m.role IN ('user', 'tool')
+               AND m.created_at >= ?1",
+        )?;
+        let rows = stmt.query_map(params![since_rfc3339], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
     pub fn get_session(&self, id: &str) -> Result<Option<ChatSession>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
@@ -841,6 +878,31 @@ impl ChatStore {
         Ok(all.into_iter().map(|(_, e)| e).collect())
     }
 
+    /// Distinct tool names called in `session_id`, most recent first — every
+    /// persisted call, including failures and tools the dedup cache skips
+    /// (volatile, approval-gated). Feeds the chat working-set pins.
+    pub fn recent_tool_names(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(c.tool_name, m.tool_name) AS name
+             FROM chat_messages m
+             LEFT JOIN chat_tool_calls c ON c.message_id = m.id
+             WHERE m.session_id = ?1 AND m.role = 'tool'
+               AND COALESCE(c.tool_name, m.tool_name) IS NOT NULL
+             GROUP BY name
+             ORDER BY MAX(m.id) DESC
+             LIMIT ?2",
+        )?;
+        let names = stmt
+            .query_map(params![session_id, limit as i64], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(names)
+    }
+
     /// Batch-insert tool call records for a session. Each tool call becomes a
     /// message with role='tool'. Call this before saving the final assistant message
     /// so the message ordering is: user -> tool1 -> tool2 -> ... -> assistant.
@@ -858,17 +920,18 @@ impl ChatStore {
         for tc in tool_calls {
             let payload_json = tc.payload.to_string();
             let result_json = tc.result.to_string();
-            let success = !tc
-                .result
-                .as_object()
-                .is_some_and(|obj| obj.contains_key("error"));
+            let success = !crate::kernel::tool_result_is_error(&tc.result);
             let content = format!("Tool call: {}", tc.tool_name);
-            tx.execute(
+            // RETURNING, not `last_insert_rowid()`: the `chat_messages_ai` FTS
+            // trigger inserts into `chat_messages_fts` after this row, so the
+            // rowid it would report is the FTS row's — the FK below then fails.
+            let message_id: i64 = tx.query_row(
                 "INSERT INTO chat_messages (
                      session_id, role, content, tool_name, tool_duration_ms,
                      tool_intent_type, tool_payload_json, tool_result_json, tool_success, created_at
                  )
-                 VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 RETURNING id",
                 params![
                     session_id,
                     content,
@@ -880,8 +943,8 @@ impl ChatStore {
                     if success { 1i64 } else { 0i64 },
                     now
                 ],
+                |row| row.get(0),
             )?;
-            let message_id = tx.last_insert_rowid();
             tx.execute(
                 "INSERT INTO chat_tool_calls (
                      message_id, tool_name, tool_intent_type, tool_payload_json,
@@ -943,6 +1006,40 @@ mod tests {
         assert!(store.search("   ", Some("alpha"), 5).unwrap().is_empty());
     }
     use super::*;
+
+    /// Working-set pins read every persisted call, newest first, distinct —
+    /// including failures, which the in-memory dedup cache never holds.
+    #[test]
+    fn recent_tool_names_distinct_newest_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ChatStore::open(&dir.path().join("chat.db")).expect("open");
+        let sid = store.create_session("alpha").expect("create");
+        let call = |name: &str, result: serde_json::Value| crate::kernel::ChatToolCallRecord {
+            tool_name: name.to_string(),
+            intent_type: String::new(),
+            id: None,
+            payload: serde_json::json!({}),
+            result,
+            duration_ms: 1,
+        };
+        store
+            .add_tool_calls(
+                &sid,
+                &[
+                    call("shell-exec", serde_json::json!({"error": "denied"})),
+                    call("web-fetch", serde_json::json!({"ok": true})),
+                    call("shell-exec", serde_json::json!({"ok": true})),
+                ],
+            )
+            .expect("add");
+        let names = store.recent_tool_names(&sid, 10).expect("names");
+        assert_eq!(names, vec!["shell-exec", "web-fetch"]);
+        assert_eq!(store.recent_tool_names(&sid, 1).expect("names").len(), 1);
+        assert!(store
+            .recent_tool_names("other", 10)
+            .expect("names")
+            .is_empty());
+    }
 
     /// A lazily-opened chat: session row, zero messages, and the first send is
     /// the first row — no blank placeholder turn at the head of the transcript.
@@ -1011,5 +1108,81 @@ mod tests {
         let forked = store.fork_session(&sid, None).expect("fork");
         let msgs = store.get_messages(&forked).expect("get fork");
         assert_eq!(msgs[0].file_ids.as_deref(), Some(fid));
+    }
+
+    #[test]
+    fn awaiting_reply_finds_only_unanswered_recent_channel_turns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ChatStore::open(&dir.path().join("chat.db")).expect("open");
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        // Killed mid-turn: trailing user row.
+        let stuck = store
+            .get_or_create_channel_session("channel:c1:ops", "ops", "t")
+            .expect("create");
+        store
+            .add_message(&stuck, "user", "any audio on Desktop?", None)
+            .expect("add");
+
+        // Answered: trailing assistant row.
+        let done = store
+            .get_or_create_channel_session("channel:c2:ops", "ops", "t")
+            .expect("create");
+        store.add_message(&done, "user", "hi", None).expect("add");
+        store
+            .add_assistant_message(&done, "hello", None, None)
+            .expect("add");
+
+        // Killed between persisting tool calls and the assistant turn.
+        let mid_tool = store
+            .get_or_create_channel_session("channel:c4:ops", "ops", "t")
+            .expect("create");
+        store
+            .add_message(&mid_tool, "user", "list files", None)
+            .expect("add");
+        store
+            .add_message(&mid_tool, "tool", "Tool call: file-list", None)
+            .expect("add");
+
+        // Web chat (no channel_key) is out of scope — it has no channel to reply to.
+        let web = store.create_session("ops").expect("create");
+        store
+            .add_message(&web, "user", "orphan", None)
+            .expect("add");
+
+        let mut pending = store
+            .channel_sessions_awaiting_reply(&cutoff)
+            .expect("scan");
+        pending.sort();
+        let mut expected = vec![
+            (stuck.clone(), "channel:c1:ops".to_string()),
+            (mid_tool.clone(), "channel:c4:ops".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(pending, expected);
+
+        // Persisting the notice is what stops the next boot re-announcing it.
+        for sid in [&stuck, &mid_tool] {
+            store
+                .add_assistant_message(sid, "I was restarted", None, None)
+                .expect("add");
+        }
+        assert!(store
+            .channel_sessions_awaiting_reply(&cutoff)
+            .expect("scan")
+            .is_empty());
+
+        // Old stuck turns stay quiet.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let fresh = store
+            .get_or_create_channel_session("channel:c3:ops", "ops", "t")
+            .expect("create");
+        store
+            .add_message(&fresh, "user", "recent", None)
+            .expect("add");
+        assert!(store
+            .channel_sessions_awaiting_reply(&future)
+            .expect("scan")
+            .is_empty());
     }
 }

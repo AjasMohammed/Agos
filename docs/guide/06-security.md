@@ -213,6 +213,31 @@ The audit log is an append-only SQLite database. Only the kernel can write to it
 
 ---
 
+## Threat Classes We Test Against
+
+Every row is a public 2026 agent-framework incident class, the AgentOS control that stops it, and the test that proves the control holds. If a claim here has no test, it does not belong here.
+
+| # | Incident class (public example) | AgentOS control | Regression test |
+|---|---|---|---|
+| 1 | Cross-site WebSocket hijack → token theft → RCE (OpenClaw CVE-2026-25253) | No cookie auth; WS accepts only a single-use 30 s ticket minted with a bearer key | [`service_tests.rs`](../../crates/agentos-api/tests/service_tests.rs) `security_ws_has_no_ambient_auth_for_cross_origin_pages` |
+| 2 | Unauthenticated control plane when no credential is configured (OpenFang #1034) | Fail-closed `require_api_key`; login returns 503 when no operator credential exists; no dev-mode branch | [`service_tests.rs`](../../crates/agentos-api/tests/service_tests.rs) `security_no_configured_credentials_means_no_access` |
+| 3 | Prompt-injected control-plane write (OpenClaw CVE-2026-35650) | `RiskClass::ControlPlane` decided by operator `ApprovalMode`, ToolPre hook on every execution path | [`security_injected_config_write_requires_approval.rs`](../../crates/agentos-kernel/tests/security_injected_config_write_requires_approval.rs) |
+| 4 | Malicious / relabelled skill install (ClawHavoc) | `TrustTier` + Ed25519 signature over a payload that includes `risk_class` and `name` | [`security_acceptance_test.rs`](../../crates/agentos-kernel/tests/security_acceptance_test.rs) scenarios F, G, H |
+| 5 | SSRF to cloud metadata / loopback (OpenClaw link-preview exfil) | `PermissionSet::check` host extraction: userinfo strip, integer/hex IPv4, IPv6-mapped, metadata hostnames | [`security_ssrf_metadata_blocked.rs`](../../crates/agentos-kernel/tests/security_ssrf_metadata_blocked.rs) |
+| 6 | Internet-exposed instances by default (40k OpenClaw hosts) | API off by default; API and health bind `127.0.0.1` | [`config.rs`](../../crates/agentos-kernel/src/config.rs) `api_default_bind_is_loopback` |
+| 7 | Secret payload shown in approval prompt | `redact_secret_fields` on escalation preview | [`approval_hook.rs`](../../crates/agentos-kernel/src/hooks/approval_hook.rs) `redaction_*` tests |
+| 8 | Path traversal / symlink escape from file tools | `..` rejected pre-I/O, percent-decoding, canonical containment in agent home | [`security_file_tools_reject_traversal.rs`](../../crates/agentos-kernel/tests/security_file_tools_reject_traversal.rs) |
+| — | ToolPre hook bypass on a new execution path (2026-07 internal audit) | CI tripwire over every `tool_runner.execute(` call site | [`scripts/check-toolpre-guard.sh`](../../scripts/check-toolpre-guard.sh) |
+
+Run the suite:
+
+```bash
+cargo test -p agentos-kernel --test security_acceptance_test --test security_ssrf_metadata_blocked \
+  --test security_injected_config_write_requires_approval --test security_file_tools_reject_traversal
+cargo test -p agentos-api --test service_tests security_
+bash scripts/check-toolpre-guard.sh
+```
+
 ## Deployment Security Acceptance
 
 Before any deployment, the security acceptance suite **must pass in full**. This is a hard deployment gate — any failure blocks launch.
@@ -223,12 +248,12 @@ Before any deployment, the security acceptance suite **must pass in full**. This
 # Run the full security acceptance suite
 cargo test -p agentos-kernel --test security_acceptance_test
 
-# Verify all 7 scenarios are present
+# Verify all 8 scenarios are present
 cargo test -p agentos-kernel --test security_acceptance_test -- --list 2>&1 | grep 'test ' | wc -l
-# Expected output: 7
+# Expected output: 8
 ```
 
-### The 7 Mandatory Scenarios
+### The 8 Mandatory Scenarios
 
 | # | Scenario | Component | What It Validates |
 |---|----------|-----------|-------------------|
@@ -239,13 +264,14 @@ cargo test -p agentos-kernel --test security_acceptance_test -- --list 2>&1 | gr
 | E | Prompt injection detected | `InjectionScanner` | Known injection payloads (role override, system prompt exfil, delimiter injection) are flagged |
 | F | Blocked trust tier rejected | `ToolRegistry` | Tools with `trust_tier = "blocked"` fail registration with `ToolBlocked` error |
 | G | Invalid tool signature rejected | `ToolRegistry` / signing | Community-tier tools with invalid Ed25519 signatures fail registration with `ToolSignatureInvalid` |
+| H | Tampered signed manifest rejected | `ToolRegistry` | Flipping `risk_class` or `name` after signing fails Ed25519 verification (`ToolSignatureInvalid`) |
 
 ### Expected Pass Criteria
 
-All 7 tests must report `ok`. A passing run looks like:
+All 8 tests must report `ok`. A passing run looks like:
 
 ```
-running 7 tests
+running 8 tests
 test scenario_a_reject_unsigned_message ... ok
 test scenario_b_reject_forged_signature ... ok
 test scenario_c_secret_scope_denial ... ok
@@ -253,8 +279,9 @@ test scenario_d_escalate_high_risk_action ... ok
 test scenario_e_detect_prompt_injection ... ok
 test scenario_f_block_tool_blocked_tier ... ok
 test scenario_g_reject_tool_invalid_signature ... ok
+test scenario_h_tampered_signed_manifest_rejected ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored
+test result: ok. 8 passed; 0 failed; 0 ignored
 ```
 
 ### What to Do If a Scenario Fails

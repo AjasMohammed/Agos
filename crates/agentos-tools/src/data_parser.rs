@@ -276,7 +276,9 @@ fn parse_xml(data: &str) -> Result<serde_json::Value, AgentOSError> {
     const MAX_XML_DEPTH: usize = 512;
 
     let mut reader = Reader::from_str(data);
-    reader.config_mut().trim_text(true);
+    // No per-event trimming: since quick-xml 0.38 entity references arrive as
+    // their own `GeneralRef` events, so trimming each text chunk would eat the
+    // spaces around `&amp;`. `xml_node_to_value` trims the assembled text once.
 
     // Each stack frame: (tag, attrs, children, text_accumulator)
     let mut stack: Vec<XmlFrame> = Vec::new();
@@ -316,9 +318,25 @@ fn parse_xml(data: &str) -> Result<serde_json::Value, AgentOSError> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = e.decode().unwrap_or_default();
                 if let Some(top) = stack.last_mut() {
                     top.3.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                // Character references and the five predefined entities only.
+                // Custom (DTD-declared) entities are never expanded, which also
+                // rules out entity-expansion bombs.
+                if let Some(top) = stack.last_mut() {
+                    if let Ok(Some(ch)) = e.resolve_char_ref() {
+                        top.3.push(ch);
+                    } else if let Some(s) = e
+                        .decode()
+                        .ok()
+                        .and_then(|name| quick_xml::escape::resolve_predefined_entity(&name))
+                    {
+                        top.3.push_str(s);
+                    }
                 }
             }
             Ok(Event::CData(e)) => {
@@ -978,5 +996,30 @@ fn serialize_to_markdown(value: &serde_json::Value) -> Result<String, AgentOSErr
             Ok(out)
         }
         other => Ok(format!("```\n{}\n```\n", other)),
+    }
+}
+
+#[cfg(test)]
+mod xml_tests {
+    use super::parse_xml;
+
+    #[test]
+    fn entities_and_char_refs_resolve_with_spacing_kept() {
+        let v = parse_xml("<a>\n  fish &amp; chips &#60;hot&#x3E; &quot;x&quot;\n</a>").unwrap();
+        assert_eq!(v["text"], "fish & chips <hot> \"x\"");
+    }
+
+    #[test]
+    fn custom_entities_are_not_expanded() {
+        let xml = r#"<!DOCTYPE a [<!ENTITY lol "lollollol">]><a>x&lol;y</a>"#;
+        let v = parse_xml(xml).unwrap();
+        assert_eq!(v["text"], "xy");
+    }
+
+    #[test]
+    fn nested_children_and_attrs_survive() {
+        let v = parse_xml(r#"<r id="1"><c>one</c><c>two</c></r>"#).unwrap();
+        assert_eq!(v["attrs"]["id"], "1");
+        assert_eq!(v["children"]["c"][1]["text"], "two");
     }
 }

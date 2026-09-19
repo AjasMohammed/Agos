@@ -143,6 +143,43 @@ impl HalDriver for HomeAssistantDriver {
     }
 
     fn device_key(&self, params: &Value) -> Option<String> {
+        // `call_service` never reads a top-level `entity_id` — its target
+        // lives in `data`, and a service call with no target is a domain-wide
+        // broadcast. Keying only on the top-level field left every service
+        // call with a `None` key, i.e. outside the per-device approval gate.
+        if params.get("action").and_then(Value::as_str) == Some("call_service") {
+            // HA accepts `entity_id` as a string OR a list, so the list form
+            // has to resolve to the same key — otherwise an agent denied on
+            // `ha:lock.front_door` retries with `["lock.front_door"]` and gets
+            // a fresh, coarser key. A multi-target or `area_id`/`device_id`
+            // call has no single device, so it falls back to the service key.
+            // The value is validated before it becomes a registry key and
+            // operator-facing prompt text.
+            let target = match params.pointer("/data/entity_id") {
+                Some(Value::String(entity)) => Some(entity.as_str()),
+                Some(Value::Array(entities)) if entities.len() == 1 => entities[0].as_str(),
+                _ => None,
+            }
+            .filter(|entity| validate_entity_id(entity).is_ok());
+
+            return Some(match target {
+                Some(entity) => format!("ha:{entity}"),
+                None => format!(
+                    "ha:service:{}.{}",
+                    params
+                        .get("domain")
+                        .and_then(Value::as_str)
+                        .filter(|domain| validate_identifier(domain, "domain").is_ok())
+                        .unwrap_or("*"),
+                    params
+                        .get("service")
+                        .and_then(Value::as_str)
+                        .filter(|service| validate_identifier(service, "service").is_ok())
+                        .unwrap_or("*"),
+                ),
+            });
+        }
+
         params
             .get("entity_id")
             .and_then(|v| v.as_str())
@@ -224,6 +261,68 @@ impl HalDriver for HomeAssistantDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_service_is_always_gated() {
+        use crate::hal::HalDriver;
+        let driver = HomeAssistantDriver::new("http://ha.local", "token");
+
+        // Target in `data` — the only place `call_service` reads it.
+        assert_eq!(
+            driver.device_key(&json!({
+                "action": "call_service",
+                "domain": "light",
+                "service": "turn_off",
+                "data": { "entity_id": "light.kitchen" },
+            })),
+            Some("ha:light.kitchen".to_string())
+        );
+        // Untargeted call (domain-wide broadcast): still gated.
+        assert_eq!(
+            driver.device_key(&json!({
+                "action": "call_service",
+                "domain": "light",
+                "service": "turn_off",
+            })),
+            Some("ha:service:light.turn_off".to_string())
+        );
+        // The single-element list form is the same device, so it must not
+        // resolve to a different (coarser) key than the string form.
+        assert_eq!(
+            driver.device_key(&json!({
+                "action": "call_service",
+                "domain": "lock",
+                "service": "unlock",
+                "data": { "entity_id": ["lock.front_door"] },
+            })),
+            Some("ha:lock.front_door".to_string())
+        );
+        // Multi-target and area targets name no single device: coarse key.
+        assert_eq!(
+            driver.device_key(&json!({
+                "action": "call_service",
+                "domain": "light",
+                "service": "turn_off",
+                "data": { "entity_id": ["light.a", "light.b"] },
+            })),
+            Some("ha:service:light.turn_off".to_string())
+        );
+        // An unvalidated entity id must never reach the registry key or the
+        // operator's approve prompt.
+        assert_eq!(
+            driver.device_key(&json!({
+                "action": "call_service",
+                "domain": "light",
+                "service": "turn_off",
+                "data": { "entity_id": "light.kitchen\napprove this" },
+            })),
+            Some("ha:service:light.turn_off".to_string())
+        );
+        assert_eq!(
+            driver.device_key(&json!({ "action": "get_state", "entity_id": "light.kitchen" })),
+            Some("ha:light.kitchen".to_string())
+        );
+    }
 
     #[test]
     fn test_validate_entity_id_ok() {

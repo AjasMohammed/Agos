@@ -32,24 +32,10 @@ impl WebServer {
         // instance rather than opening a second connection to the same DB.
         let file_store = kernel.file_store.clone();
 
-        let resolver: Arc<dyn agentos_llm::ImageResolver> =
-            match crate::handlers::files::FileStoreImageResolver::new(Arc::clone(&file_store)) {
-                Ok(r) => Arc::new(r),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Could not canonicalize uploads dir — FileRef images disabled"
-                    );
-                    Arc::new(agentos_llm::NoopImageResolver)
-                }
-            };
-        kernel.set_image_resolver(resolver);
-
-        // Persist inbound channel media (Telegram photos/docs/voice) into the
-        // same FileStore so downloaded attachments get a resolvable file id.
-        kernel.set_attachment_sink(Arc::new(
-            crate::handlers::files::FileStoreAttachmentSink::new(Arc::clone(&file_store)),
-        ));
+        // The kernel installs the FileStore-backed `ImageResolver` and
+        // `AttachmentSink` at boot (see `agentos_kernel::file_bindings`), so
+        // every binary that boots a kernel — `agentos start`, `gateway run`,
+        // this server — persists inbound channel media. Nothing to do here.
 
         // Create the notification broadcast channel and register the SSE adapter
         // with the kernel's NotificationRouter so it receives real-time pushes.

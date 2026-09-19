@@ -59,7 +59,7 @@ impl ChannelAdapter for TeamsAdapter {
             json!({
                 "@type": "MessageCard",
                 "@context": "https://schema.org/extensions",
-                "text": msg.content.render_for_delivery()
+                "text": msg.text_with_actions()
             })
         } else {
             let imgs: Vec<serde_json::Value> = images

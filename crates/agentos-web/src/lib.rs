@@ -1,3 +1,9 @@
+// Axum handlers return `Result<T, Response>` so an early `?` can short-circuit
+// with a finished HTTP response. `Response` is 128 bytes, exactly clippy's
+// `result_large_err` threshold (new in the 1.98 toolchain), and `Box<Response>`
+// is not `IntoResponse`, so boxing is not an option for handler signatures.
+#![allow(clippy::result_large_err)]
+
 pub mod auth;
 pub mod chat_inflight;
 // ChatStore + ConvoStore relocated into agentos-kernel (shared with the REST API);

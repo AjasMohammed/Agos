@@ -2,6 +2,8 @@
 name = "agentos-api"
 version.workspace = true
 edition = "2021"
+license.workspace = true
+publish.workspace = true
 autobins = false
 
 # Explicit kebab-case name so `cargo run -p agentos-api --bin gen-openapi` works
@@ -16,7 +18,9 @@ path = "src/bin/gen_events.rs"
 
 [dependencies]
 agentos-types = { path = "../agentos-types" }
+base64 = { workspace = true }
 agentos-kernel = { path = "../agentos-kernel" }
+agentos-mcp = { path = "../agentos-mcp" }
 agentos-memory = { path = "../agentos-memory" }
 agentos-skills = { path = "../agentos-skills" }
 agentos-audit = { path = "../agentos-audit" }
@@ -57,6 +61,9 @@ rusqlite = { workspace = true }
 futures = "0.3"
 bytes = { workspace = true }
 utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
+
+[features]
+embeddings = ["agentos-memory/embeddings", "agentos-kernel/embeddings"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

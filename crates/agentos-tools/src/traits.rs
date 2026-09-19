@@ -112,15 +112,31 @@ impl ToolExecutionContext {
             .agent_registry
             .as_ref()
             .and_then(|r| r.get_agent(&self.agent_id))
-            .map(|a| a.name)
-            .unwrap_or_else(|| self.agent_id.to_string());
-        let dir = self.data_dir.join("agents").join(name);
+            .map(|a| a.name);
+        let dir = agent_home_dir(&self.data_dir, name.as_deref(), &self.agent_id);
         std::fs::create_dir_all(&dir).map_err(|e| AgentOSError::ToolExecutionFailed {
             tool_name: "file".into(),
             reason: format!("Agent home directory error: {} ({})", dir.display(), e),
         })?;
         Ok(dir)
     }
+}
+
+/// `data_dir/agents/<name>/` — the one definition of an agent home, shared by
+/// the tool context and kernel-side re-checks so the two cannot drift. A name
+/// is one path segment; anything else falls back to the id so the home can
+/// never leave `data_dir/agents/`. Does not create the directory.
+pub fn agent_home_dir(
+    data_dir: &std::path::Path,
+    name: Option<&str>,
+    agent_id: &agentos_types::AgentID,
+) -> PathBuf {
+    let segment = name
+        // `.` would make `agents/.` — every agent's home.
+        .filter(|n| !n.is_empty() && *n != "." && !n.contains(['/', '\\']) && !n.contains(".."))
+        .map(str::to_string)
+        .unwrap_or_else(|| agent_id.to_string());
+    data_dir.join("agents").join(segment)
 }
 
 /// Percent-decode ASCII bytes in a path string (e.g. `%2e%2e` → `..`, `%2f` → `/`).
@@ -229,6 +245,116 @@ pub fn resolve_tool_path(
     }
 }
 
+/// Deepest directory level below the base that is walked.
+pub(crate) const MAX_DEPTH: usize = 12;
+/// Most matches returned in one call.
+pub(crate) const MAX_MATCHES: usize = 1000;
+/// Most directory entries visited before giving up, matched or not.
+pub(crate) const MAX_ENTRIES_SCANNED: usize = 200_000;
+/// Wall-clock ceiling for the walk.
+pub(crate) const MAX_WALK_SECS: u64 = 20;
+/// How often the cancellation token and the clock are consulted.
+pub(crate) const CHECK_EVERY: usize = 1024;
+
+/// Directories that are never worth walking and are the usual source of
+/// million-entry trees: dependency and build caches.
+// ponytail: a fixed list, not config. Add names here if a new ecosystem shows up.
+pub(crate) fn is_cycle_prone(entry: &walkdir::DirEntry) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return false;
+    }
+    matches!(
+        entry.file_name().to_str(),
+        Some("node_modules") | Some(".git") | Some("target") | Some(".venv")
+    )
+}
+
+/// A glob that understands brace alternates (`*.{mp3,wav}`), which the `glob`
+/// crate does not — it treats `{`, `,` and `}` as literal characters, so every
+/// brace pattern an LLM writes (bash/ripgrep/fd syntax) silently matched zero
+/// files instead of erroring. Expansion happens once, at construction.
+// ponytail: expand to N plain patterns instead of pulling in `globset`.
+pub(crate) struct MultiGlob {
+    patterns: Vec<glob::Pattern>,
+}
+
+impl MultiGlob {
+    pub(crate) fn new(pattern: &str) -> Result<Self, glob::PatternError> {
+        expand_braces(pattern)
+            .iter()
+            .map(|p| glob::Pattern::new(p))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|patterns| Self { patterns })
+    }
+
+    pub(crate) fn matches_path_with(&self, path: &Path, options: glob::MatchOptions) -> bool {
+        self.patterns
+            .iter()
+            .any(|p| p.matches_path_with(path, options))
+    }
+
+    pub(crate) fn matches(&self, s: &str) -> bool {
+        self.patterns.iter().any(|p| p.matches(s))
+    }
+}
+
+/// Cap on the expansion so `{a,b}{a,b}{a,b}...` cannot explode combinatorially.
+const MAX_BRACE_EXPANSIONS: usize = 256;
+
+/// Expand `a{b,c}d` into `["abd", "acd"]`, recursively (nesting supported).
+/// An unbalanced or over-large brace group is left as a literal.
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let bytes = pattern.as_bytes();
+    let open = match bytes.iter().position(|&c| c == b'{') {
+        Some(i) => i,
+        None => return vec![pattern.to_string()],
+    };
+
+    // Find the matching `}` and the top-level commas inside this group.
+    let mut depth = 0usize;
+    let mut close = None;
+    let mut splits: Vec<usize> = Vec::new();
+    for (i, &c) in bytes.iter().enumerate().skip(open) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            b',' if depth == 1 => splits.push(i),
+            _ => {}
+        }
+    }
+    let close = match close {
+        Some(i) => i,
+        None => return vec![pattern.to_string()], // unbalanced — treat as literal
+    };
+
+    let prefix = &pattern[..open];
+    let suffix = &pattern[close + 1..];
+    let mut alts: Vec<&str> = Vec::new();
+    let mut start = open + 1;
+    for &s in &splits {
+        alts.push(&pattern[start..s]);
+        start = s + 1;
+    }
+    alts.push(&pattern[start..close]);
+
+    let mut out = Vec::new();
+    for alt in alts {
+        for tail in expand_braces(&format!("{}{}{}", prefix, alt, suffix)) {
+            if out.len() >= MAX_BRACE_EXPANSIONS {
+                return out;
+            }
+            out.push(tail);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +362,28 @@ mod tests {
 
     fn data_dir() -> PathBuf {
         PathBuf::from("/opt/agentos/data")
+    }
+
+    #[test]
+    fn brace_globs_expand() {
+        // The bug: glob 0.3 treats `{`/`,`/`}` as literals, so `*.{mp3,wav}`
+        // matched nothing and the agent reported "no audio files".
+        let g = MultiGlob::new("**/*.{mp3,wav}").unwrap();
+        let opts = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
+        assert!(g.matches_path_with(Path::new("combined_audio[1].mp3"), opts));
+        assert!(g.matches_path_with(Path::new("a/b/x.wav"), opts));
+        assert!(!g.matches_path_with(Path::new("x.txt"), opts));
+
+        // Nested alternates, and plain patterns still work unchanged.
+        assert_eq!(expand_braces("a{b,c{d,e}}f").len(), 3);
+        assert_eq!(expand_braces("*.rs"), vec!["*.rs".to_string()]);
+        // Unbalanced brace stays literal rather than erroring.
+        assert_eq!(expand_braces("a{b"), vec!["a{b".to_string()]);
+        assert!(MultiGlob::new("{a,b}").unwrap().matches("a"));
     }
 
     #[test]

@@ -66,6 +66,8 @@ impl Modify for SecurityAddon {
         crate::handlers::agent_chats::get,
         crate::handlers::agent_chats::create,
         crate::handlers::agent_chats::stop,
+        crate::handlers::agent_chats::continue_chat,
+        crate::handlers::agent_chats::post_message,
         crate::handlers::agents::list,
         crate::handlers::agents::connect,
         crate::handlers::agents::detail,
@@ -348,6 +350,8 @@ impl Modify for SecurityAddon {
         crate::types::ApiConvoTurn,
         crate::types::ApiConvoDetail,
         crate::types::CreateConvoRequest,
+        crate::types::ContinueConvoRequest,
+        crate::types::PostConvoMessageRequest,
         crate::types::SubmitReviewRequest,
         crate::types::ApiFileMeta,
         crate::types::ApiScratchPage,
@@ -429,6 +433,6 @@ mod tests {
             .values()
             .map(|item| methods.iter().filter(|m| item.get(*m).is_some()).count())
             .sum();
-        assert_eq!(ops, 175, "expected 175 documented operations");
+        assert_eq!(ops, 177, "expected 177 documented operations");
     }
 }

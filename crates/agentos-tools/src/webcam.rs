@@ -55,6 +55,7 @@ impl AgentTool for WebcamTool {
     ) -> Result<Value, AgentOSError> {
         let hal = context
             .hal
+            .clone()
             .ok_or_else(|| AgentOSError::ToolExecutionFailed {
                 tool_name: self.name().to_string(),
                 reason: "Hardware Abstraction Layer (HAL) not available in this context"
@@ -77,6 +78,16 @@ impl AgentTool for WebcamTool {
         // (including an attempt to forge the reserved key itself).
         let mut payload = payload;
         if let Value::Object(map) = &mut payload {
+            // The driver writes the frame wherever it is told; keep it inside
+            // the agent home or a granted folder.
+            crate::workspace::contain_hal_path(map, "output_path", self.name(), &context, true)?;
+            // Frames with no `output_path` (and every burst frame) land in the
+            // agent home, not /tmp.
+            let capture_dir = crate::workspace::agent_capture_dir(self.name(), &context)?;
+            map.insert(
+                crate::workspace::HAL_OUTPUT_DIR_KEY.to_string(),
+                Value::String(capture_dir.to_string_lossy().into_owned()),
+            );
             map.remove("agent_id");
             map.remove("session_id");
             map.insert(
@@ -211,6 +222,84 @@ mod tests {
         );
         assert!(forwarded.get("agent_id").is_none());
         assert!(forwarded.get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn output_path_is_contained_to_the_agent_home() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hal = HardwareAbstractionLayer::new();
+        hal.register(Box::new(RecordingDriver { seen: seen.clone() }));
+        let hal = Arc::new(hal);
+
+        // Relative → rebased into the agent home.
+        let (context, agent_id) = make_context(Arc::clone(&hal));
+        WebcamTool::new()
+            .execute(
+                json!({ "action": "capture", "output_path": "captures/frame.jpg" }),
+                context,
+            )
+            .await
+            .expect("relative output path should resolve");
+        let forwarded = seen.lock().unwrap()[0]["output_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let home = std::env::temp_dir()
+            .join("agents")
+            .join(agent_id.to_string());
+        assert_eq!(forwarded, home.join("captures/frame.jpg").to_string_lossy());
+
+        // Absolute outside every granted root → refused before the driver.
+        let (context, _) = make_context(Arc::clone(&hal));
+        let err = WebcamTool::new()
+            .execute(
+                json!({ "action": "capture", "output_path": "/etc/frame.jpg" }),
+                context,
+            )
+            .await
+            .expect_err("absolute path outside granted roots must be refused");
+        assert!(
+            matches!(err, AgentOSError::PermissionDenied { .. }),
+            "{err}"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // Generated names go to the home's captures/ dir, never /tmp.
+        let stamped = seen.lock().unwrap()[0]["__output_dir"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(stamped, home.join("captures").to_string_lossy());
+    }
+
+    /// A symlink planted inside the home (shell-exec can do that) must not
+    /// turn a contained relative path into a write outside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_inside_home_cannot_redirect_the_write() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hal = HardwareAbstractionLayer::new();
+        hal.register(Box::new(RecordingDriver { seen: seen.clone() }));
+        let (context, agent_id) = make_context(Arc::new(hal));
+        let home = std::env::temp_dir()
+            .join("agents")
+            .join(agent_id.to_string());
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.join("link")).unwrap();
+
+        let err = WebcamTool::new()
+            .execute(
+                json!({ "action": "capture", "output_path": "link/frame.jpg" }),
+                context,
+            )
+            .await
+            .expect_err("symlinked parent must be refused");
+        assert!(
+            matches!(err, AgentOSError::PermissionDenied { .. }),
+            "{err}"
+        );
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

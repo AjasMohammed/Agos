@@ -6,16 +6,19 @@
 # Env overrides:
 #   AGENTOS_VERSION       release tag (default: latest), e.g. v1.0.0
 #   AGENTOS_INSTALL_DIR   install dir   (default: ~/.local/bin)
+#   AGENTOS_FLAVOR        "lite" for the no-embeddings build (linux-amd64 only)
 #
-# Always verifies the SHA-256 checksum, and verifies the minisign signature when
-# both the signature asset and the repo public key are available (enforced once
-# Phase 08 signing is live; gracefully reported as skipped before then).
+# Always verifies the SHA-256 checksum and requires the .sig asset; verifies the
+# minisign signature against the pinned public key when minisign or rsign is
+# installed (warns otherwise).
 set -euo pipefail
 
 REPO="AjasMohammed/Agos"
 VERSION="${AGENTOS_VERSION:-latest}"
 INSTALL_DIR="${AGENTOS_INSTALL_DIR:-$HOME/.local/bin}"
-PUBKEY_URL="https://raw.githubusercontent.com/${REPO}/main/packaging/signing/agentos-release.pub"
+# Release signing public key (key id 0692DEA1023C9472), pinned here so a
+# compromised repo cannot swap it; must match packaging/signing/agentos-release.pub.
+PUBKEY="RWRylDwCod6SBrcNGIz6wZsrWW5Y9o3I+OT/opftcrq4tK/KhgXvtdKl"
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -39,6 +42,11 @@ case "$ARCH" in
   *) die "Unsupported arch '$ARCH'." ;;
 esac
 ASSET="agentos-${os}-${arch}"
+# AGENTOS_FLAVOR=lite: no ONNX/MiniLM vector search (FTS5 only), linux-amd64 only.
+if [ "${AGENTOS_FLAVOR:-}" = lite ]; then
+  [ "$ASSET" = agentos-linux-amd64 ] || die "The lite build is published for linux-amd64 only."
+  ASSET="agentos-lite-linux-amd64"
+fi
 
 if [ "$os" != "linux" ]; then
   warn "Linux is the primary target. On macOS, seccomp sandboxing and most HAL"
@@ -47,37 +55,47 @@ fi
 
 # --- resolve release base url -------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
-  BASE="https://github.com/${REPO}/releases/latest/download"
+  # Newest final release wins; a pre-release (v1.0.0-rc.1) is used only while
+  # no final exists, because GitHub's /releases/latest skips pre-releases and
+  # would 404 during an rc window. Falls back to /latest if the API is unreachable.
+  tags="$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" 2>/dev/null \
+    | sed -nE 's/.*"tag_name": *"([^"]+)".*/\1/p' || true)"
+  VERSION="$(printf '%s\n' "$tags" | grep -v -e '-' | head -n1 || true)"
+  [ -n "$VERSION" ] || VERSION="$(printf '%s\n' "$tags" | head -n1)"
+  case "$VERSION" in v[0-9]*) ;; *) VERSION="" ;; esac
+  if [ -n "$VERSION" ]; then
+    BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+  else
+    VERSION=latest
+    BASE="https://github.com/${REPO}/releases/latest/download"
+  fi
 else
   BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 fi
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 info "Downloading $ASSET ($VERSION)"
-curl -fsSL "$BASE/$ASSET"        -o "$tmp/agentos"        || die "Download failed for $ASSET."
-curl -fsSL "$BASE/$ASSET.sha256" -o "$tmp/agentos.sha256" || die "Checksum file missing for $ASSET."
-# Signature + pubkey are best-effort until Phase 08 signing is published.
-sig_ok=0
-curl -fsSL "$BASE/$ASSET.sig" -o "$tmp/agentos.sig" 2>/dev/null && sig_ok=1 || true
-curl -fsSL "$PUBKEY_URL"      -o "$tmp/agentos.pub" 2>/dev/null || true
+curl --proto '=https' --tlsv1.2 -fsSL "$BASE/$ASSET"        -o "$tmp/agentos"        || die "Download failed for $ASSET."
+curl --proto '=https' --tlsv1.2 -fsSL "$BASE/$ASSET.sha256" -o "$tmp/agentos.sha256" || die "Checksum file missing for $ASSET."
+curl --proto '=https' --tlsv1.2 -fsSL "$BASE/$ASSET.sig"    -o "$tmp/agentos.sig"    || die "Signature missing for $ASSET — refusing to install."
 
 # --- verify checksum (mandatory) ----------------------------------------------
 info "Verifying checksum"
 ( cd "$tmp" && sed "s|$ASSET|agentos|" agentos.sha256 | sha256 -c - ) \
   || die "Checksum verification failed — refusing to install."
 
-# --- verify signature (enforced when available) -------------------------------
-if [ "$sig_ok" = 1 ] && [ -s "$tmp/agentos.pub" ]; then
-  if command -v minisign >/dev/null 2>&1; then
-    info "Verifying signature"
-    minisign -V -p "$tmp/agentos.pub" -x "$tmp/agentos.sig" -m "$tmp/agentos" \
-      || die "Signature verification failed — refusing to install."
-  else
-    warn "Signature present but 'minisign' is not installed; checksum verified, signature NOT."
-    warn "Install minisign and re-run for full supply-chain verification."
-  fi
+# --- verify signature (enforced when a verifier is installed) -----------------
+if command -v minisign >/dev/null 2>&1; then
+  info "Verifying signature (minisign)"
+  minisign -V -P "$PUBKEY" -x "$tmp/agentos.sig" -m "$tmp/agentos" \
+    || die "Signature verification failed — refusing to install."
+elif command -v rsign >/dev/null 2>&1; then
+  info "Verifying signature (rsign)"
+  rsign verify -P "$PUBKEY" -x "$tmp/agentos.sig" "$tmp/agentos" \
+    || die "Signature verification failed — refusing to install."
 else
-  warn "No published signature yet for this release; checksum verified only."
+  warn "Neither 'minisign' nor 'rsign' installed; checksum verified, signature NOT."
+  warn "Install minisign (or 'cargo install rsign2') and re-run for full supply-chain verification."
 fi
 
 # --- install ------------------------------------------------------------------

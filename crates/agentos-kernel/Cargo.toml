@@ -2,6 +2,8 @@
 name = "agentos-kernel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 agentos-types = { path = "../agentos-types" }
@@ -67,7 +69,9 @@ tracing-opentelemetry = { version = "0.29", optional = true }
 
 [features]
 default = ["usb-storage", "printer"]
-all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam", "mqtt", "homeassistant"]
+# ONNX vector embeddings. Not in `default` here: agentos-cli owns the switch.
+embeddings = ["agentos-memory/embeddings", "agentos-tools/embeddings"]
+all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam", "wifi", "mqtt", "homeassistant"]
 audio = ["agentos-hal/audio"]
 usb-storage = ["agentos-hal/usb-storage"]
 printer = ["agentos-hal/printer"]
@@ -75,6 +79,7 @@ bluetooth = ["agentos-hal/bluetooth"]
 display = ["agentos-hal/display"]
 raw-usb = ["agentos-hal/raw-usb"]
 webcam = ["agentos-hal/webcam"]
+wifi = ["agentos-hal/wifi"]
 mqtt = ["agentos-hal/mqtt"]
 homeassistant = ["agentos-hal/homeassistant"]
 otel = [
@@ -95,6 +100,10 @@ agentos-audit = { path = "../agentos-audit" }
 agentos-llm = { path = "../agentos-llm" }
 agentos-bus = { path = "../agentos-bus" }
 toml = { workspace = true }
+# `test-util` gates `#[tokio::test(start_paused = true)]`, which lets the timer
+# tests assert a 4s keepalive cadence without spending 4s of wall clock. Kept to
+# dev-dependencies so the shipped binary never carries the mock clock.
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "bench_cold_start"

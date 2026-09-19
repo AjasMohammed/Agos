@@ -10,7 +10,7 @@ trust_tier  = "core"
 category    = "fs"
 
 [capabilities_required]
-permissions = ["fs.user_data:r"]
+permissions = ["fs.user_data:r", "fs.workspace:r"]
 
 [capabilities_provided]
 outputs = ["content.text"]

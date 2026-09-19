@@ -1,8 +1,8 @@
+use crate::sandbox_fs;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use std::time::Duration;
-use tokio::process::Command;
 
 pub struct ShellExec;
 
@@ -73,9 +73,6 @@ impl AgentTool for ShellExec {
         // state dir (audit.db, api_keys.db, chat.db, agents.json live there).
         let data_dir_str = context.agent_files_dir()?.to_string_lossy().to_string();
 
-        // Check if bwrap is available (at runtime)
-        let bwrap_check = Command::new("bwrap").arg("--version").output().await;
-
         // Determine whether network access is explicitly requested. Network
         // egress from a sandboxed command is itself a capability: requesting it
         // requires the `network.outbound` permission, exactly like web-fetch and
@@ -97,114 +94,35 @@ impl AgentTool for ShellExec {
             });
         }
 
-        let mut cmd = if bwrap_check.is_ok() {
-            // Build the bwrap command
-            // We want to mount the root filesystem read-only,
-            // mount the agent's data directory read-write into a known location (or keeping its path),
-            // and hide sensitive directories by mounting an empty tmpfs over them.
-            let mut proc = Command::new("bwrap");
-
-            proc.arg("--ro-bind")
-                .arg("/usr")
-                .arg("/usr")
-                .arg("--ro-bind")
-                .arg("/lib")
-                .arg("/lib")
-                .arg("--ro-bind")
-                .arg("/lib64")
-                .arg("/lib64")
-                .arg("--ro-bind")
-                .arg("/bin")
-                .arg("/bin")
-                .arg("--ro-bind")
-                .arg("/sbin")
-                .arg("/sbin")
-                // Hide sensitive directories first — bwrap applies args in order,
-                // so any --bind on these paths must come AFTER the tmpfs to survive.
-                .arg("--tmpfs")
-                .arg("/root")
-                .arg("--tmpfs")
-                .arg("/etc")
-                .arg("--tmpfs")
-                .arg("/var")
-                .arg("--tmpfs")
-                .arg("/home")
-                .arg("--tmpfs")
-                .arg("/tmp")
-                // Bind the data dir as the always-writable place (after the
-                // /home tmpfs so it isn't shadowed when data_dir lives under
-                // /home/<user>).
-                .arg("--bind")
-                .arg(&data_dir_str)
-                .arg(&data_dir_str);
-
-            // Bind every `workspace_paths_executable` entry as writable. These
-            // are user-granted directories with `--mode rwx` — the sandbox
-            // child sees them at their real on-disk path so commands like
-            // `ls`, `cargo build`, `python` act on real files. Bindings come
-            // AFTER the tmpfs steps so they survive being shadowed. Skip any
-            // path under data_dir (already bound) to avoid bwrap "already
-            // bound" errors.
-            let data_dir_canon = std::path::Path::new(&data_dir_str);
-            for exec_path in &context.workspace_paths_executable {
-                if exec_path.starts_with(data_dir_canon) {
-                    continue;
-                }
-                proc.arg("--bind").arg(exec_path).arg(exec_path);
+        // Writable: the agent home plus every `--mode rwx` workspace grant, at
+        // their real paths so `ls`, `cargo build`, `python` act on real files.
+        // Everything else — kernel state, other agents, the operator's home —
+        // does not exist inside. The environment is cleared (the kernel's holds
+        // every provider API key) and network is opt-in.
+        let data_dir = std::path::Path::new(&data_dir_str);
+        let mut sandbox = sandbox_fs::Sandbox::new("shell-exec")
+            .bind_rw(data_dir)
+            .network(allow_network)
+            .env("HOME", data_dir);
+        for exec_path in
+            sandbox_fs::grants_outside(&context.workspace_paths_executable, &context.data_dir)
+        {
+            if exec_path.starts_with(data_dir) {
+                continue;
             }
-
-            proc.arg("--dev")
-                .arg("/dev")
-                .arg("--proc")
-                .arg("/proc")
-                .arg("--unshare-all");
-
-            // SECURITY: scrub the environment. bwrap inherits the parent process
-            // environment by default, which on the kernel host contains every
-            // provider/API secret (OPENAI_API_KEY, ANTHROPIC_API_KEY, BRAVE/…,
-            // cloud creds). `--clearenv` drops all of it inside the sandbox; we
-            // then re-inject only a minimal, non-sensitive set so ordinary
-            // commands still work. `env`/`printenv` in the sandbox now sees only
-            // these, never the kernel's secrets.
-            proc.arg("--clearenv")
-                .arg("--setenv")
-                .arg("PATH")
-                .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .arg("--setenv")
-                .arg("HOME")
-                .arg(&data_dir_str)
-                .arg("--setenv")
-                .arg("TMPDIR")
-                .arg("/tmp")
-                .arg("--setenv")
-                .arg("LANG")
-                .arg("C.UTF-8");
-
-            // Only share network if explicitly requested — default is isolated
-            if allow_network {
-                proc.arg("--share-net");
+            // Say why a granted folder is missing inside; the builder skips it
+            // because bwrap would abort the whole call on it.
+            if !exec_path.exists() {
+                tracing::warn!(
+                    path = %exec_path.display(),
+                    "shell-exec: executable workspace grant no longer exists; not binding it"
+                );
+                continue;
             }
-
-            proc
-                // Change to the data dir
-                .arg("--chdir")
-                .arg(&data_dir_str)
-                // Finally, pass the shell and the command
-                .arg("--")
-                .arg("sh")
-                .arg("-c")
-                .arg(command);
-
-            proc
-        } else {
-            // SECURITY: Refuse to run without sandbox isolation.
-            // Running arbitrary shell commands without bwrap is an unacceptable risk
-            // in any environment. Install bwrap (bubblewrap) to use shell-exec.
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "shell-exec".into(),
-                reason: "bwrap (bubblewrap) is not installed. shell-exec requires sandbox isolation and cannot run without it. Install bwrap to enable shell command execution.".into(),
-            });
-        };
+            sandbox = sandbox.bind_rw(exec_path);
+        }
+        let mut cmd = sandbox.command(data_dir, "sh").await?;
+        cmd.arg("-c").arg(command);
 
         // Truncate command preview to avoid logging secrets at debug level
         let cmd_preview = if command.len() > 120 {
@@ -218,10 +136,6 @@ impl AgentTool for ShellExec {
             allow_network,
             "shell-exec: starting"
         );
-
-        // kill_on_drop ensures the sandboxed process is killed if the future
-        // is dropped (e.g. when the cancellation branch fires in select!).
-        cmd.kill_on_drop(true);
 
         let output = tokio::select! {
             result = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()) => {
@@ -321,11 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shell_exec_includes_sandbox_envelope() {
-        if std::process::Command::new("bwrap")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !crate::sandbox_fs::bwrap_usable().await {
             println!("Skipping test: bwrap not installed");
             return;
         }

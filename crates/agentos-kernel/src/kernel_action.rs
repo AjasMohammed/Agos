@@ -6,6 +6,80 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Cap for `channel-send file_path` uploads. Telegram's bot limit is 50 MB;
+/// the bytes ride through the notification router base64-encoded, so keep
+/// well under it.
+const CHANNEL_SEND_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+/// Telegram `sendPhoto` limit; larger images are sent as documents.
+const TELEGRAM_PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+enum AgentFileError {
+    /// The open handle resolves outside the agent home (payload = real path).
+    Outside(String),
+    Other(String),
+}
+
+/// Read one of an agent's own files for upload, race-free and bounded.
+///
+/// Opens first, then asks where the *open handle* points (`/proc/self/fd`),
+/// so a symlink swapped in after any earlier path check cannot redirect the
+/// read. Size comes from fstat on that handle, and the read itself is capped
+/// at `max + 1` bytes, so a file still growing cannot blow past the limit.
+/// `O_NONBLOCK` keeps a FIFO planted in the home from hanging the thread in
+/// `open`.
+fn read_agent_file_blocking(
+    home: &std::path::Path,
+    path: &std::path::Path,
+    max: u64,
+) -> Result<Vec<u8>, AgentFileError> {
+    use std::io::Read;
+    let home = home
+        .canonicalize()
+        .map_err(|e| AgentFileError::Other(format!("agent files directory unavailable: {e}")))?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts
+        .open(path)
+        .map_err(|e| AgentFileError::Other(format!("could not open: {e}")))?;
+    #[cfg(target_os = "linux")]
+    let real = {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    };
+    // ponytail: off Linux the path is re-resolved after open, leaving a narrow
+    // swap window; Linux is the supported target.
+    #[cfg(not(target_os = "linux"))]
+    let real = path.canonicalize();
+    let real = real.map_err(|e| AgentFileError::Other(format!("could not resolve: {e}")))?;
+    if !real.starts_with(&home) {
+        return Err(AgentFileError::Outside(real.to_string_lossy().into_owned()));
+    }
+    let meta = file
+        .metadata()
+        .map_err(|e| AgentFileError::Other(format!("could not stat: {e}")))?;
+    if !meta.is_file() {
+        return Err(AgentFileError::Other("not a regular file".into()));
+    }
+    let too_big =
+        || AgentFileError::Other(format!("larger than the {max}-byte channel upload cap"));
+    if meta.len() > max {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AgentFileError::Other(format!("could not read: {e}")))?;
+    if bytes.len() as u64 > max {
+        return Err(too_big());
+    }
+    Ok(bytes)
+}
+
 /// Built-in delivery adapter kinds accepted as `notify-user` channel selectors.
 ///
 /// These names are matched against `DeliveryAdapter::channel_id().as_str()` when
@@ -220,6 +294,9 @@ pub(crate) enum KernelAction {
         /// Stored file id to resolve to bytes and upload directly (Telegram
         /// multipart). Mutually exclusive with a URL `attachment`.
         file_id: Option<String>,
+        /// Absolute path inside the agent home, already contained by the
+        /// tool wrapper; read and uploaded like a `file_id`.
+        file_path: Option<String>,
         /// Caption/filename applied to the resolved `file_id` attachment.
         caption: Option<String>,
         filename: Option<String>,
@@ -491,6 +568,7 @@ impl KernelAction {
                 let image_url = str_field("image_url");
                 let document_url = str_field("document_url");
                 let file_id = str_field("file_id");
+                let file_path = str_field("file_path");
                 let caption = str_field("caption");
                 let filename = str_field("filename");
                 // Album of image URLs (Telegram sendMediaGroup): 2–10 items.
@@ -544,10 +622,13 @@ impl KernelAction {
                 };
 
                 if channel.trim().is_empty()
-                    || (text.is_empty() && attachment.is_none() && file_id.is_none())
+                    || (text.is_empty()
+                        && attachment.is_none()
+                        && file_id.is_none()
+                        && file_path.is_none())
                 {
                     tracing::warn!(
-                        "Dropping channel_send: channel must be non-empty and a message needs text, an attachment, or a file_id"
+                        "Dropping channel_send: channel must be non-empty and a message needs text, an attachment, a file_id, or a file_path"
                     );
                     return None;
                 }
@@ -562,6 +643,7 @@ impl KernelAction {
                     thread_id,
                     attachment,
                     file_id,
+                    file_path,
                     caption,
                     filename,
                 })
@@ -1658,12 +1740,13 @@ impl Kernel {
                 thread_id,
                 attachment,
                 file_id,
+                file_path,
                 caption,
                 filename,
             } => {
                 self.execute_channel_send(
-                    task, channel, text, thread_id, attachment, file_id, caption, filename,
-                    trace_id,
+                    task, channel, text, thread_id, attachment, file_id, file_path, caption,
+                    filename, trace_id,
                 )
                 .await
             }
@@ -1792,10 +1875,22 @@ impl Kernel {
         };
         drop(registry);
 
+        // Durable row first; the bus message reuses its id so the
+        // DirectMessageReceived `message_id` resolves via agent-messages-read.
+        let entry_id = self
+            .agent_inbox_writer
+            .write_message(
+                task.agent_id,
+                from_name.clone(),
+                to_agent.id,
+                content.to_string(),
+            )
+            .await;
+
         let now = chrono::Utc::now();
         let ttl_seconds: u64 = 60;
         let mut msg = AgentMessage {
-            id: MessageID::new(),
+            id: MessageID::from_uuid(*entry_id.as_uuid()),
             from: task.agent_id,
             to: MessageTarget::Direct(to_agent.id),
             content: MessageContent::Text(content.to_string()),
@@ -1827,20 +1922,40 @@ impl Kernel {
             }
         }
 
-        self.agent_inbox_writer
-            .write_message(
-                task.agent_id,
-                from_name.clone(),
-                to_agent.id,
-                content.to_string(),
+        // An Offline recipient still gets the durable inbox row and reads it on
+        // reconnect, but the sender must not be told "delivered" — it may be
+        // waiting for a reply that cannot come. This is the only remaining
+        // producer of AgentUnreachable.
+        let recipient_online = to_agent.status != AgentStatus::Offline;
+        if !recipient_online {
+            self.emit_event_with_trace(
+                EventType::AgentUnreachable,
+                EventSource::AgentMessageBus,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "unreachable_agent": to_agent.id.to_string(),
+                    "unreachable_agent_name": to_agent.name,
+                    "from_agent": task.agent_id.to_string(),
+                    "reason": "offline",
+                }),
+                task.event_chain_depth(),
+                Some(trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
+        }
 
-        match self.message_bus.send_direct(msg).await {
+        match self
+            .message_bus
+            .send_direct(msg, task.event_chain_depth())
+            .await
+        {
             Ok(_) => KernelActionResult {
                 success: true,
                 result: serde_json::json!({
-                    "status": "delivered",
+                    "status": if recipient_online { "delivered" } else { "queued" },
+                    "recipient_online": recipient_online,
                     "to": to,
                     "from": from_name,
                 }),
@@ -2436,6 +2551,7 @@ impl Kernel {
         }
 
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
             task_id: Some(task.id),
@@ -2538,17 +2654,25 @@ impl Kernel {
 
         // Park the task while the user is asked; the shared helper only knows
         // about notifications, so the scheduler transition lives here.
-        if let Err(e) = self
+        // Chat turns run under a synthetic task id the scheduler never saw.
+        // Remember whether parking took, so the post-answer liveness check
+        // below does not read "not found" as "terminated" and discard the
+        // user's answer.
+        let parked = match self
             .scheduler
             .update_state(&task.id, TaskState::Waiting)
             .await
         {
-            tracing::warn!(
-                task_id = %task.id,
-                error = %e,
-                "ask-user: failed to set task state to Waiting"
-            );
-        }
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "ask-user: failed to set task state to Waiting"
+                );
+                false
+            }
+        };
         let (notification_id, response) = match ask_user_blocking(
             &self.notification_router,
             &self.agent_registry,
@@ -2570,11 +2694,12 @@ impl Kernel {
             Err(failed) => return failed,
         };
 
-        let restored = self
-            .scheduler
-            .update_state_if_not_terminal(&task.id, TaskState::Running)
-            .await
-            .unwrap_or(false);
+        let restored = !parked
+            || self
+                .scheduler
+                .update_state_if_not_terminal(&task.id, TaskState::Running)
+                .await
+                .unwrap_or(false);
 
         if !restored {
             tracing::info!(
@@ -4442,62 +4567,12 @@ impl Kernel {
         thread_id: Option<String>,
         mut attachment: Option<MessageAttachment>,
         file_id: Option<String>,
+        file_path: Option<String>,
         caption: Option<String>,
         filename: Option<String>,
         trace_id: TraceID,
     ) -> KernelActionResult {
         use agentos_types::ChannelKind;
-
-        // Resolve a stored `file_id` to inline bytes via the image resolver
-        // (the web FileStore impl). Builds an inline attachment uploaded directly
-        // by the Telegram adapter. Errors are surfaced to the agent.
-        if let Some(fid) = file_id {
-            let resolver = self
-                .image_resolver
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let fid_for_blocking = fid.clone();
-            let resolved = tokio::task::spawn_blocking(move || {
-                let bytes = resolver.resolve_base64(&fid_for_blocking);
-                let name = resolver.resolve_filename(&fid_for_blocking);
-                (bytes, name)
-            })
-            .await;
-            match resolved {
-                Ok((Ok((mime, data_base64)), resolved_name)) => {
-                    let kind = if mime.starts_with("image/") {
-                        AttachmentKind::Image
-                    } else {
-                        AttachmentKind::Document
-                    };
-                    attachment = Some(MessageAttachment {
-                        url: String::new(),
-                        kind,
-                        filename: filename.or(resolved_name),
-                        caption,
-                        inline: Some(agentos_types::InlineAttachment { mime, data_base64 }),
-                        group_urls: Vec::new(),
-                    });
-                }
-                Ok((Err(e), _)) => {
-                    return KernelActionResult {
-                        success: false,
-                        result: serde_json::json!({
-                            "error": format!("Could not resolve file_id '{fid}': {e}"),
-                        }),
-                    };
-                }
-                Err(_) => {
-                    return KernelActionResult {
-                        success: false,
-                        result: serde_json::json!({
-                            "error": format!("file_id '{fid}' resolution task failed"),
-                        }),
-                    };
-                }
-            }
-        }
 
         // Defense-in-depth permission check.
         if !task
@@ -4525,7 +4600,7 @@ impl Kernel {
                 }),
             };
         }
-        if text.is_empty() && attachment.is_none() {
+        if text.is_empty() && attachment.is_none() && file_id.is_none() && file_path.is_none() {
             return KernelActionResult {
                 success: false,
                 result: serde_json::json!({
@@ -4615,6 +4690,158 @@ impl Kernel {
         let target_name = target.display_name.clone();
         let target_kind = target.kind.clone();
 
+        // Byte uploads ride `attachment.inline`, which only the Telegram adapter
+        // reads; every other adapter gets the (empty) URL and reported
+        // "delivered" while nothing arrived. Refuse before reading any file.
+        if (file_path.is_some() || file_id.is_some()) && target_kind != ChannelKind::Telegram {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!(
+                        "file_path/file_id uploads are Telegram-only; channel '{target_name}' is {target_kind}. Send a public image_url/document_url instead."
+                    ),
+                }),
+            };
+        }
+
+        let registered_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(&task.agent_id).map(|a| a.name.clone())
+        };
+        // Audit detail for byte uploads (`file_path` only; `file_id` bytes come
+        // from the user's own upload store).
+        let mut upload_audit: Option<serde_json::Value> = None;
+
+        // One of the agent's own files. The tool wrapper contained the path to
+        // the agent home, but any tool result can carry `_kernel_action` (WASM
+        // tools return raw JSON), so re-check against THIS agent's home — not
+        // just `data_dir/agents/` — on the open handle, bounded.
+        if let Some(path) = file_path {
+            let home = agentos_tools::traits::agent_home_dir(
+                &self.data_dir,
+                registered_name.as_deref(),
+                &task.agent_id,
+            );
+            let path_for_read = std::path::PathBuf::from(&path);
+            let read = tokio::task::spawn_blocking(move || {
+                read_agent_file_blocking(&home, &path_for_read, CHANNEL_SEND_MAX_FILE_BYTES)
+            })
+            .await
+            .unwrap_or_else(|e| Err(AgentFileError::Other(format!("read task failed: {e}"))));
+            let bytes = match read {
+                Ok(b) => b,
+                Err(AgentFileError::Outside(real)) => {
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::PermissionDenied,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "action": "channel_send",
+                            "file_path": path,
+                            "resolved": real,
+                            "reason": "file_path outside the calling agent's home",
+                        }),
+                        severity: agentos_audit::AuditSeverity::Security,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("file_path '{path}' is outside your files directory"),
+                        }),
+                    };
+                }
+                Err(AgentFileError::Other(e)) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": format!("file_path '{path}': {e}") }),
+                    };
+                }
+            };
+            let mime = crate::adapters::telegram::sniff_mime(&bytes).to_string();
+            // Telegram sendPhoto caps photos at 10 MB; larger images go as a
+            // document (20 MB) instead of failing with HTTP 400.
+            let kind =
+                if mime.starts_with("image/") && bytes.len() as u64 <= TELEGRAM_PHOTO_MAX_BYTES {
+                    AttachmentKind::Image
+                } else {
+                    AttachmentKind::Document
+                };
+            upload_audit = Some(serde_json::json!({
+                "file_path": path,
+                "bytes": bytes.len(),
+                "mime": mime,
+            }));
+            use base64::Engine;
+            attachment = Some(MessageAttachment {
+                url: String::new(),
+                kind,
+                filename: filename.clone().or_else(|| {
+                    std::path::Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                }),
+                caption: caption.clone(),
+                inline: Some(agentos_types::InlineAttachment {
+                    mime,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }),
+                group_urls: Vec::new(),
+            });
+        } else if let Some(fid) = file_id {
+            // Resolve a stored `file_id` to inline bytes via the image resolver
+            // (the web FileStore impl), uploaded directly by the Telegram adapter.
+            let resolver = self
+                .image_resolver
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let fid_for_blocking = fid.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let bytes = resolver.resolve_base64(&fid_for_blocking);
+                let name = resolver.resolve_filename(&fid_for_blocking);
+                (bytes, name)
+            })
+            .await;
+            match resolved {
+                Ok((Ok((mime, data_base64)), resolved_name)) => {
+                    let kind = if mime.starts_with("image/") {
+                        AttachmentKind::Image
+                    } else {
+                        AttachmentKind::Document
+                    };
+                    attachment = Some(MessageAttachment {
+                        url: String::new(),
+                        kind,
+                        filename: filename.or(resolved_name),
+                        caption,
+                        inline: Some(agentos_types::InlineAttachment { mime, data_base64 }),
+                        group_urls: Vec::new(),
+                    });
+                }
+                Ok((Err(e), _)) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Could not resolve file_id '{fid}': {e}"),
+                        }),
+                    };
+                }
+                Err(_) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("file_id '{fid}' resolution task failed"),
+                        }),
+                    };
+                }
+            }
+        }
+
         let max_chars = match &target_kind {
             ChannelKind::Discord => 2_000,
             ChannelKind::Slack => 40_000,
@@ -4633,12 +4860,7 @@ impl Kernel {
         // `active: true` by a failed boot restore (e.g. an ntfy topic on
         // `http://ntfy.local`, now rejected by the SSRF blocklist) reported
         // "delivered" to the agent while nothing was ever sent.
-        let agent_name = {
-            let reg = self.agent_registry.read().await;
-            reg.get_by_id(&task.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| task.agent_id.to_string())
-        };
+        let agent_name = registered_name.unwrap_or_else(|| task.agent_id.to_string());
         // The delivery-stack adapters render "<subject>\n\n<body>"; the
         // manager stack had no subject, so keep it empty there (`outbound_from`
         // then emits the body alone) rather than restyling Discord/Slack.
@@ -4674,6 +4896,7 @@ impl Kernel {
             _ => (send_text.clone(), attachment.clone()),
         };
         let msg = UserMessage {
+            actions: Vec::new(),
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
             task_id: Some(task.id),
@@ -4721,6 +4944,7 @@ impl Kernel {
                             agentos_types::AttachmentKind::Document => "document",
                         }),
                         "attachment_url": attachment.as_ref().map(|a| a.url.clone()),
+                        "upload": upload_audit,
                     }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
@@ -4798,6 +5022,7 @@ pub(crate) async fn ask_user_blocking(
     let body_prefixed = format!("{agent_name} asks:\n\n{question}");
 
     let msg = UserMessage {
+        actions: Vec::new(),
         id: NotificationID::new(),
         from: NotificationSource::Agent(agent_id),
         task_id: Some(task_id),
@@ -4862,11 +5087,12 @@ pub(crate) async fn ask_user_blocking(
         responded_at: Utc::now(),
         channel: DeliveryChannel::cli(),
     };
-    // Safety margin over the router's own expiry sweep so a lost oneshot can
-    // never park the caller forever.
-    let safety_timeout = Duration::from_secs(timeout_secs.saturating_add(600));
+    // Expire on time. The router sweep only runs every 10 min, and until the
+    // waiter is removed `InboundRouter` counts it as open — with two stale
+    // waiters every free-text channel message was answered "N agents are
+    // waiting" and dropped. The sweep stays as a backup.
     let response = tokio::select! {
-        result = tokio::time::timeout(safety_timeout, rx) => {
+        result = tokio::time::timeout(Duration::from_secs(timeout_secs), rx) => {
             match result {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(_recv_err)) => {
@@ -4874,11 +5100,13 @@ pub(crate) async fn ask_user_blocking(
                     fallback(&auto_action)
                 }
                 Err(_timeout) => {
-                    notification_router.remove_waiting_task(&notification_id).await;
-                    tracing::warn!(
+                    notification_router
+                        .expire_waiter(&notification_id, Some(task_id), &auto_action)
+                        .await;
+                    tracing::info!(
                         task_id = %task_id,
                         notification_id = %notification_id,
-                        "ask-user: safety timeout fired; returning auto_action"
+                        "ask-user: question expired unanswered; returning auto_action"
                     );
                     fallback(&auto_action)
                 }
@@ -4947,5 +5175,66 @@ mod schedule_visibility_parse_tests {
     fn get_task_logs_requires_run_id() {
         let v = serde_json::json!({ "_kernel_action": "get_task_logs" });
         assert!(KernelAction::from_tool_result(&v).is_none());
+    }
+}
+
+#[cfg(test)]
+mod channel_send_file_read_tests {
+    use super::{read_agent_file_blocking, AgentFileError};
+
+    #[test]
+    fn reads_only_the_callers_own_home_within_the_cap() {
+        let data = tempfile::tempdir().unwrap();
+        let home_a = data.path().join("agents/A");
+        let home_b = data.path().join("agents/B");
+        std::fs::create_dir_all(home_a.join("captures")).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        std::fs::write(home_a.join("captures/frame.jpg"), b"\xFF\xD8\xFFdata").unwrap();
+        std::fs::write(home_b.join("secret.md"), b"b's notes").unwrap();
+
+        // Own file: read.
+        let bytes =
+            read_agent_file_blocking(&home_a, &home_a.join("captures/frame.jpg"), 1024).ok();
+        assert_eq!(bytes.as_deref(), Some(&b"\xFF\xD8\xFFdata"[..]));
+
+        // A forged envelope naming ANOTHER agent's file (still under
+        // data_dir/agents/) is refused as Outside.
+        assert!(matches!(
+            read_agent_file_blocking(&home_a, &home_b.join("secret.md"), 1024),
+            Err(AgentFileError::Outside(_))
+        ));
+
+        // Over the cap.
+        assert!(matches!(
+            read_agent_file_blocking(&home_a, &home_a.join("captures/frame.jpg"), 3),
+            Err(AgentFileError::Other(_))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlinks_and_fifos_cannot_escape_or_hang() {
+        let data = tempfile::tempdir().unwrap();
+        let home = data.path().join("agents/A");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_ed25519"), b"key").unwrap();
+
+        // Symlinked directory inside the home → the open handle resolves
+        // outside, so it is refused even though the path string is "inside".
+        std::os::unix::fs::symlink(outside.path(), home.join("captures")).unwrap();
+        assert!(matches!(
+            read_agent_file_blocking(&home, &home.join("captures/id_ed25519"), 1024),
+            Err(AgentFileError::Outside(_))
+        ));
+
+        // A FIFO must not block in open(); it is rejected as not a regular file.
+        let fifo = home.join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            read_agent_file_blocking(&home, &fifo, 1024),
+            Err(AgentFileError::Other(_))
+        ));
     }
 }

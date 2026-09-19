@@ -1,8 +1,8 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::*;
 use async_trait::async_trait;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MAX_RESULTS: usize = 50;
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
@@ -147,11 +147,11 @@ impl AgentTool for FileGrep {
             });
         }
 
-        // Build glob::Pattern for filename filtering once.
+        // Build the filename glob once (brace alternates supported).
         let glob_pattern = glob_filter
             .as_deref()
             .map(|g| {
-                glob::Pattern::new(g).map_err(|e| {
+                crate::traits::MultiGlob::new(g).map_err(|e| {
                     AgentOSError::SchemaValidation(format!(
                         "file-grep: invalid glob filter '{}': {}",
                         g, e
@@ -165,7 +165,10 @@ impl AgentTool for FileGrep {
             .chain(context.workspace_paths.iter().cloned())
             .collect();
 
-        // Run the search synchronously in a blocking task.
+        // Run the search synchronously in a blocking task. NOTE: a blocking task
+        // cannot be cancelled by dropping this future, so everything inside must
+        // terminate on its own — see the deadline threaded through `search_files`.
+        let cancel = context.cancellation_token.clone();
         let results = tokio::task::spawn_blocking(move || {
             search_files(
                 &canonical_root,
@@ -176,6 +179,7 @@ impl AgentTool for FileGrep {
                 context_lines,
                 &output_mode,
                 max_results,
+                &cancel,
             )
         })
         .await
@@ -194,18 +198,43 @@ fn search_files(
     data_dir: &Path,
     allowed_roots: &[PathBuf],
     regex: &regex::Regex,
-    glob_filter: Option<&glob::Pattern>,
+    glob_filter: Option<&crate::traits::MultiGlob>,
     context_lines: usize,
     output_mode: &str,
     max_results: usize,
+    cancel: &CancellationToken,
 ) -> Result<serde_json::Value, AgentOSError> {
-    let files = collect_files(root, allowed_roots, glob_filter, MAX_FILES_TO_SEARCH);
+    // One deadline for the whole tool: walking and searching share the budget, so
+    // a walk that stops politely at 20s cannot hand 10 000 files to an unbounded
+    // read/regex phase that then pins the thread for minutes.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(crate::traits::MAX_WALK_SECS);
+    let (files, mut stopped_by) = collect_files(
+        root,
+        allowed_roots,
+        glob_filter,
+        MAX_FILES_TO_SEARCH,
+        deadline,
+    );
 
     let mut matches: Vec<serde_json::Value> = Vec::new();
     let mut files_with_matches: Vec<String> = Vec::new();
     let mut total_match_count: usize = 0;
+    let mut files_searched: usize = 0;
 
     'file_loop: for file_path in &files {
+        // Reading and scanning is the expensive half; `count` mode has no early
+        // exit at all, so without this the loop always runs every collected file.
+        if cancel.is_cancelled() {
+            stopped_by = stopped_by.or(Some("cancelled"));
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            stopped_by = stopped_by.or(Some("time limit"));
+            break;
+        }
+        files_searched += 1;
+
         let meta = std::fs::metadata(file_path).ok();
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         if size > MAX_FILE_SIZE_BYTES {
@@ -282,64 +311,118 @@ fn search_files(
         "count" => serde_json::json!({
             "output_mode": "count",
             "match_count": total_match_count,
-            "files_searched": files.len(),
+            "files_searched": files_searched,
         }),
         _ => unreachable!(),
     };
 
+    let mut result = result;
+    if let Some(reason) = stopped_by {
+        result["truncated"] = serde_json::Value::Bool(true);
+        result["note"] = serde_json::Value::String(format!(
+            "Search stopped early — hit the {} ({} files / {} entries scanned / {}s / depth {}). \
+             Results are partial. Narrow it with a more specific 'path' or 'glob' rather than \
+             repeating this search.",
+            reason,
+            MAX_FILES_TO_SEARCH,
+            crate::traits::MAX_ENTRIES_SCANNED,
+            crate::traits::MAX_WALK_SECS,
+            crate::traits::MAX_DEPTH
+        ));
+    }
+
     Ok(result)
 }
 
+/// Collect files under `root` to search.
+///
+/// LIVENESS: the previous BFS canonicalized every entry and re-queued it, so a
+/// symlink that resolves back to an ancestor (pnpm `node_modules`, `.venv/lib64`)
+/// re-enqueued the same directory forever. `max_files` did not save it — when the
+/// glob filter matched nothing, `result` never grew and the loop never ended.
+/// The walk now refuses to follow links and is capped on depth, entries and time.
 fn collect_files(
     root: &Path,
     allowed_roots: &[PathBuf],
-    glob_filter: Option<&glob::Pattern>,
+    glob_filter: Option<&crate::traits::MultiGlob>,
     max_files: usize,
-) -> Vec<PathBuf> {
+    deadline: std::time::Instant,
+) -> (Vec<PathBuf>, Option<&'static str>) {
     let mut result = Vec::new();
-    let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(root.to_path_buf());
+    let mut scanned = 0usize;
+    let mut stopped_by: Option<&'static str> = None;
+    // Entries are keyed by their *resolved* path, so a symlink and its target
+    // both living inside the tree would otherwise be searched (and reported)
+    // twice — `~/.bashrc -> ~/dotfiles/bashrc` is the common shape.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    while let Some(dir) = queue.pop_front() {
-        if result.len() >= max_files {
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(crate::traits::MAX_DEPTH)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| !crate::traits::is_cycle_prone(e));
+
+    for entry in walker {
+        scanned += 1;
+        if scanned > crate::traits::MAX_ENTRIES_SCANNED {
+            stopped_by = Some("scan limit");
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        if scanned.is_multiple_of(crate::traits::CHECK_EVERY)
+            && std::time::Instant::now() >= deadline
+        {
+            stopped_by = Some("time limit");
+            break;
+        }
+        let Ok(entry) = entry else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        // Directories are the walker's business, not ours. Anything else — a
+        // regular file OR a symlink to one — is a search candidate; under
+        // `follow_links(false)` a symlinked file reports as `is_symlink()`, not
+        // `is_file()`, so testing `is_file()` here would silently hide the whole
+        // dotfiles layout (`~/.bashrc -> ~/dotfiles/bashrc`).
+        if entry.file_type().is_dir() {
+            continue;
+        }
 
-            // SECURITY: verify every entry stays within an allowed root.
-            let Ok(canonical_path) = path.canonicalize() else {
-                continue;
-            };
-            if !allowed_roots
-                .iter()
-                .any(|root| canonical_path.starts_with(root))
-            {
+        // SECURITY: verify every entry stays within an allowed root after
+        // resolving symlinks. Following the link is safe *here* because
+        // containment is re-checked against the resolved path.
+        let Ok(canonical_path) = entry.path().canonicalize() else {
+            continue;
+        };
+        if !allowed_roots
+            .iter()
+            .any(|root| canonical_path.starts_with(root))
+        {
+            continue;
+        }
+        if !canonical_path.is_file() {
+            continue;
+        }
+        if !seen.insert(canonical_path.clone()) {
+            continue;
+        }
+
+        if let Some(filter) = glob_filter {
+            let file_name = canonical_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !filter.matches(file_name) {
                 continue;
             }
+        }
 
-            if canonical_path.is_dir() {
-                queue.push_back(canonical_path);
-            } else if canonical_path.is_file() {
-                if let Some(filter) = glob_filter {
-                    let file_name = canonical_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-                    if !filter.matches(file_name) {
-                        continue;
-                    }
-                }
-                result.push(canonical_path);
-                if result.len() >= max_files {
-                    break;
-                }
-            }
+        result.push(canonical_path);
+        if result.len() >= max_files {
+            stopped_by = Some("file limit");
+            break;
         }
     }
 
-    result
+    (result, stopped_by)
 }

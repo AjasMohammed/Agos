@@ -4,11 +4,11 @@ risk_class = "readonly_scoped"
 [manifest]
 name        = "hardware-info"
 version     = "1.0.0"
-description = "Return hardware capabilities: CPU, memory, GPU, and disk capacity via the Hardware Abstraction Layer."
+description = "Return hardware capabilities: CPU, memory, GPU, disk capacity, and battery charge/charging state via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "system"
-search_hints = ["what hardware is this", "cpu and memory specs", "system info"]
+search_hints = ["what hardware is this", "cpu and memory specs", "system info", "battery percentage", "battery level", "is it charging", "power state"]
 
 [capabilities_required]
 permissions = ["hardware.system:r"]

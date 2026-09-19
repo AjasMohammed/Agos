@@ -81,10 +81,12 @@ use crate::task_status::TaskStatusTool;
 use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use crate::usb_storage::UsbStorageTool;
+use crate::user_file_list::UserFileListTool;
 use crate::user_file_reader::UserFileReader;
 use crate::web_fetch::WebFetch;
 use crate::web_search::WebSearchTool;
 use crate::webcam::WebcamTool;
+use crate::wifi::WifiTool;
 use agentos_memory::{Embedder, EpisodicStore, ProceduralStore, SemanticStore};
 use agentos_types::*;
 use std::collections::HashMap;
@@ -130,12 +132,13 @@ impl ToolRunner {
                     cache_dir = %model_cache_dir.display(),
                     "Failed to initialize embedder with configured cache dir; falling back to default cache"
                 );
-                Embedder::new().map_err(|e| {
-                    AgentOSError::StorageError(format!(
-                        "Failed to initialize embedding model: {}",
-                        e
-                    ))
-                })?
+                // Never fail tool-runner construction on the embedder; degrade
+                // to FTS5 lexical search like the kernel boot path and like a
+                // build without the `embeddings` feature.
+                Embedder::new().unwrap_or_else(|e| {
+                    warn!(error = %e, "Embedding model unavailable; using zero-vector embedder");
+                    Embedder::noop()
+                })
             }
         });
         let semantic = Arc::new(SemanticStore::open_with_embedder(
@@ -245,6 +248,7 @@ impl ToolRunner {
         self.register(Box::new(RawUsbTool::new()));
         self.register(Box::new(UsbStorageTool::new()));
         self.register(Box::new(WebcamTool::new()));
+        self.register(Box::new(WifiTool::new()));
         // Host-introspection tools — read real host state via HAL (procfs / D-Bus),
         // since shell-exec runs in a sandboxed PID/network namespace.
         self.register(Box::new(NetworkSocketsTool::new()));
@@ -258,6 +262,7 @@ impl ToolRunner {
             Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
         }
         self.register(Box::new(WebSearchTool::new()));
+        self.register(Box::new(UserFileListTool::new()));
         self.register(Box::new(UserFileReader::new()));
         self.register(Box::new(ArtifactWriteTool::new()));
         self.register(Box::new(FileDiff::new()));
@@ -619,9 +624,23 @@ impl ToolRunner {
                     agent = %context.agent_id,
                     "Tool runner permission denied (defense-in-depth)"
                 );
+                // Name the grant that would fix this. The denial is terminal —
+                // no escalation is raised — so without the remedy in the
+                // message the agent's only move is to guess at prose, which is
+                // exactly what it did before this line existed.
+                let flag = match op {
+                    PermissionOp::Read => 'r',
+                    PermissionOp::Write => 'w',
+                    PermissionOp::Execute => 'x',
+                    PermissionOp::Query => 'q',
+                    PermissionOp::Observe => 'o',
+                };
                 return Err(AgentOSError::PermissionDenied {
                     resource: resource.clone(),
-                    operation: format!("{:?}", op),
+                    operation: format!(
+                        "{op:?} — an operator can grant it with: \
+                         agentos perm grant <agent> {resource}:{flag}"
+                    ),
                 });
             }
         }

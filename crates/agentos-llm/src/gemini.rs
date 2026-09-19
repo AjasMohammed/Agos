@@ -630,14 +630,15 @@ impl LLMCore for GeminiCore {
         let mut line_buffer = String::new();
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
 
+        // Carry buffer for a multibyte UTF-8 sequence split across HTTP chunks.
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut stream = res.bytes_stream();
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| AgentOSError::LLMError {
                 provider: "gemini".to_string(),
                 reason: format!("Stream read error: {}", e),
             })?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            line_buffer.push_str(&chunk_str);
+            crate::streaming_helpers::push_utf8_chunk(&mut utf8_pending, &chunk, &mut line_buffer);
 
             if line_buffer.len() > MAX_LINE_BUFFER_BYTES {
                 let err_msg = "SSE line buffer exceeded 1 MB";
@@ -678,10 +679,12 @@ impl LLMCore for GeminiCore {
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
 
-                    // Only stream text from non-thought parts.
-                    if !is_thought {
-                        if let Some(t) = part.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
+                    // Thought parts go out as reasoning, never as answer text.
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            if is_thought {
+                                let _ = tx.send(InferenceEvent::Thinking(t.to_string())).await;
+                            } else {
                                 full_text.push_str(t);
                                 let _ = tx.send(InferenceEvent::Token(t.to_string())).await;
                             }
@@ -1057,6 +1060,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

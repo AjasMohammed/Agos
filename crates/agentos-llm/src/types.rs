@@ -148,6 +148,11 @@ pub struct UncertaintyDeclaration {
 pub enum InferenceEvent {
     /// A chunk of generated text (one or more tokens).
     Token(String),
+    /// A chunk of the model's reasoning (Anthropic extended thinking, OpenAI
+    /// `reasoning_content`, Gemini thought parts, Ollama `thinking`). A separate
+    /// channel from `Token` on purpose: it is the scratchpad, not the answer,
+    /// and must never be concatenated into the reply text.
+    Thinking(String),
     /// A tool call has started (name known, arguments streaming).
     ToolCallStart {
         index: usize,

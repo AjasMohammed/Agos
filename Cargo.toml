@@ -32,10 +32,14 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/agentos/agentos"
+repository = "https://github.com/AjasMohammed/Agos"
+# Distributed as signed binaries and `cargo install --git`, never via crates.io.
+# `publish = false` also lets cargo-deny accept version-less workspace path deps
+# (`bans.allow-wildcard-paths`) while still denying registry wildcards.
+publish = false
 
 [workspace.dependencies]
 # Async runtime
@@ -105,11 +109,11 @@ async-trait = "0.1"
 tokio-util = "0.7"
 rpassword = "7"
 libc = "0.2"
-nix = { version = "0.29", features = ["fs"] }
+nix = { version = "0.29", features = ["fs", "signal"] }
 
 # WASM runtime
-wasmtime = { version = "44.0.2", features = ["async", "cranelift"] }
-wasmtime-wasi = "44.0.2"
+wasmtime = { version = "47.0.4", features = ["async", "cranelift"] }
+wasmtime-wasi = "47.0.4"
 
 # JSON Schema validation
 jsonschema = "0.28"
@@ -160,8 +164,12 @@ codegen-units = 16
 strip = "debuginfo"
 incremental = false  # see [profile.dev] — keeps target/ bounded
 
+# Shipped-artifact profile (release.yml). Thin LTO, not fat: fat LTO over
+# wasmtime + onnxruntime needs more RAM than a GitHub runner (and a 13 GB dev
+# box) reliably has; thin gets most of the size win. Measure with
+# scripts/bench-footprint.sh before changing.
 [profile.dist]
 inherits = "release"
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 strip = "symbols"

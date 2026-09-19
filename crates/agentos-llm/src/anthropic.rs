@@ -957,14 +957,15 @@ impl LLMCore for AnthropicCore {
 
         const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
 
+        // Carry buffer for a multibyte UTF-8 sequence split across HTTP chunks.
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut stream = res.bytes_stream();
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| AgentOSError::LLMError {
                 provider: "anthropic".to_string(),
                 reason: format!("Stream read error: {}", e),
             })?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            line_buffer.push_str(&chunk_str);
+            crate::streaming_helpers::push_utf8_chunk(&mut utf8_pending, &chunk, &mut line_buffer);
 
             if line_buffer.len() > MAX_LINE_BUFFER_BYTES {
                 let err_msg = "SSE line buffer exceeded 1 MB";
@@ -1043,6 +1044,18 @@ impl LLMCore for AnthropicCore {
                             if let Some(text) = delta["text"].as_str() {
                                 full_text.push_str(text);
                                 let _ = tx.send(InferenceEvent::Token(text.to_string())).await;
+                            }
+                        } else if delta_type == "thinking_delta" {
+                            // Extended-thinking scratchpad. Kept out of `full_text`
+                            // so it can never leak into the answer. `signature_delta`
+                            // and `redacted_thinking` blocks are deliberately not
+                            // forwarded — neither carries readable text.
+                            if let Some(thinking) = delta["thinking"].as_str() {
+                                if !thinking.is_empty() {
+                                    let _ = tx
+                                        .send(InferenceEvent::Thinking(thinking.to_string()))
+                                        .await;
+                                }
                             }
                         } else if delta_type == "input_json_delta" {
                             if let Some(partial) = delta["partial_json"].as_str() {
@@ -1340,6 +1353,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            risk_class_by_action: Default::default(),
             usage_hints: None,
             tags: vec![],
         };

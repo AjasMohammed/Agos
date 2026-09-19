@@ -20,6 +20,8 @@ Include:
 
 We aim to acknowledge reports within 48 hours and resolve critical issues within 7 days.
 
+If a report goes unacknowledged for 90 days, the reporter may publish, and a GitHub Security Advisory will be issued for it even if no fix has landed. Unanswered CVEs are how agent frameworks lose trust; we would rather publish an open advisory than sit on one.
+
 ## Security Model
 
 AgentOS is designed with security as a core requirement:
@@ -66,14 +68,19 @@ as documented in the unit file, or sandbox via containers/WASM instead.
 
 ## Verifying Releases
 
-Release binaries are published on GitHub Releases. Once signed releases are in
-place (v1.0.0), each artifact will ship with a detached `minisign` signature and
-the project's public key will be published in the repository (`packaging/signing/`).
+Release binaries are published on GitHub Releases. Each artifact ships with a
+detached `minisign` signature (`.sig`). The public key is committed at
+`packaging/signing/agentos-release.pub` (key id `0692DEA1023C9472`):
+
+```
+RWRylDwCod6SBrcNGIz6wZsrWW5Y9o3I+OT/opftcrq4tK/KhgXvtdKl
+```
+
 To verify a download:
 
 ```bash
-# minisign (https://jedisct1.github.io/minisign/)
-minisign -Vm agentos-<target> -P "$(cat packaging/signing/agentos-release.pub)"
+# minisign (https://jedisct1.github.io/minisign/) or rsign2 (cargo install rsign2)
+minisign -Vm agentos-<target> -x agentos-<target>.sig -P RWRylDwCod6SBrcNGIz6wZsrWW5Y9o3I+OT/opftcrq4tK/KhgXvtdKl
 # and/or check the SHA-256
 sha256sum -c agentos-<target>.sha256
 ```
@@ -83,6 +90,13 @@ SBOM (CycloneDX `bom.json`) is attached to every release for dependency scanning
 
 ## Known Limitations
 
+Honest list of what the current release does **not** defend against. Each item names the operator mitigation. Items move out of this list only when a regression test lands.
+
+- **Single operator only.** REST scopes such as `memory:r` or `agents:r` gate the *verb*, not the *row*: any key holding a scope can read every agent's or task's data by id. Do not issue keys to mutually untrusted users. Multi-tenant isolation is out of scope before v2.
+- **`operator_token` is a shared bearer secret.** Anyone holding it has full control-plane access; there is no per-operator identity or audit attribution. Mitigation: API and health servers bind `127.0.0.1` by default and the API server is off by default (`[api] enabled = false`). Expose only behind a reverse proxy that adds its own authentication. `operator_token` has no runtime rotation endpoint: change it in config and restart. Individual API keys can be revoked (`DELETE /api/v1/keys/{id}`) or rotated via `POST /api/v1/auth/refresh` when `[api] refresh_enabled = true` (off by default).
+- **Vault records carry no additional authenticated data (AAD).** Ciphertexts are AES-256-GCM authenticated, but a record could be swapped for another *valid* record from the same vault by someone with write access to the SQLite file. Mitigation: file permissions on `data/`; an attacker with that access already has the audit log and config.
+- **The prompt-injection scanner is a regex denylist.** It is defense-in-depth, not the boundary. The boundary is `<user_data>` wrapping in the system prompt plus tool-call approval (`RiskClass`) and capability tokens. Expect novel injections to pass the scanner.
+- **Scheduler maps are bounded per agent, not globally.** `max_queued_per_agent` caps queue depth; a very large number of agents can still grow `tasks`/`child_map` until restart.
 - Seccomp sandboxing is Linux-only (gated behind `#[cfg(target_os = "linux")]`); macOS/Windows degrade gracefully without it.
 - WASM tool sandboxing via Wasmtime is not yet enforced for all tools.
 - The HAL device quarantine workflow is partially implemented.

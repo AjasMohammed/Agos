@@ -33,6 +33,13 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Security regression suite (CVE-class tests)
+        run: |
+          bash scripts/check-toolpre-guard.sh
+          cargo test -p agentos-kernel --test security_acceptance_test --test security_ssrf_metadata_blocked \
+            --test security_injected_config_write_requires_approval --test security_file_tools_reject_traversal
+          cargo test -p agentos-api --test service_tests security_
+
       - name: Build release binaries
         run: cargo build --workspace --release
 

@@ -116,16 +116,28 @@ impl AgentInboxWriter {
 
     /// Persist an agent-to-agent message into the message inbox.
     /// Called by the kernel command handler before delivering via the bus.
+    ///
+    /// Returns the row id. Callers MUST reuse it as the bus `AgentMessage.id`:
+    /// the `DirectMessageReceived` event tells the recipient "message_id X" and
+    /// the recipient reads it back with `agent-messages-read X`, which looks up
+    /// THIS table. Two independent UUIDs here meant every DM read as "not found"
+    /// and both agents replied "your message body is missing" to each other in a
+    /// loop.
+    ///
+    /// Best-effort: a failed SQLite write is logged and the returned id then
+    /// resolves to no row; the event still carries a body preview, so the
+    /// recipient can answer without the read.
     pub async fn write_message(
         &self,
         from_agent_id: AgentID,
         from_agent_name: String,
         to_agent_id: AgentID,
         body: String,
-    ) {
+    ) -> AgentMessageEntryID {
         let now = Utc::now();
+        let id = AgentMessageEntryID::new();
         let entry = AgentMessageEntry {
-            id: AgentMessageEntryID::new(),
+            id,
             from_agent_id,
             from_agent_name,
             to_agent_id,
@@ -143,6 +155,7 @@ impl AgentInboxWriter {
                 "AgentMessageInbox write failed"
             );
         }
+        id
     }
 
     async fn write(

@@ -9,6 +9,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct EscalationsQuery {
     pub include_resolved: Option<bool>,
+    /// `list` returns only the card list, for the page's 5s HTMX poll.
+    pub partial: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +51,15 @@ pub async fn list(
     .collect::<Vec<_>>();
 
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
+
+    // The poll re-renders the resolve forms, so it has to carry the CSRF token
+    // too — without it every swapped-in form posts an empty `_csrf` and the
+    // operator's decision is rejected.
+    if query.partial.as_deref() == Some("list") {
+        let ctx = context! { escalations, csrf_token };
+        return super::render(&state.templates, "partials/escalation_cards.html", ctx);
+    }
+
     let ctx = context! {
         page_title => "Escalations",
         breadcrumbs => vec![
