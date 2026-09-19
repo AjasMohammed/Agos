@@ -9,16 +9,24 @@ use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
 use std::collections::HashMap;
 use std::convert::TryInto;
 
-/// Map well-known syscall names to their numeric identifiers on x86_64.
+/// Map well-known syscall names to their numeric identifiers for the target arch.
 /// Falls back to a lookup table because `libc::SYS_*` constants are arch-specific.
+///
+/// Arms marked `cfg(target_arch = "x86_64")` are legacy syscalls that aarch64
+/// simply does not implement — it has only the `*at` forms (`openat`,
+/// `unlinkat`, `faccessat`, `readlinkat`, `newfstatat`, `dup3`, `ppoll`,
+/// `epoll_pwait`), which are listed unconditionally below. On aarch64 those
+/// names resolve to `None`, and the caller skips them with a warning; omitting
+/// a syscall the kernel does not implement from an allowlist is a no-op.
 fn syscall_number(name: &str) -> Option<i64> {
-    // x86_64 syscall numbers (from Linux kernel asm/unistd_64.h)
     let num = match name {
         "read" => libc::SYS_read,
         "write" => libc::SYS_write,
         "close" => libc::SYS_close,
         "fstat" => libc::SYS_fstat,
+        #[cfg(target_arch = "x86_64")]
         "stat" => libc::SYS_stat,
+        #[cfg(target_arch = "x86_64")]
         "lstat" => libc::SYS_lstat,
         "mmap" => libc::SYS_mmap,
         "mprotect" => libc::SYS_mprotect,
@@ -27,6 +35,7 @@ fn syscall_number(name: &str) -> Option<i64> {
         "rt_sigaction" => libc::SYS_rt_sigaction,
         "rt_sigprocmask" => libc::SYS_rt_sigprocmask,
         "exit_group" => libc::SYS_exit_group,
+        #[cfg(target_arch = "x86_64")]
         "arch_prctl" => libc::SYS_arch_prctl,
         "clock_gettime" => libc::SYS_clock_gettime,
         "nanosleep" => libc::SYS_nanosleep,
@@ -59,22 +68,28 @@ fn syscall_number(name: &str) -> Option<i64> {
         "getsockopt" => libc::SYS_getsockopt,
         "getpeername" => libc::SYS_getpeername,
         "getsockname" => libc::SYS_getsockname,
+        #[cfg(target_arch = "x86_64")]
         "poll" => libc::SYS_poll,
         "epoll_create1" => libc::SYS_epoll_create1,
         "epoll_ctl" => libc::SYS_epoll_ctl,
+        #[cfg(target_arch = "x86_64")]
         "epoll_wait" => libc::SYS_epoll_wait,
         "shutdown" => libc::SYS_shutdown,
         "sendmsg" => libc::SYS_sendmsg,
         "recvmsg" => libc::SYS_recvmsg,
         // Filesystem
         "openat" => libc::SYS_openat,
+        #[cfg(target_arch = "x86_64")]
         "unlink" => libc::SYS_unlink,
         "unlinkat" => libc::SYS_unlinkat,
+        #[cfg(target_arch = "x86_64")]
         "rename" => libc::SYS_rename,
         "renameat" => libc::SYS_renameat,
         "renameat2" => libc::SYS_renameat2,
+        #[cfg(target_arch = "x86_64")]
         "mkdir" => libc::SYS_mkdir,
         "mkdirat" => libc::SYS_mkdirat,
+        #[cfg(target_arch = "x86_64")]
         "rmdir" => libc::SYS_rmdir,
         "ftruncate" => libc::SYS_ftruncate,
         "fallocate" => libc::SYS_fallocate,
@@ -82,13 +97,16 @@ fn syscall_number(name: &str) -> Option<i64> {
         "fsync" => libc::SYS_fsync,
         "lseek" => libc::SYS_lseek,
         "newfstatat" => libc::SYS_newfstatat,
+        #[cfg(target_arch = "x86_64")]
         "access" => libc::SYS_access,
         "faccessat" => libc::SYS_faccessat,
         "faccessat2" => libc::SYS_faccessat2,
         "getcwd" => libc::SYS_getcwd,
+        #[cfg(target_arch = "x86_64")]
         "readlink" => libc::SYS_readlink,
         "readlinkat" => libc::SYS_readlinkat,
         "dup" => libc::SYS_dup,
+        #[cfg(target_arch = "x86_64")]
         "dup2" => libc::SYS_dup2,
         "dup3" => libc::SYS_dup3,
         "fcntl" => libc::SYS_fcntl,
