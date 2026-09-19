@@ -43,7 +43,7 @@ jobs:
       - name: External link check (lychee)
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress --max-concurrency 4 'docs/book/src/**/*.md'
+          args: --no-progress --exclude-loopback --max-concurrency 4 'docs/book/src/**/*.md'
           fail: true
       - uses: actions/upload-pages-artifact@v3
         with:
