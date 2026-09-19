@@ -2,6 +2,8 @@
 name = "agentos-api"
 version.workspace = true
 edition = "2021"
+license.workspace = true
+publish.workspace = true
 autobins = false
 
 # Explicit kebab-case name so `cargo run -p agentos-api --bin gen-openapi` works

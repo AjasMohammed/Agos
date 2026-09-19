@@ -36,6 +36,10 @@ version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/AjasMohammed/Agos"
+# Distributed as signed binaries and `cargo install --git`, never via crates.io.
+# `publish = false` also lets cargo-deny accept version-less workspace path deps
+# (`bans.allow-wildcard-paths`) while still denying registry wildcards.
+publish = false
 
 [workspace.dependencies]
 # Async runtime

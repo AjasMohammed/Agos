@@ -2,6 +2,7 @@
 name = "agentos-registry"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 license.workspace = true
 description = "AgentOS tool marketplace registry — HTTP server for publishing, searching, and downloading community tools"
 
