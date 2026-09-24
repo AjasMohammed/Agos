@@ -17,6 +17,84 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+/// How a Gemini model takes its reasoning dial, when it takes one at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiThinking {
+    /// Gemini 3 and later: `thinkingConfig.thinkingLevel`, a rung.
+    Level,
+    /// Gemini 2.5: `thinkingConfig.thinkingBudget`, a token count, capped at
+    /// the variant's own ceiling.
+    Budget { ceiling: u32 },
+}
+
+/// Thinking-budget ceiling for 2.5 Pro. Over-range budgets are rejected.
+const GEMINI_PRO_MAX_THINKING_BUDGET: u32 = 32_768;
+
+/// Thinking-budget ceiling for every other 2.5 variant.
+const GEMINI_FLASH_MAX_THINKING_BUDGET: u32 = 24_576;
+
+/// Which reasoning dial `model` takes, or `None` when it takes none.
+///
+/// Gemini 400s on `thinkingConfig` sent to a model without a thinking mode,
+/// so an unrecognised id deliberately gets nothing: a missing dial costs
+/// reasoning depth, a wrong one costs the whole turn.
+fn gemini_thinking(model: &str) -> Option<GeminiThinking> {
+    // ponytail: name match, not a version parser — Gemini ids carry dotted
+    // versions (`gemini-2.5-pro`) that a segment parser chokes on, and the
+    // families that reason are a short list.
+
+    // Image and speech variants carry the family version in their id but take
+    // no `thinkingConfig`.
+    if model.contains("-image") || model.contains("-tts") {
+        return None;
+    }
+    if model.contains("gemini-3") {
+        Some(GeminiThinking::Level)
+    } else if model.contains("gemini-2.5") {
+        Some(GeminiThinking::Budget {
+            ceiling: if model.contains("pro") {
+                GEMINI_PRO_MAX_THINKING_BUDGET
+            } else {
+                GEMINI_FLASH_MAX_THINKING_BUDGET
+            },
+        })
+    } else {
+        None
+    }
+}
+
+/// Gemini 3's `thinkingLevel`, which has two rungs where the task definition
+/// has five. An unrecognised rung sends nothing rather than guessing upward.
+fn gemini_thinking_level(effort: &str) -> Option<&'static str> {
+    match effort {
+        "low" => Some("low"),
+        "medium" | "high" | "xhigh" | "max" => Some("high"),
+        other => {
+            tracing::warn!(rung = %other, "unrecognised thinking effort; sending no thinkingConfig");
+            None
+        }
+    }
+}
+
+/// The `generationConfig.thinkingConfig` value for this request, or `None`
+/// when the model takes no dial or thinking is off.
+///
+/// `includeThoughts` makes the model return its reasoning as separate parts,
+/// which `parse_gemini_parts` already keeps out of the answer text and the
+/// streaming path already forwards as reasoning rather than content.
+fn gemini_thinking_config(model: &str, options: &InferenceOptions) -> Option<Value> {
+    let mut dial = match gemini_thinking(model)? {
+        GeminiThinking::Level => {
+            json!({ "thinkingLevel": gemini_thinking_level(options.thinking_effort.as_deref()?)? })
+        }
+        GeminiThinking::Budget { ceiling } => {
+            json!({ "thinkingBudget": options.thinking_budget_tokens?.min(ceiling) })
+        }
+    };
+    dial["includeThoughts"] = json!(true);
+    Some(dial)
+}
+
 /// Gemini API adapter for Google models.
 pub struct GeminiCore {
     client: Client,
@@ -34,22 +112,10 @@ pub struct GeminiCore {
 
 impl GeminiCore {
     pub fn new(api_key: SecretString, model: String) -> Self {
-        let table = default_pricing_table();
-        let pricing = table
-            .iter()
-            .find(|p| p.provider == "gemini" && p.model == model)
-            .or_else(|| {
-                table
-                    .iter()
-                    .find(|p| p.provider == "gemini" && p.model == "*")
-            })
-            .cloned()
-            .unwrap_or(ModelPricing {
-                provider: "gemini".to_string(),
-                model: model.clone(),
-                input_per_1k: 0.0,
-                output_per_1k: 0.0,
-            });
+        let pricing = crate::lookup_pricing(&default_pricing_table(), "gemini", &model);
+        // Per model, not per adapter: 2.0 and the image/TTS variants reject
+        // `thinkingConfig` outright.
+        let thinking = gemini_thinking(&model).is_some();
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -69,7 +135,7 @@ impl GeminiCore {
                 supports_streaming: true,
                 supports_parallel_tools: true,
                 supports_prompt_caching: false,
-                supports_thinking: true,
+                supports_thinking: thinking,
                 supports_structured_output: true,
             },
             pricing,
@@ -105,7 +171,7 @@ impl GeminiCore {
         // next non-tool-result entry arrives (or at end of loop).
         let mut pending_tool_response_parts: Vec<Value> = Vec::new();
 
-        for entry in context.active_entries() {
+        for entry in context.wire_entries().iter().map(|e| &**e) {
             // Flush pending native tool responses on any non-tool-result, non-system entry.
             if !matches!(entry.role, ContextRole::ToolResult | ContextRole::System)
                 && !pending_tool_response_parts.is_empty()
@@ -404,6 +470,9 @@ impl LLMCore for GeminiCore {
         }
         if options.json_mode {
             gen_config.insert("responseMimeType".to_string(), json!("application/json"));
+        }
+        if let Some(dial) = gemini_thinking_config(&self.model, options) {
+            gen_config.insert("thinkingConfig".to_string(), dial);
         }
         if !gen_config.is_empty() {
             body["generationConfig"] = Value::Object(gen_config);
@@ -871,6 +940,7 @@ mod tests {
     #[test]
     fn test_format_contents_native_tool_result() {
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("call_1", "file-reader")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -896,9 +966,9 @@ mod tests {
         let adapter = GeminiCore::new(SecretString::new("fake".into()), "gemini".into());
         let contents = adapter.format_contents(&ctx);
 
-        assert_eq!(contents.len(), 1);
-        assert_eq!(contents[0]["role"], "user");
-        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[1]["role"], "user");
+        let parts = contents[1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
         let fr = &parts[0]["functionResponse"];
         assert_eq!(fr["name"], "file-reader");
@@ -909,6 +979,7 @@ mod tests {
     fn test_format_contents_native_tool_result_plain_text() {
         // Non-JSON content wraps in {"result": "..."}
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("call_2", "shell")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -934,7 +1005,7 @@ mod tests {
         let adapter = GeminiCore::new(SecretString::new("fake".into()), "gemini".into());
         let contents = adapter.format_contents(&ctx);
 
-        let fr = &contents[0]["parts"][0]["functionResponse"];
+        let fr = &contents[1]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "shell");
         assert_eq!(fr["response"]["result"], "plain text result");
     }
@@ -1113,8 +1184,8 @@ mod tests {
                 tokens_estimated: None,
                 tool_call_id: None,
                 assistant_tool_calls: Some(serde_json::json!([
-                    {"tool_name": "file-reader", "payload": {"path": "/a"}},
-                    {"tool_name": "file-reader", "payload": {"path": "/b"}},
+                    {"id": "call_0", "tool_name": "file-reader", "payload": {"path": "/a"}},
+                    {"id": "call_1", "tool_name": "file-reader", "payload": {"path": "/b"}},
                 ])),
             }),
             timestamp: chrono::Utc::now(),
@@ -1183,5 +1254,89 @@ mod tests {
             response_parts[1]["functionResponse"]["response"]["contents"],
             "B"
         );
+    }
+
+    /// `thinkingConfig` is a 400 on a model with no thinking mode, and the two
+    /// shapes are not interchangeable, so the gate must be exact and must say
+    /// "nothing" for ids it does not recognise.
+    #[test]
+    fn thinking_shape_is_per_family_and_absent_for_unknown_ids() {
+        assert_eq!(
+            gemini_thinking("gemini-3-pro-preview"),
+            Some(GeminiThinking::Level)
+        );
+        assert_eq!(
+            gemini_thinking("gemini-2.5-flash"),
+            Some(GeminiThinking::Budget {
+                ceiling: GEMINI_FLASH_MAX_THINKING_BUDGET
+            })
+        );
+        assert_eq!(
+            gemini_thinking("gemini-2.5-pro"),
+            Some(GeminiThinking::Budget {
+                ceiling: GEMINI_PRO_MAX_THINKING_BUDGET
+            })
+        );
+        assert_eq!(gemini_thinking("gemini-2.0-flash"), None);
+        assert_eq!(gemini_thinking("gemini-1.5-pro"), None);
+        assert_eq!(gemini_thinking("some-custom-alias"), None);
+        // Carry a thinking family's version but take no thinkingConfig.
+        assert_eq!(gemini_thinking("gemini-2.5-flash-image"), None);
+        assert_eq!(gemini_thinking("gemini-2.5-flash-preview-tts"), None);
+    }
+
+    /// The `max` thinking level asks for 100 000 tokens; 2.5 Flash rejects
+    /// anything over 24 576 and Pro anything over 32 768, so the budget has to
+    /// clamp to the ceiling of the variant actually named.
+    #[test]
+    fn thinking_budget_clamps_to_the_variants_own_ceiling() {
+        let opts = |budget: u32| InferenceOptions {
+            thinking_budget_tokens: Some(budget),
+            thinking_effort: Some("max".to_string()),
+            ..Default::default()
+        };
+
+        let flash = gemini_thinking_config("gemini-2.5-flash", &opts(100_000)).unwrap();
+        assert_eq!(flash["thinkingBudget"], GEMINI_FLASH_MAX_THINKING_BUDGET);
+        assert_eq!(flash["includeThoughts"], true);
+
+        let pro = gemini_thinking_config("gemini-2.5-pro", &opts(100_000)).unwrap();
+        assert_eq!(pro["thinkingBudget"], GEMINI_PRO_MAX_THINKING_BUDGET);
+
+        // Under the ceiling the budget passes through untouched.
+        let low = gemini_thinking_config("gemini-2.5-flash", &opts(1_024)).unwrap();
+        assert_eq!(low["thinkingBudget"], 1_024);
+    }
+
+    /// The two shapes are not interchangeable — a budget sent to Gemini 3 or a
+    /// level sent to 2.5 is a 400 — and thinking-off must send neither.
+    #[test]
+    fn thinking_config_shape_follows_the_family_and_is_absent_when_off() {
+        let all_rungs = |effort: &str| InferenceOptions {
+            thinking_budget_tokens: Some(8_192),
+            thinking_effort: Some(effort.to_string()),
+            ..Default::default()
+        };
+
+        let three = gemini_thinking_config("gemini-3-pro-preview", &all_rungs("max")).unwrap();
+        assert_eq!(three["thinkingLevel"], "high");
+        assert!(three.get("thinkingBudget").is_none());
+        assert_eq!(
+            gemini_thinking_config("gemini-3-pro-preview", &all_rungs("low")).unwrap()
+                ["thinkingLevel"],
+            "low"
+        );
+
+        let two_five = gemini_thinking_config("gemini-2.5-flash", &all_rungs("max")).unwrap();
+        assert!(two_five.get("thinkingLevel").is_none());
+        assert_eq!(two_five["thinkingBudget"], 8_192);
+
+        // Thinking off: both fields are `None`, so nothing goes out.
+        assert!(gemini_thinking_config("gemini-2.5-flash", &InferenceOptions::default()).is_none());
+        assert!(
+            gemini_thinking_config("gemini-3-pro-preview", &InferenceOptions::default()).is_none()
+        );
+        // Unrecognised rung on the level path sends nothing rather than `high`.
+        assert!(gemini_thinking_config("gemini-3-pro-preview", &all_rungs("minimal")).is_none());
     }
 }

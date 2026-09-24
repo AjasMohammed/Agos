@@ -150,7 +150,7 @@ async fn scenario_a_reject_unsigned_message() {
         expires_at: Some(now + chrono::Duration::seconds(60)),
     };
 
-    let result = bus.send_direct(unsigned_msg, 0).await;
+    let result = bus.send_direct(unsigned_msg, 0, None).await;
     assert!(result.is_err(), "Unsigned A2A message MUST be rejected");
 
     let err = result.unwrap_err().to_string();
@@ -187,7 +187,7 @@ async fn scenario_b_reject_forged_signature() {
         expires_at: Some(now + chrono::Duration::seconds(60)),
     };
 
-    let result = bus.send_direct(forged_msg, 0).await;
+    let result = bus.send_direct(forged_msg, 0, None).await;
     assert!(result.is_err(), "Forged A2A signature MUST be rejected");
 
     let err = result.unwrap_err().to_string();

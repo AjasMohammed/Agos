@@ -41,6 +41,17 @@ pub trait McpToolExecutor: Send + Sync {
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String>;
 
+    /// `Some(question)` when the human behind the MCP client must approve this
+    /// call before it runs. The server asks over `elicitation/create`
+    /// (approve / always approve / deny) and refuses the call when the client
+    /// or transport cannot carry the question.
+    async fn approval_prompt(&self, _name: &str, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// The human answered "always approve" to [`Self::approval_prompt`].
+    async fn approve_always(&self, _name: &str, _args: &serde_json::Value) {}
+
     /// Return all available resources as MCP resource definitions.
     async fn list_resources(&self) -> Vec<McpResourceDef> {
         vec![] // default: no resources
@@ -109,20 +120,28 @@ impl McpAuthValidator for NoAuth {
 pub struct McpServer {
     executor: Arc<dyn McpToolExecutor>,
     auth: Arc<dyn McpAuthValidator>,
+    /// The client advertised the `elicitation` capability at `initialize`.
+    client_elicits: std::sync::atomic::AtomicBool,
 }
+
+/// Answers offered on an approval elicitation.
+const APPROVE: &str = "approve";
+const APPROVE_ALWAYS: &str = "always approve";
+const DENY: &str = "deny";
 
 impl McpServer {
     /// Create a server with no authentication (for stdio transport).
     pub fn new(executor: Arc<dyn McpToolExecutor>) -> Self {
-        Self {
-            executor,
-            auth: Arc::new(NoAuth),
-        }
+        Self::with_auth(executor, Arc::new(NoAuth))
     }
 
     /// Create a server with a token authenticator (for HTTP transport).
     pub fn with_auth(executor: Arc<dyn McpToolExecutor>, auth: Arc<dyn McpAuthValidator>) -> Self {
-        Self { executor, auth }
+        Self {
+            executor,
+            auth,
+            client_elicits: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Validate a bearer token. Returns an error response if invalid (boxed: the
@@ -151,36 +170,48 @@ impl McpServer {
     /// Run the MCP server loop, reading JSON-RPC requests from stdin and
     /// writing responses to stdout.  Runs until stdin is closed (EOF).
     pub async fn serve_stdio(&self) -> anyhow::Result<()> {
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        let mut reader = BufReader::new(stdin);
-        let mut writer = tokio::io::BufWriter::new(stdout);
+        self.serve(
+            BufReader::new(tokio::io::stdin()),
+            tokio::io::BufWriter::new(tokio::io::stdout()),
+        )
+        .await
+    }
 
+    /// The line-delimited JSON-RPC loop behind [`Self::serve_stdio`].
+    pub async fn serve(
+        &self,
+        mut reader: impl tokio::io::AsyncBufRead + Unpin,
+        mut writer: impl tokio::io::AsyncWrite + Unpin,
+    ) -> anyhow::Result<()> {
+        // Requests that arrived while an approval question was outstanding.
+        let mut backlog: std::collections::VecDeque<serde_json::Value> = Default::default();
         loop {
-            let mut line = String::new();
-            let n = read_line_limited(&mut reader, &mut line, MAX_MCP_RESPONSE_BYTES).await?;
-            if n == 0 {
-                break; // EOF
-            }
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            // Parse once as a generic JSON value. On failure, send a parse-error response.
-            let value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = JsonRpcResponse::err(
-                        serde_json::Value::Null,
-                        -32700,
-                        format!("Parse error: {}", e),
-                    );
-                    let mut s = serde_json::to_string(&resp)?;
-                    s.push('\n');
-                    writer.write_all(s.as_bytes()).await?;
-                    writer.flush().await?;
-                    continue;
+            let value = match backlog.pop_front() {
+                Some(v) => v,
+                None => {
+                    let mut line = String::new();
+                    let n =
+                        read_line_limited(&mut reader, &mut line, MAX_MCP_RESPONSE_BYTES).await?;
+                    if n == 0 {
+                        break; // EOF
+                    }
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    // Parse once as a generic JSON value. On failure, send a parse-error response.
+                    match serde_json::from_str::<serde_json::Value>(line) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let resp = JsonRpcResponse::err(
+                                serde_json::Value::Null,
+                                -32700,
+                                format!("Parse error: {}", e),
+                            );
+                            write_line(&mut writer, &resp).await?;
+                            continue;
+                        }
+                    }
                 }
             };
 
@@ -191,6 +222,10 @@ impl McpServer {
 
             // Convert the already-parsed value into a typed request (no second parse).
             let resp = match serde_json::from_value::<JsonRpcRequest>(value) {
+                Ok(req) if req.method == "tools/call" => {
+                    self.call_tool_asking(req, &mut reader, &mut writer, &mut backlog)
+                        .await?
+                }
                 Ok(req) => self.handle_request(req).await,
                 Err(e) => JsonRpcResponse::err(
                     serde_json::Value::Null,
@@ -198,14 +233,107 @@ impl McpServer {
                     format!("Parse error: {}", e),
                 ),
             };
-
-            let mut s = serde_json::to_string(&resp)?;
-            s.push('\n');
-            writer.write_all(s.as_bytes()).await?;
-            writer.flush().await?;
+            write_line(&mut writer, &resp).await?;
         }
 
         Ok(())
+    }
+
+    /// `tools/call` on a duplex transport: a call the executor wants approved
+    /// is put to the human over `elicitation/create` first.
+    async fn call_tool_asking(
+        &self,
+        req: JsonRpcRequest,
+        reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+        backlog: &mut std::collections::VecDeque<serde_json::Value>,
+    ) -> anyhow::Result<JsonRpcResponse> {
+        let (name, args) = extract_tool_call_params(req.params.as_ref());
+        if name.is_empty() {
+            return Ok(self.handle_request(req).await);
+        }
+        let Some(prompt) = self.executor.approval_prompt(&name, &args).await else {
+            return Ok(self.handle_request(req).await);
+        };
+        if !self
+            .client_elicits
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(self.handle_request(req).await); // refuses: nobody to ask
+        }
+
+        let ask_id = format!("agentos-approval-{}", uuid::Uuid::new_v4());
+        let ask = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": ask_id,
+            "method": "elicitation/create",
+            "params": {
+                "message": prompt,
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "title": "Decision",
+                            "enum": [APPROVE, APPROVE_ALWAYS, DENY],
+                        }
+                    },
+                    "required": ["decision"],
+                },
+            },
+        });
+        write_line(writer, &ask).await?;
+
+        // The server is sequential, so the answer is read right here; anything
+        // else the client sends meanwhile is served after this call.
+        let answer = loop {
+            let mut line = String::new();
+            if read_line_limited(reader, &mut line, MAX_MCP_RESPONSE_BYTES).await? == 0 {
+                break serde_json::Value::Null; // EOF: treated as deny
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            if v.get("method").is_some() {
+                backlog.push_back(v);
+            } else if v.get("id").and_then(|i| i.as_str()) == Some(ask_id.as_str()) {
+                break v;
+            }
+        };
+        let result = &answer["result"];
+        let decision = match result["action"].as_str() {
+            Some("accept") => result["content"]["decision"].as_str().unwrap_or(DENY),
+            _ => DENY,
+        };
+        match decision {
+            APPROVE => {}
+            APPROVE_ALWAYS => self.executor.approve_always(&name, &args).await,
+            _ => {
+                return Ok(JsonRpcResponse::err(
+                    req.id,
+                    -32001,
+                    format!("Tool call '{name}' was denied by the operator"),
+                ))
+            }
+        }
+        Ok(self.run_tool(req.id, &name, args).await)
+    }
+
+    async fn run_tool(
+        &self,
+        id: serde_json::Value,
+        name: &str,
+        args: serde_json::Value,
+    ) -> JsonRpcResponse {
+        match self.executor.call_tool(name, args).await {
+            Ok(result) => JsonRpcResponse::ok(
+                id,
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": result.to_string() }]
+                }),
+            ),
+            Err(e) => JsonRpcResponse::err(id, -32603, e),
+        }
     }
 
     /// Dispatch a single JSON-RPC request and produce a response.
@@ -215,22 +343,40 @@ impl McpServer {
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         match req.method.as_str() {
             // ── Initialize handshake ────────────────────────────────────
-            "initialize" => JsonRpcResponse::ok(
-                req.id,
-                serde_json::json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {},
-                        "sampling": {}
-                    },
-                    "serverInfo": {
-                        "name": "agentos",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            ),
+            "initialize" => {
+                let params = req.params.as_ref();
+                let elicits = params
+                    .and_then(|p| p.get("capabilities"))
+                    .and_then(|c| c.get("elicitation"))
+                    .is_some();
+                self.client_elicits
+                    .store(elicits, std::sync::atomic::Ordering::Relaxed);
+                // Elicitation only exists from 2025-06-18; agree to it when the
+                // client offers it, otherwise stay on the baseline revision.
+                let version = match params
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some("2025-06-18") => "2025-06-18",
+                    _ => "2024-11-05",
+                };
+                JsonRpcResponse::ok(
+                    req.id,
+                    serde_json::json!({
+                        "protocolVersion": version,
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {},
+                            "prompts": {},
+                            "sampling": {}
+                        },
+                        "serverInfo": {
+                            "name": "agentos",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }),
+                )
+            }
 
             // ── Tools ───────────────────────────────────────────────────
             "tools/list" => {
@@ -243,15 +389,19 @@ impl McpServer {
                 if name.is_empty() {
                     return JsonRpcResponse::err(req.id, -32602, "Missing 'name' in params");
                 }
-                match self.executor.call_tool(&name, args).await {
-                    Ok(result) => JsonRpcResponse::ok(
+                // Reached without an approval round-trip (HTTP, or a client with
+                // no `elicitation` support): fail closed.
+                if self.executor.approval_prompt(&name, &args).await.is_some() {
+                    return JsonRpcResponse::err(
                         req.id,
-                        serde_json::json!({
-                            "content": [{ "type": "text", "text": result.to_string() }]
-                        }),
-                    ),
-                    Err(e) => JsonRpcResponse::err(req.id, -32603, e),
+                        -32001,
+                        format!(
+                            "Tool call '{name}' needs operator approval, and this MCP client \
+                             cannot be asked (no `elicitation` support on this connection)"
+                        ),
+                    );
                 }
+                self.run_tool(req.id, &name, args).await
             }
 
             // ── Resources ───────────────────────────────────────────────
@@ -346,6 +496,17 @@ impl McpServer {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+async fn write_line(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    msg: &impl serde::Serialize,
+) -> anyhow::Result<()> {
+    let mut s = serde_json::to_string(msg)?;
+    s.push('\n');
+    writer.write_all(s.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
 
 fn extract_tool_call_params(params: Option<&serde_json::Value>) -> (String, serde_json::Value) {
     match params {
@@ -636,6 +797,125 @@ mod tests {
     }
 
     // ── Unknown method ──────────────────────────────────────────────────
+    /// Executor whose every call needs approval; records "always" answers.
+    struct GatedExecutor {
+        always: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl McpToolExecutor for GatedExecutor {
+        async fn list_tools(&self) -> Vec<McpToolDef> {
+            vec![]
+        }
+        async fn call_tool(
+            &self,
+            name: &str,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "ran": name }))
+        }
+        async fn approval_prompt(&self, name: &str, _args: &serde_json::Value) -> Option<String> {
+            (!self.always.lock().unwrap().iter().any(|n| n == name))
+                .then(|| format!("Allow '{name}'?"))
+        }
+        async fn approve_always(&self, name: &str, _args: &serde_json::Value) {
+            self.always.lock().unwrap().push(name.to_string());
+        }
+    }
+
+    /// Drive `serve` over an in-memory pipe: send `lines`, answer every
+    /// elicitation with `decision`, return the `tools/call` responses.
+    async fn run_gated(
+        elicits: bool,
+        decision: Option<&str>,
+        calls: usize,
+    ) -> Vec<serde_json::Value> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let (srv_r, srv_w) = tokio::io::split(server_side);
+        let server = McpServer::new(Arc::new(GatedExecutor {
+            always: Default::default(),
+        }));
+        let task = tokio::spawn(async move {
+            server.serve(BufReader::new(srv_r), srv_w).await.unwrap();
+        });
+        let (cli_r, mut cli_w) = tokio::io::split(client);
+        let mut lines = BufReader::new(cli_r).lines();
+        let caps = if elicits {
+            serde_json::json!({ "elicitation": {} })
+        } else {
+            serde_json::json!({})
+        };
+        let mut send = vec![serde_json::json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": caps }
+        })];
+        for i in 0..calls {
+            send.push(serde_json::json!({
+                "jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
+                "params": { "name": "shell-exec", "arguments": {} }
+            }));
+        }
+        for msg in send {
+            cli_w
+                .write_all(format!("{msg}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        while out.len() < calls {
+            let v: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            if v["method"] == "elicitation/create" {
+                let reply = match decision {
+                    Some(d) => {
+                        serde_json::json!({ "action": "accept", "content": { "decision": d } })
+                    }
+                    None => serde_json::json!({ "action": "decline" }),
+                };
+                let msg = serde_json::json!({ "jsonrpc": "2.0", "id": v["id"], "result": reply });
+                cli_w
+                    .write_all(format!("{msg}\n").as_bytes())
+                    .await
+                    .unwrap();
+            } else if v["id"] != 0 {
+                out.push(v);
+            }
+        }
+        drop(cli_w);
+        task.await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn gated_tool_call_fails_closed_without_elicitation() {
+        let out = run_gated(false, Some(APPROVE), 1).await;
+        assert_eq!(out[0]["error"]["code"], -32001);
+    }
+
+    #[tokio::test]
+    async fn gated_tool_call_follows_the_operator_decision() {
+        assert!(run_gated(true, Some(APPROVE), 1).await[0]["result"].is_object());
+        assert_eq!(
+            run_gated(true, Some(DENY), 1).await[0]["error"]["code"],
+            -32001
+        );
+        assert_eq!(run_gated(true, None, 1).await[0]["error"]["code"], -32001);
+    }
+
+    /// "always approve" is asked once: the second call runs with no question,
+    /// which `run_gated` proves by both calls succeeding off one decision while
+    /// the queued second request survives the approval round-trip (backlog).
+    #[tokio::test]
+    async fn always_approve_is_remembered_and_queued_requests_survive() {
+        let out = run_gated(true, Some(APPROVE_ALWAYS), 2).await;
+        assert!(out[0]["result"].is_object() && out[1]["result"].is_object());
+        assert_eq!(
+            (out[0]["id"].clone(), out[1]["id"].clone()),
+            (1.into(), 2.into())
+        );
+    }
+
     #[tokio::test]
     async fn test_unknown_method_returns_method_not_found() {
         let server = McpServer::new(MockExecutor::empty());

@@ -238,4 +238,111 @@ impl Kernel {
         }
         Ok(())
     }
+    // ── Notification routing matrix ─────────────────────────────────────────
+
+    /// Read the routing matrix: axes, current rules, and panel presence.
+    pub(crate) async fn cmd_get_notification_routes(&self) -> KernelResponse {
+        let rules: Vec<serde_json::Value> = self
+            .notification_routes
+            .rules()
+            .into_iter()
+            .map(|(event, channel, mode)| {
+                serde_json::json!({
+                    "event": event.as_str(),
+                    "channel": channel,
+                    "mode": mode.as_str(),
+                })
+            })
+            .collect();
+        let channels: Vec<serde_json::Value> = self
+            .notification_router
+            .adapter_targets()
+            .await
+            .into_iter()
+            .map(|(key, kind, available)| {
+                serde_json::json!({ "key": key, "kind": kind, "available": available })
+            })
+            .collect();
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "events": agentos_types::NotificationEvent::ALL
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>(),
+                "channels": channels,
+                "rules": rules,
+                "panel_connected": self.notification_routes.panel_connected(),
+            })),
+        }
+    }
+
+    /// Set one cell. Unknown event/mode strings are rejected rather than
+    /// silently dropped — a typo must not look like a saved rule.
+    pub(crate) async fn cmd_set_notification_route(
+        &self,
+        event: String,
+        channel: String,
+        mode: String,
+    ) -> KernelResponse {
+        let Some(parsed_event) = agentos_types::NotificationEvent::parse(&event) else {
+            return KernelResponse::Error {
+                message: format!(
+                    "Unknown notification event '{event}' — expected one of: {}",
+                    agentos_types::NotificationEvent::ALL
+                        .iter()
+                        .map(|e| e.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+        };
+        let Some(parsed_mode) = crate::notification_routes::RouteMode::parse(&mode) else {
+            return KernelResponse::Error {
+                message: format!(
+                    "Unknown route mode '{mode}' — expected always, never, or when_away"
+                ),
+            };
+        };
+        if channel.trim().is_empty() {
+            return KernelResponse::Error {
+                message: "Channel must not be empty".to_string(),
+            };
+        }
+
+        match self
+            .notification_routes
+            .set(parsed_event, channel.trim(), parsed_mode)
+            .await
+        {
+            Ok(()) => {
+                self.audit_log(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::KernelConfigChanged,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "source": "notification_routes",
+                        "event": parsed_event.as_str(),
+                        "channel": channel.trim(),
+                        "mode": parsed_mode.as_str(),
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({
+                        "event": parsed_event.as_str(),
+                        "channel": channel.trim(),
+                        "mode": parsed_mode.as_str(),
+                    })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to save notification route: {e}"),
+            },
+        }
+    }
 }

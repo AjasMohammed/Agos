@@ -1,0 +1,52 @@
+tags = ["write"]
+risk_class = "write_agent_state"
+
+[manifest]
+name        = "file-publish"
+version     = "1.0.0"
+description = """
+Show the user a FILE you have on disk — an image, audio clip, video, PDF or \
+any other file you downloaded or generated. The user cannot see your \
+workspace; this is how a file reaches them. Returns a 'markdown' snippet: put \
+it in your reply and the chat shows an inline preview (picture, audio/video \
+player, PDF). For a document you are WRITING (report, deck, html page) use \
+artifact-write instead. Check 'mime' and 'warning' in the result: they tell \
+you what the bytes really are."""
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "artifact"
+search_hints = ["show the user an image", "preview a downloaded file in chat", "share audio or video with the user", "let the user see or download a file"]
+
+[capabilities_required]
+permissions = ["fs.artifacts:w", "fs.user_data:r"]
+
+[capabilities_provided]
+outputs = ["file_id", "url", "mime", "markdown"]
+
+[intent_schema]
+input  = "FilePublishIntent"
+output = "FilePublishResult"
+
+[payload_schema]
+type = "object"
+required = ["path"]
+
+[payload_schema.properties.path]
+type        = "string"
+description = "Path of the file to show. Relative paths resolve inside your own workspace; absolute paths must be inside a granted folder."
+
+[payload_schema.properties.title]
+type        = "string"
+description = "Optional human title (≤120 chars). Defaults to the file name."
+
+[[examples]]
+description = "Show the user a picture you just downloaded"
+payload = { path = "test_image.jpg", title = "Test image" }
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

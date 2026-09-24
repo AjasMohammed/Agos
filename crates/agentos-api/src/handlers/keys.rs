@@ -65,6 +65,11 @@ pub async fn create(
     if req.name.trim().is_empty() {
         return Err(ApiError::BadRequest("Key name must not be empty".into()));
     }
+    if let Some(s) = req.scopes.iter().find(|s| !super::key_covers(&key, s)) {
+        return Err(ApiError::Forbidden(format!(
+            "Cannot mint a key with scope '{s}': it exceeds this key's own scopes"
+        )));
+    }
     let expires_at = req
         .ttl_secs
         .map(|secs| Utc::now() + Duration::seconds(secs as i64));

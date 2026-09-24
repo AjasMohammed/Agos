@@ -63,7 +63,6 @@ RUN groupadd --gid 65532 nonroot \
         /var/lib/agentos/tools/user \
         /var/lib/agentos/plugins/core \
         /var/lib/agentos/plugins/user \
-        /var/lib/agentos/static \
         /var/log/agentos \
     && chown -R nonroot:nonroot \
         /var/lib/agentos \
@@ -83,13 +82,8 @@ COPY --chown=nonroot:nonroot tools/core/ /var/lib/agentos/tools/core/
 # Copy core plugin manifests; kernel discovers plugins at data_dir.parent()/plugins/{core,user}
 COPY --chown=nonroot:nonroot plugins/core/ /var/lib/agentos/plugins/core/
 
-# Copy web UI static assets
-COPY --from=builder /usr/src/agentos/crates/agentos-web/static/ /var/lib/agentos/static/
-
 # Set default config path so every agentos command finds it automatically
 ENV AGENTOS_CONFIG=/etc/agentos/config.toml
-# Point the web server at the static assets directory inside the container
-ENV AGENTOS_STATIC_DIR=/var/lib/agentos/static
 
 USER nonroot
 WORKDIR /var/lib/agentos
@@ -100,4 +94,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/agentos", "healthz"]
 
 ENTRYPOINT ["agentos"]
-CMD ["web", "serve", "--host", "0.0.0.0", "--port", "8080"]
+# REST API binds to [api] host/port from /etc/agentos/config.toml (0.0.0.0:8080)
+CMD ["start"]

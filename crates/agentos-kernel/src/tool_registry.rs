@@ -139,6 +139,22 @@ fn separator_variants(name: &str) -> Vec<String> {
     variants
 }
 
+/// Tool manifests backed by a peripheral HAL driver: (manifest name, driver
+/// name). The kernel drops these at boot when the driver is not registered on
+/// this host (see `agentos_hal::probe_peripherals`).
+pub(crate) const PERIPHERAL_TOOL_DRIVERS: &[(&str, &str)] = &[
+    ("audio", "audio"),
+    ("bluetooth", "bluetooth"),
+    ("display-config", "display"),
+    ("printer", "printer"),
+    ("raw-usb", "raw-usb"),
+    ("usb-storage", "usb-storage"),
+    ("webcam", "webcam"),
+    ("wifi", "wifi"),
+];
+
+// Every arm is a `cfg!`; with no peripheral features they are all `false`.
+#[allow(clippy::match_like_matches_macro)]
 fn manifest_enabled_for_build(tool_name: &str) -> bool {
     match tool_name {
         "audio" => cfg!(feature = "audio"),
@@ -198,7 +214,7 @@ impl ToolRegistry {
     ///
     /// `trust_tier = "core"` is reserved for distribution-trusted manifests
     /// shipped under `core_dir`. A user-dir manifest declaring `trust_tier =
-    /// "core"` is rejected with `ToolBlocked` to prevent privilege-tier
+    /// "core"` is skipped (logged as a security error) to prevent privilege-tier
     /// laundering — without this gate, dropping a TOML file into
     /// `tools/user/` would skip the Ed25519 signature check that protects
     /// `Verified`/`Community` tiers, and would also satisfy the privileged-
@@ -229,17 +245,46 @@ impl ToolRegistry {
                     tracing::error!(
                         tool = %name,
                         path = %loaded.manifest_dir.display(),
-                        "Rejecting user-dir manifest that claims trust_tier = core; \
+                        security = true,
+                        "Skipping user-dir manifest that claims trust_tier = core; \
                          core tier is reserved for distribution-shipped manifests"
                     );
-                    return Err(AgentOSError::ToolBlocked { name });
+                    continue;
                 }
-                registry.register(loaded.manifest.clone())?;
-                registry.loaded.push(loaded);
+                match registry.register(loaded.manifest.clone()) {
+                    Ok(_) => registry.loaded.push(loaded),
+                    Err(e) if is_core => return Err(e),
+                    // One bad user-installed manifest (duplicate name, bad or
+                    // revoked signature) must not stop the kernel from booting.
+                    Err(e) => tracing::error!(
+                        tool = %name,
+                        path = %loaded.manifest_dir.display(),
+                        error = %e,
+                        "Skipping user-dir tool manifest"
+                    ),
+                }
             }
         }
 
         Ok(registry)
+    }
+
+    /// Register a manifest that did not come from the distribution core dir
+    /// (runtime install / hot-load). `trust_tier = core` skips signature
+    /// verification and unlocks the Core-only executor and risk-class gates, so
+    /// it must never be self-declared — same rule `load_from_dirs_with_crl`
+    /// applies to the user dir at boot.
+    pub fn register_untrusted(&mut self, manifest: ToolManifest) -> Result<ToolID, AgentOSError> {
+        if manifest.manifest.trust_tier == agentos_types::TrustTier::Core {
+            tracing::error!(
+                tool = %manifest.manifest.name,
+                "Rejecting runtime-installed manifest that claims trust_tier = core"
+            );
+            return Err(AgentOSError::ToolBlocked {
+                name: manifest.manifest.name.clone(),
+            });
+        }
+        self.register(manifest)
     }
 
     /// Register a single tool from its manifest, enforcing trust tier and CRL policy.
@@ -247,6 +292,16 @@ impl ToolRegistry {
     /// Returns an error if the manifest is `Blocked`, the author key is revoked,
     /// or if a `Community`/`Verified` manifest has a missing or invalid Ed25519 signature.
     pub fn register(&mut self, manifest: ToolManifest) -> Result<ToolID, AgentOSError> {
+        // A second manifest under a taken name would repoint `name_index` at the
+        // newcomer while the runner keeps executing the original implementation:
+        // e.g. a Community `shell-exec` declaring `readonly_scoped` would have
+        // the approval gate read the fake risk class for the real tool.
+        if self.name_index.contains_key(&manifest.manifest.name) {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "tool '{}' is already registered; remove it before installing another",
+                manifest.manifest.name
+            )));
+        }
         if let Err(e) = verify_manifest_with_crl(&manifest, &self.crl) {
             if let AgentOSError::ToolSignatureInvalid { .. } = &e {
                 if let Some(ref sender) = self.lifecycle_sender {
@@ -700,6 +755,57 @@ pub(crate) mod tests {
         );
         assert_eq!(manifest_enabled_for_build("wifi"), cfg!(feature = "wifi"));
         assert!(manifest_enabled_for_build("file-reader"));
+    }
+
+    #[test]
+    fn peripheral_tool_drivers_match_manifests_and_hal() {
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+        for (tool, driver) in PERIPHERAL_TOOL_DRIVERS {
+            assert!(
+                core.join(format!("{tool}.toml")).is_file(),
+                "missing tools/core/{tool}.toml"
+            );
+            assert!(
+                agentos_hal::PERIPHERAL_DRIVERS.contains(driver),
+                "{driver} is not a probed HAL peripheral"
+            );
+        }
+        assert_eq!(
+            PERIPHERAL_TOOL_DRIVERS.len(),
+            agentos_hal::PERIPHERAL_DRIVERS.len()
+        );
+    }
+
+    #[test]
+    fn register_untrusted_rejects_self_declared_core() {
+        let mut registry = ToolRegistry::new();
+        let result = registry.register_untrusted(make_core_manifest("fake-core"));
+        assert!(matches!(result, Err(AgentOSError::ToolBlocked { .. })));
+        assert!(registry.get_by_name("fake-core").is_none());
+    }
+
+    #[test]
+    fn register_rejects_a_taken_name() {
+        let mut registry = ToolRegistry::new();
+        let first = registry.register(make_core_manifest("shell-exec")).unwrap();
+        assert!(registry.register(make_core_manifest("shell-exec")).is_err());
+        assert_eq!(registry.get_by_name("shell-exec").unwrap().id, first);
+    }
+
+    /// A user-dir manifest that claims core and shadows a shipped name used to
+    /// abort `load_from_dirs` — i.e. one bad `tool add` stopped the next boot.
+    #[test]
+    fn a_bad_user_manifest_is_skipped_not_fatal_at_boot() {
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+        let user = tempfile::tempdir().unwrap();
+        std::fs::copy(core.join("think.toml"), user.path().join("think.toml")).unwrap();
+        let registry = ToolRegistry::load_from_dirs(&core, user.path()).expect("boot must survive");
+        let think = registry.get_by_name("think").unwrap();
+        assert_eq!(
+            think.manifest.manifest.trust_tier,
+            agentos_types::TrustTier::Core
+        );
+        assert!(registry.list_all().len() > 1);
     }
 
     #[test]

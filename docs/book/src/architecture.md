@@ -52,7 +52,6 @@ to honor it, which tool handles it, and how the result flows back into context.
 | `agentos-wasm` | WASM tool execution via Wasmtime. |
 | `agentos-pipeline` | Multi-step workflow orchestration. |
 | `agentos-api` | REST endpoints + OpenAI-compatible `/v1/chat/completions` SSE. |
-| `agentos-web` | Web UI (Axum + HTMX). |
 | `agentos-channels` | Channel adapters (Discord, Slack, Telegram, Matrix, …). |
 | `agentos-skills` | Skill manifests and registry. |
 | `agentos-mcp` | Model Context Protocol client/server + A2A. |

@@ -286,7 +286,7 @@ In addition, service errors are propagated with the service's own error code (fr
 |---------|--------------|-------------|
 | `tasks` | `TaskStarted`, `TaskCompleted`, `TaskFailed`, `TaskCancelled` | Task lifecycle changes for all agents |
 | `agents` | `AgentConnected`, `AgentDisconnected`, `AgentStatusChanged` | Agent registry changes |
-| `audit` | All 146 event types | Full audit log stream (high volume — use filters) |
+| `audit` | All 173 event types | Full audit log stream (high volume — use filters) |
 | `costs` | `BudgetAlert`, `HardLimitExceeded`, `CostAttribution` | Budget threshold events |
 | `notifications` | `NotificationCreated`, `EscalationCreated` | Operator inbox events |
 

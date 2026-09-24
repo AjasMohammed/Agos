@@ -34,7 +34,7 @@ The `EventBus` (`crates/agentos-kernel/src/event_bus.rs`) is a pure subscription
 
 > **Note:** Event types (`EventType`) are what agents subscribe to at runtime. These are distinct from audit event types (`AuditEventType` in the audit log), which track internal kernel operations. See [[14-Audit Log]] for the audit event types.
 
-The `EventType` enum (`agentos-types/src/event.rs`) defines **94 event types** across **10 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
+The `EventType` enum (`agentos-types/src/event.rs`) defines **95 event types** across **11 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
 
 ### AgentLifecycle
 
@@ -179,6 +179,14 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **94 event types** a
 | `ExternalFileChanged` | A watched external file was modified. |
 | `ExternalAPIEvent` | An event was received from an external API integration. |
 | `ExternalAlertReceived` | An alert was received from an external monitoring system. |
+
+### ChatEvents
+
+| Event | Description |
+|-------|-------------|
+| `ChatMessageAdded` | A message was added to an operator chat conversation. |
+
+Chat traffic is its own category on purpose. An agent woken by a chat message replies with another chat message, so folding this into `AgentCommunication` would make every such subscription an unbounded loop. Subscribe to it only with a payload filter or a throttle. Permission: `events.chat:o`.
 
 ---
 
@@ -338,6 +346,16 @@ Every event carries a `chain_depth` counter. When an event triggers a task, and 
 2. Logged to the audit trail as `EventLoopDetected` with the event ID, type, and depth.
 
 This prevents runaway chains where `A fires → B reacts → emits C → A fires again → ...`.
+
+An agent is also never triggered by an event it caused itself.
+
+### Reaction Batching
+
+Matching events are coalesced per agent for `reaction_batch_window_secs` (default 5), then spawn **one** task carrying a digest of the batch instead of one task per event. A batch flushes early at `reaction_batch_max_events` (default 200). Subscriptions with `critical` priority and agent-to-agent messages bypass the window. Set the window to `0` under `[kernel.events]` to restore one task per event.
+
+### Agents Subscribing Themselves
+
+Subscriptions do not have to come from the operator. An agent holding `events.stream:o` can manage its own from inside a task with four tools — `event-list-available`, `event-subscribe`, `event-list-subscriptions`, `event-unsubscribe` — and can only subscribe to categories whose `events.<category>:o` permission it holds. `event-subscribe` is `control_plane`, so creating a subscription always asks the operator first. Subscriptions an agent creates without a `throttle` get the default `max:30/60s`.
 
 ---
 

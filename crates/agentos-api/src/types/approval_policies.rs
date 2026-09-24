@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub struct ApiApprovalPolicy {
     pub id: i64,
     pub tool_name: String,
+    /// Single action this grant covers; `null` = every action of the tool.
+    pub action: Option<String>,
     pub path_glob: Option<String>,
     pub agent_id: Option<String>,
     pub granted_at: DateTime<Utc>,
@@ -26,6 +28,10 @@ pub struct ApiApprovalPolicy {
 pub struct AddApprovalPolicyRequest {
     /// Tool this standing grant auto-approves (matched exactly).
     pub tool_name: String,
+    /// Optional action of a multi-action tool to scope the grant to
+    /// (e.g. `"speak"` for `audio`); omit to cover every action.
+    #[serde(default)]
+    pub action: Option<String>,
     /// Optional payload `path` glob to scope the grant (e.g. `"/tmp/**"`).
     pub path_glob: Option<String>,
     /// Optional agent UUID to scope to; omit to apply to every agent.

@@ -72,7 +72,7 @@ async fn extra_tools_excluded_when_no_history() {
     }
 
     let manifests = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     let n = names(&manifests);
     assert!(
@@ -114,7 +114,7 @@ async fn session_recent_tool_promoted() {
     }
 
     let manifests = kernel
-        .build_chat_tool_manifests(&agent_id, Some(&session_id), ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, Some(&session_id), &ChatTurnScope::Full)
         .await;
     assert!(
         names(&manifests).contains("gmail_send"),
@@ -123,7 +123,7 @@ async fn session_recent_tool_promoted() {
 
     // Without the session id, the tool is gone again — proves the promotion is session-scoped.
     let manifests_no_sess = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     assert!(
         !names(&manifests_no_sess).contains("gmail_send"),
@@ -158,7 +158,7 @@ async fn cross_session_usage_rank_promotes_tool() {
         .await;
 
     let manifests = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     assert!(
         names(&manifests).contains("gmail_send"),
@@ -185,7 +185,7 @@ async fn meta_tool_names_never_promoted_as_extras() {
         .await;
 
     let manifests = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     let n = names(&manifests);
     // `tool-detail` is not even registered, but the assertion proves the guard
@@ -218,7 +218,7 @@ async fn extras_budget_is_capped() {
     }
 
     let manifests = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     let n = names(&manifests);
     let promoted: Vec<&String> = extras.iter().filter(|name| n.contains(*name)).collect();
@@ -250,6 +250,9 @@ async fn convo_scope_withholds_out_of_band_tools() {
 
     {
         let mut reg = kernel.tool_registry.write().await;
+        // Swap the booted core manifest for the permission-free test one;
+        // `register` refuses a name that is already taken.
+        let _ = reg.remove("agent-message");
         reg.register(make_extra_tool_manifest("agent-message"))
             .expect("register");
     }
@@ -269,7 +272,7 @@ async fn convo_scope_withholds_out_of_band_tools() {
 
     let full = names(
         &kernel
-            .build_chat_tool_manifests(&agent_id, Some(&session_id), ChatTurnScope::Full)
+            .build_chat_tool_manifests(&agent_id, Some(&session_id), &ChatTurnScope::Full)
             .await,
     );
     assert!(
@@ -279,7 +282,11 @@ async fn convo_scope_withholds_out_of_band_tools() {
 
     let convo = names(
         &kernel
-            .build_chat_tool_manifests(&agent_id, Some(&session_id), ChatTurnScope::ConvoTurn)
+            .build_chat_tool_manifests(
+                &agent_id,
+                Some(&session_id),
+                &ChatTurnScope::ConvoTurn { shared_dir: None },
+            )
             .await,
     );
     // Assert against the whole list, not just the one name driven above: a
@@ -309,7 +316,7 @@ async fn chat_working_set_partitions_candidates() {
     let agent_id = common::register_mock_agent(&kernel, "selector-agent", vec![]).await;
 
     let candidates = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     let all = names(&candidates);
     let (native, pool) = kernel
@@ -368,7 +375,7 @@ async fn chat_working_set_pins_session_recent_tools() {
     }
 
     let candidates = kernel
-        .build_chat_tool_manifests(&agent_id, Some(&session_id), ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, Some(&session_id), &ChatTurnScope::Full)
         .await;
     assert!(names(&candidates).contains("file-diff"));
     let (native, pool) = kernel
@@ -380,7 +387,7 @@ async fn chat_working_set_pins_session_recent_tools() {
     // Contrast: without the session, "hey" does not retrieve file-diff — so the
     // assertion above proves the pin, not a lucky T1 hit.
     let candidates = kernel
-        .build_chat_tool_manifests(&agent_id, None, ChatTurnScope::Full)
+        .build_chat_tool_manifests(&agent_id, None, &ChatTurnScope::Full)
         .await;
     let (native, pool) = kernel
         .chat_working_set(&agent_id, None, "hey", candidates)

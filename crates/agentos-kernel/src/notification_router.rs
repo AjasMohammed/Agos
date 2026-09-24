@@ -178,6 +178,16 @@ pub trait DeliveryAdapter: Send + Sync {
 ///
 /// This is the single authoritative dispatcher — delivery adapters are leaf
 /// nodes that have no knowledge of each other.
+///
+/// The routing-matrix column for an adapter: its instance id for registered
+/// channels (`telegram-main`), else its builtin kind (`desktop`, `cli`, `web`,
+/// `webhook`, `slack`).
+fn channel_key(adapter: &Arc<dyn DeliveryAdapter>) -> String {
+    adapter
+        .adapter_instance_id()
+        .unwrap_or_else(|| adapter.channel_id().as_str().to_string())
+}
+
 pub struct NotificationRouter {
     inbox: Arc<UserInbox>,
     audit: Arc<agentos_audit::AuditLog>,
@@ -195,6 +205,13 @@ pub struct NotificationRouter {
     /// router before the manager exists. Set on the first channel connect /
     /// restore, which is the earliest point any send can happen.
     channel_manager: std::sync::OnceLock<Arc<ChannelManager>>,
+    /// Operator routing matrix: which event kinds reach which channels.
+    ///
+    /// Attached after construction (the matrix needs the kernel state store,
+    /// which is built later), exactly as `channel_manager` is. A router with
+    /// no matrix attached — every unit test that builds a bare router —
+    /// delivers everything, so the gate fails open.
+    routes: std::sync::OnceLock<Arc<crate::notification_routes::RouteMatrix>>,
 }
 
 impl NotificationRouter {
@@ -206,6 +223,7 @@ impl NotificationRouter {
             waiting_tasks: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RwLock::new(HashMap::new())),
             channel_manager: std::sync::OnceLock::new(),
+            routes: std::sync::OnceLock::new(),
         }
     }
 
@@ -214,6 +232,64 @@ impl NotificationRouter {
     /// kinds. Idempotent; later calls are ignored.
     pub fn attach_channel_manager(&self, manager: Arc<ChannelManager>) {
         let _ = self.channel_manager.set(manager);
+    }
+
+    /// Give the router the operator's notification routing matrix. Idempotent;
+    /// later calls are ignored.
+    pub fn attach_routes(&self, routes: Arc<crate::notification_routes::RouteMatrix>) {
+        let _ = self.routes.set(routes);
+    }
+
+    /// The attached routing matrix, if any. `ChannelBroadcastSink` reads it
+    /// through here rather than holding a second handle.
+    pub fn routes(&self) -> Option<Arc<crate::notification_routes::RouteMatrix>> {
+        self.routes.get().cloned()
+    }
+
+    /// Whether the matrix permits this event on this channel. Fails open when
+    /// no matrix is attached.
+    fn route_allows(&self, event: agentos_types::NotificationEvent, channel_key: &str) -> bool {
+        match self.routes.get() {
+            Some(routes) => routes.allows(event, channel_key),
+            None => true,
+        }
+    }
+
+    /// Record a matrix-suppressed delivery: `Skipped` on the inbox row plus an
+    /// audit entry, so "why didn't I get that?" is answerable after the fact.
+    async fn mark_suppressed(
+        &self,
+        msg: &UserMessage,
+        channel: DeliveryChannel,
+        event: agentos_types::NotificationEvent,
+        channel_key: &str,
+    ) {
+        let mode = self
+            .routes
+            .get()
+            .map(|r| r.mode(event, channel_key).to_string())
+            .unwrap_or_default();
+        self.inbox
+            .update_delivery_status(&msg.id, channel.clone(), DeliveryStatus::Skipped)
+            .await
+            .ok();
+        let _ = self.audit.append(AuditEntry {
+            timestamp: Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::NotificationSuppressed,
+            agent_id: None,
+            task_id: msg.task_id,
+            tool_id: None,
+            details: serde_json::json!({
+                "notification_id": msg.id.to_string(),
+                "channel": channel.to_string(),
+                "event": event.as_str(),
+                "mode": mode,
+            }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
     }
 
     /// Add a delivery adapter.  Called once during kernel startup or on channel connect.
@@ -236,6 +312,22 @@ impl NotificationRouter {
     /// twice: a connected channel is registered here as a delivery adapter
     /// (`cmd_connect_channel`), so `deliver` already reaches it, and the sink's
     /// paired-DM loop must skip senders on that channel.
+    /// Every delivery target this router can reach, as
+    /// `(matrix key, channel kind, available now)` — the column axis of the
+    /// notification routing matrix.
+    pub async fn adapter_targets(&self) -> Vec<(String, String, bool)> {
+        let adapters = self.adapters.read().await;
+        let mut out = Vec::with_capacity(adapters.len());
+        for adapter in adapters.iter() {
+            out.push((
+                channel_key(adapter),
+                adapter.channel_id().as_str().to_string(),
+                adapter.is_available().await,
+            ));
+        }
+        out
+    }
+
     pub async fn adapter_instance_ids(&self) -> std::collections::HashSet<String> {
         self.adapters
             .read()
@@ -297,9 +389,18 @@ impl NotificationRouter {
             None
         };
 
-        // Fan out to all available adapters (best-effort; failures are logged).
+        // Fan out to all available adapters (best-effort; failures are logged),
+        // minus the channels the operator's routing matrix mutes for this
+        // event kind.
+        let event = agentos_types::NotificationEvent::classify(&msg);
         let adapters = self.adapters.read().await;
         for adapter in adapters.iter() {
+            let key = channel_key(adapter);
+            if !self.route_allows(event, &key) {
+                self.mark_suppressed(&msg, adapter.channel_id(), event, &key)
+                    .await;
+                continue;
+            }
             if !adapter.is_available().await {
                 self.inbox
                     .update_delivery_status(&msg.id, adapter.channel_id(), DeliveryStatus::Skipped)
@@ -374,6 +475,7 @@ impl NotificationRouter {
         self.check_rate_limit(&msg.from).await?;
         self.inbox.write(&msg).await?;
 
+        let event = agentos_types::NotificationEvent::classify(&msg);
         let adapters = self.adapters.read().await;
         for adapter in adapters.iter() {
             let inst = adapter.adapter_instance_id();
@@ -383,6 +485,12 @@ impl NotificationRouter {
                 .map(|i| instance_ids.contains(i))
                 .unwrap_or(false)
                 || channel_kinds.contains(&kind);
+            let key = channel_key(adapter);
+            if selected && !self.route_allows(event, &key) {
+                self.mark_suppressed(&msg, adapter.channel_id(), event, &key)
+                    .await;
+                continue;
+            }
             if !selected {
                 self.inbox
                     .update_delivery_status(&msg.id, adapter.channel_id(), DeliveryStatus::Skipped)
@@ -1009,8 +1117,7 @@ pub struct NotificationSsePayload {
 /// SSE delivery adapter — publishes `NotificationSsePayload` events to all
 /// connected browser tabs via a `tokio::sync::broadcast` channel.
 ///
-/// The channel sender is shared with `AppState` in `agentos-web` so the
-/// web server can subscribe to it for `/notifications/stream`.
+/// HTTP surfaces subscribe to the channel sender to stream notifications.
 pub struct SseDeliveryAdapter {
     tx: broadcast::Sender<NotificationSsePayload>,
 }
@@ -1524,6 +1631,191 @@ mod tests {
             tx,
             tokio_util::sync::CancellationToken::new(),
         ))
+    }
+
+    /// Attach a real `RouteMatrix` backed by a temp state DB.
+    async fn attach_test_routes(
+        router: &Arc<NotificationRouter>,
+    ) -> (
+        Arc<crate::notification_routes::RouteMatrix>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            crate::state_store::KernelStateStore::open(dir.path().join("state.db"))
+                .await
+                .expect("open state store"),
+        );
+        Box::leak(Box::new(dir));
+        let panel = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let routes = Arc::new(
+            crate::notification_routes::RouteMatrix::load(store, Arc::clone(&panel))
+                .await
+                .expect("load matrix"),
+        );
+        router.attach_routes(Arc::clone(&routes));
+        (routes, panel)
+    }
+
+    #[tokio::test]
+    async fn router_without_routes_delivers_everything() {
+        // Fail-open guard: a bare router (every pre-existing unit test) must
+        // keep delivering when no matrix has been attached.
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        router
+            .deliver(kernel_msg("ungated"))
+            .await
+            .expect("deliver");
+        assert_eq!(seen.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn never_rule_suppresses_only_that_channel() {
+        let router = test_router();
+        let muted = Arc::new(RwLock::new(Vec::new()));
+        let open = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&muted),
+            )))
+            .await;
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-2",
+                Arc::clone(&open),
+            )))
+            .await;
+        let (routes, _panel) = attach_test_routes(&router).await;
+        routes
+            .set(
+                agentos_types::NotificationEvent::SystemAlert,
+                "telegram-1",
+                crate::notification_routes::RouteMode::Never,
+            )
+            .await
+            .expect("set rule");
+
+        router.deliver(kernel_msg("alert")).await.expect("deliver");
+
+        assert!(
+            muted.read().await.is_empty(),
+            "muted channel must see nothing"
+        );
+        assert_eq!(open.read().await.len(), 1, "other channel still delivers");
+    }
+
+    #[tokio::test]
+    async fn suppressed_message_is_still_written_to_the_inbox() {
+        // Muting a channel must never lose the record — the panel bell and
+        // GET /api/v1/notifications read from the inbox.
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        let (routes, _panel) = attach_test_routes(&router).await;
+        routes
+            .set(
+                agentos_types::NotificationEvent::SystemAlert,
+                "telegram-1",
+                crate::notification_routes::RouteMode::Never,
+            )
+            .await
+            .expect("set rule");
+
+        let msg = kernel_msg("kept anyway");
+        let id = msg.id;
+        router.deliver(msg).await.expect("deliver");
+
+        assert!(seen.read().await.is_empty());
+        let stored = router.inbox().get(&id).await.expect("inbox read");
+        assert!(
+            stored.is_some(),
+            "suppressed message must still be in the inbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_filtered_applies_the_same_gate() {
+        // The escalation sink's fan-out uses deliver_filtered — gating only
+        // `deliver` would leave every approval ungated.
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        let (routes, _panel) = attach_test_routes(&router).await;
+        routes
+            .set(
+                agentos_types::NotificationEvent::Approval,
+                "telegram-1",
+                crate::notification_routes::RouteMode::Never,
+            )
+            .await
+            .expect("set rule");
+
+        let mut msg = kernel_msg("approve me");
+        msg.thread_id = Some("escalation:7".to_string());
+        let ids: std::collections::HashSet<String> =
+            ["telegram-1".to_string()].into_iter().collect();
+        router
+            .deliver_filtered(msg, &ids, &Default::default())
+            .await
+            .expect("deliver_filtered");
+
+        assert!(
+            seen.read().await.is_empty(),
+            "an explicitly selected channel must still obey a Never rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn when_away_suppresses_while_a_panel_is_connected() {
+        let router = test_router();
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        router
+            .register_adapter(Arc::new(RecordingAdapter::new(
+                "telegram-1",
+                Arc::clone(&seen),
+            )))
+            .await;
+        let (routes, panel) = attach_test_routes(&router).await;
+        routes
+            .set(
+                agentos_types::NotificationEvent::SystemAlert,
+                "telegram-1",
+                crate::notification_routes::RouteMode::WhenAway,
+            )
+            .await
+            .expect("set rule");
+
+        panel.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        router
+            .deliver(kernel_msg("while here"))
+            .await
+            .expect("deliver");
+        assert!(seen.read().await.is_empty(), "panel open -> suppressed");
+
+        panel.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        router
+            .deliver(kernel_msg("while away"))
+            .await
+            .expect("deliver");
+        assert_eq!(seen.read().await.len(), 1, "panel closed -> delivered");
     }
 
     #[tokio::test]

@@ -119,6 +119,16 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                     if perms.entries.is_empty() {
                         println!(" (None)");
                     }
+                    // Denies override every grant, so a set listing only
+                    // grants reads as "allowed" for a resource the operator
+                    // has scoped out (e.g. a skill toggled off with
+                    // `perm revoke <agent> skill:<name>/:x`).
+                    if !perms.deny_entries.is_empty() {
+                        println!("Denied (overrides grants):");
+                        for d in perms.deny_entries.iter() {
+                            println!(" - {}", d);
+                        }
+                    }
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),

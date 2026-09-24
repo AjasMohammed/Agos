@@ -466,6 +466,7 @@ impl Kernel {
                                                         prompt,
                                                         true,
                                                         true,
+                                                        None,
                                                     )
                                                     .await
                                                 {
@@ -546,6 +547,7 @@ impl Kernel {
                                                     prompt,
                                                     true,
                                                     true,
+                                                    None,
                                                 )
                                                 .await
                                             {
@@ -593,6 +595,40 @@ impl Kernel {
                                 // Sweep expired agent messages
                                 if let Err(e) = kernel.agent_message_inbox.sweep_expired().await {
                                     tracing::warn!(error = %e, "Agent message inbox sweep failed");
+                                }
+
+                                // Expire DM sessions on the clock (every 6th
+                                // tick = 60s). Granularity is deliberately
+                                // coarse: a session lives 30 minutes by
+                                // default, so a sub-minute deadline is noise.
+                                if tick.is_multiple_of(6) {
+                                    kernel.sweep_dm_session_expiry().await;
+                                }
+
+                                // Disk headroom. `[preflight]` checks this once
+                                // at boot; without a runtime check a filling
+                                // disk only shows up as SQLITE_FULL write
+                                // failures while /readyz still reports 200.
+                                if kernel.config.resource_guard.enabled
+                                    && tick.is_multiple_of(
+                                        (kernel.config.resource_guard.check_interval_secs / 10)
+                                            .max(1),
+                                    )
+                                {
+                                    let data_dir =
+                                        std::path::PathBuf::from(&kernel.config.tools.data_dir);
+                                    match crate::resource_guard::tick(
+                                        &data_dir,
+                                        &kernel.config.resource_guard,
+                                    ) {
+                                        Ok((prev, now, headroom)) => {
+                                            kernel.on_pressure_changed(prev, now, headroom).await;
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            "Resource guard measurement failed"
+                                        ),
+                                    }
                                 }
 
                                 // Sweep expired escalations — auto-deny (Spec §12)
@@ -859,9 +895,7 @@ impl Kernel {
                                 // Sweep expired snapshots every ~10 minutes (60 ticks × 10s)
                                 tick += 1;
                                 if tick.is_multiple_of(60) {
-                                    kernel.sweep_expired_snapshots(
-                                        Duration::from_secs(72 * 3600), // 72h (Spec §5)
-                                    );
+                                    kernel.sweep_expired_snapshots();
 
                                     // Prune checkpoints older than 72h, except those
                                     // of tasks the scheduler still considers live —
@@ -1548,7 +1582,12 @@ impl Kernel {
             }
             match self.cmd_resume_task(task_id).await {
                 agentos_bus::KernelResponse::Error { message } => {
-                    tracing::warn!(task_id = %task_id, message, "Boot: failed to resume checkpointed task — it stays queued for a from-scratch retry");
+                    tracing::warn!(task_id = %task_id, message, "Boot: failed to resume checkpointed task — requeueing it for a from-scratch retry");
+                    // Restore parked it (Suspended) for this resume; without a
+                    // requeue it would never run at all.
+                    if let Err(e) = self.scheduler.requeue(&task_id).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Boot: requeue after failed resume failed");
+                    }
                 }
                 _ => {
                     resumed += 1;
@@ -1622,6 +1661,22 @@ impl Kernel {
 
         // Install Prometheus metrics recorder and start health/readiness/metrics HTTP server
         if let Some(prom_handle) = crate::health::install_prometheus_recorder() {
+            // Drain raw samples into the rendered distributions on a timer.
+            // Nothing called this before, which is why every /metrics quantile
+            // read 0 while _sum/_count were correct.
+            {
+                let handle = prom_handle.clone();
+                let token = self.cancellation_token.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(10)) => handle.run_upkeep(),
+                        }
+                    }
+                });
+            }
+
             if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
                 tracing::warn!(
                     error = %e,
@@ -2611,6 +2666,12 @@ impl Kernel {
             KernelCommand::MarkNotificationRead { notification_id } => {
                 self.cmd_mark_notification_read(notification_id).await
             }
+            KernelCommand::GetNotificationRoutes => self.cmd_get_notification_routes().await,
+            KernelCommand::SetNotificationRoute {
+                event,
+                channel,
+                mode,
+            } => self.cmd_set_notification_route(event, channel, mode).await,
             KernelCommand::RespondToNotification {
                 notification_id,
                 response_text,
@@ -2950,10 +3011,11 @@ impl Kernel {
             }
             KernelCommand::AddApprovalPolicy {
                 tool_name,
+                action,
                 path_glob,
                 agent_name,
             } => {
-                self.cmd_add_approval_policy(tool_name, path_glob, agent_name)
+                self.cmd_add_approval_policy(tool_name, action, path_glob, agent_name)
                     .await
             }
             KernelCommand::ListApprovalPolicies => self.cmd_list_approval_policies().await,
@@ -3049,6 +3111,7 @@ impl Kernel {
                                 prompt,
                                 true,
                                 true,
+                                run_job_creator,
                             )
                             .await
                         {
@@ -3182,6 +3245,7 @@ impl Kernel {
                         spawn_scheduled_tool_fire(
                             Arc::clone(&self),
                             job.agent_name.clone(),
+                            run_job_creator,
                             tool,
                             args,
                             trace_id,
@@ -3269,6 +3333,7 @@ impl Kernel {
                                 prompt,
                                 false,
                                 true,
+                                job_creator,
                             )
                             .await
                         {
@@ -3360,6 +3425,7 @@ impl Kernel {
                         spawn_scheduled_tool_fire(
                             Arc::clone(&self),
                             job.agent_name.clone(),
+                            job_creator,
                             tool,
                             args,
                             trace_id,
@@ -3509,6 +3575,7 @@ impl Kernel {
                         prompt,
                         false,
                         true,
+                        timer_creator,
                     )
                     .await
                 {
@@ -3581,6 +3648,7 @@ impl Kernel {
                         prompt,
                         false,
                         true,
+                        timer_creator,
                     )
                     .await
                 {
@@ -3603,6 +3671,7 @@ impl Kernel {
                 spawn_scheduled_tool_fire(
                     Arc::clone(&self),
                     timer.agent_name.clone(),
+                    timer_creator,
                     tool,
                     args,
                     trace_id,
@@ -3618,6 +3687,7 @@ impl Kernel {
     async fn execute_scheduled_tool(
         &self,
         agent_name: String,
+        creator: Option<agentos_types::AgentID>,
         tool_name: String,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
@@ -3651,7 +3721,12 @@ impl Kernel {
 
         let permissions = {
             let registry = self.agent_registry.read().await;
-            registry.compute_effective_permissions(&agent.id)
+            crate::commands::background::clamp_to_schedule_creator(
+                &registry,
+                agent.id,
+                registry.compute_effective_permissions(&agent.id),
+                creator,
+            )
         };
 
         let ws_sched = self.workspace_paths_for_agent(&agent.id);
@@ -3749,6 +3824,7 @@ impl Kernel {
                 as std::sync::Arc<dyn agentos_types::StorageZoneQuery>),
             cancellation_token: self.cancellation_token.child_token(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         let result = self.tool_runner.execute(&tool_name, args, exec_ctx).await?;
@@ -3805,6 +3881,7 @@ impl Kernel {
     pub(crate) async fn fire_scheduled_tool(
         &self,
         agent_name: String,
+        creator: Option<agentos_types::AgentID>,
         tool_name: String,
         args: serde_json::Value,
         trace_id: agentos_types::TraceID,
@@ -3839,7 +3916,7 @@ impl Kernel {
         }
 
         match self
-            .execute_scheduled_tool(agent_name.clone(), tool_name.clone(), args)
+            .execute_scheduled_tool(agent_name.clone(), creator, tool_name.clone(), args)
             .await
         {
             Ok(result) => {
@@ -3920,9 +3997,11 @@ fn scheduled_fire_run_state(
 /// row as `Running` first, so an in-flight fire is visible in run history, and
 /// closes it as `Complete`/`Failed`; a kernel shutdown closes it as `Failed`
 /// rather than vanishing.
+#[allow(clippy::too_many_arguments)]
 fn spawn_scheduled_tool_fire<F>(
     kernel: Arc<Kernel>,
     agent_name: String,
+    creator: Option<agentos_types::AgentID>,
     tool_name: String,
     args: serde_json::Value,
     trace_id: agentos_types::TraceID,
@@ -3958,7 +4037,7 @@ fn spawn_scheduled_tool_fire<F>(
             }),
             fired = tokio::time::timeout(
                 budget,
-                kernel.fire_scheduled_tool(agent_name, tool_name.clone(), args, trace_id),
+                kernel.fire_scheduled_tool(agent_name, creator, tool_name.clone(), args, trace_id),
             ) => match fired {
                 Ok(result) => result,
                 Err(_) => Err(agentos_types::AgentOSError::ToolExecutionFailed {

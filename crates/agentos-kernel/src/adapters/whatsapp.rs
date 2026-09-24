@@ -31,9 +31,18 @@ pub fn whatsapp_media_refs(message: &Value) -> Vec<WhatsAppMediaRef> {
     for &t in MEDIA_TYPES {
         let obj = &message[t];
         if let Some(id) = obj["id"].as_str().filter(|s| !s.is_empty()) {
+            // A Cloud API voice note is `type: "audio"` carrying `voice: true`;
+            // only the older On-Premises API sends a bare `voice` type. Both
+            // normalize to "voice" here, which is what the InboundRouter checks
+            // when deciding that a transcript makes the recording disposable.
+            let kind = if t == "audio" && obj["voice"].as_bool() == Some(true) {
+                "voice".to_string()
+            } else {
+                t.to_string()
+            };
             out.push(WhatsAppMediaRef {
                 media_id: id.to_string(),
-                kind: t.to_string(),
+                kind,
                 mime: obj["mime_type"].as_str().unwrap_or("").to_string(),
                 filename: obj["filename"].as_str().unwrap_or("").to_string(),
             });
@@ -139,6 +148,25 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].media_id, "MEDIA123");
         assert_eq!(refs[0].mime, "image/jpeg");
+    }
+
+    /// Cloud API voice notes arrive as `type: "audio"` with `voice: true` — the
+    /// router drops those after transcription, so mislabelling one as a plain
+    /// upload would keep every voice recording on disk.
+    #[test]
+    fn cloud_api_voice_note_is_labelled_voice_not_audio() {
+        let voice = json!({
+            "from": "1555", "type": "audio",
+            "audio": { "id": "V1", "mime_type": "audio/ogg", "voice": true }
+        });
+        assert_eq!(whatsapp_media_refs(&voice)[0].kind, "voice");
+
+        // An uploaded audio file has no `voice` flag and must stay "audio".
+        let upload = json!({
+            "from": "1555", "type": "audio",
+            "audio": { "id": "A1", "mime_type": "audio/mpeg" }
+        });
+        assert_eq!(whatsapp_media_refs(&upload)[0].kind, "audio");
     }
 
     #[test]

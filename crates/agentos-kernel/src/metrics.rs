@@ -136,3 +136,70 @@ pub fn record_capability_success(domain: &str, action: &str) {
 pub fn record_capability_failure(domain: &str, action: &str) {
     counter!("agentos_capability_failures_total", "domain" => domain.to_string(), "action" => action.to_string()).increment(1);
 }
+
+// ── SLI surface ────────────────────────────────────────────────────────────
+// These names are the contract the observability docs and later phases use.
+// Histograms must end in `_ms` or `health.rs` renders them as broken summaries.
+
+/// One retention sweep finished (Phase 05).
+pub fn record_retention_sweep(policy: &'static str, deleted: u64, duration_ms: u64) {
+    counter!("agentos_retention_sweeps_total", "policy" => policy).increment(1);
+    counter!("agentos_retention_swept_total", "policy" => policy).increment(deleted);
+    histogram!("agentos_retention_sweep_duration_ms", "policy" => policy)
+        .record(duration_ms as f64);
+    gauge!("agentos_retention_last_run_timestamp_seconds", "policy" => policy)
+        .set(chrono::Utc::now().timestamp() as f64);
+}
+
+/// A retention policy failed. Alert on any increase: a policy that errors is a
+/// policy that is not reclaiming.
+pub fn record_retention_error(policy: &'static str) {
+    counter!("agentos_retention_errors_total", "policy" => policy).increment(1);
+}
+
+/// Classification of an LLM response (Phase 08). `class` is one of
+/// `usable` / `tool_only` / `empty` / `malformed` / `truncated`.
+pub fn record_llm_response_class(provider: &str, model: &str, class: &'static str) {
+    counter!(
+        "agentos_llm_response_class_total",
+        "provider" => provider.to_string(),
+        "model" => model.to_string(),
+        "class" => class
+    )
+    .increment(1);
+}
+
+/// A tool payload was coerced into schema bounds rather than rejected (Phase 09).
+pub fn record_tool_payload_coerced(tool: &str) {
+    counter!("agentos_tool_payload_coerced_total", "tool" => tool.to_string()).increment(1);
+}
+
+/// Whether an iteration reused the previous prompt prefix (Phase 09). A low
+/// stable ratio means provider-side prompt caching can never engage.
+pub fn record_prompt_prefix(stable: bool) {
+    counter!("agentos_prompt_prefix_total", "stable" => stable.to_string()).increment(1);
+}
+
+/// The audit log rejected an append. This must stay at zero — a dropped audit
+/// entry is an integrity failure, not a performance blip.
+pub fn record_audit_append_failure() {
+    counter!("agentos_audit_append_failures_total").increment(1);
+}
+
+/// Every emitted tracing event, by level, so error rate is a metric rather
+/// than a grep over a multi-megabyte log file.
+pub fn record_log_event(level: &'static str) {
+    counter!("agentos_log_events_total", "level" => level).increment(1);
+}
+
+/// Current disk headroom and pressure level. `agentos_resource_pressure_level`
+/// is 0 = ok, 1 = warn, 2 = critical — alert on `> 0`.
+pub fn record_resource_headroom(
+    free_bytes: u64,
+    free_inodes: u64,
+    level: agentos_types::PressureLevel,
+) {
+    gauge!("agentos_resource_disk_free_bytes").set(free_bytes as f64);
+    gauge!("agentos_resource_disk_free_inodes").set(free_inodes as f64);
+    gauge!("agentos_resource_pressure_level").set(level as u8 as f64);
+}

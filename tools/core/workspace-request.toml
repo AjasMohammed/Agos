@@ -1,0 +1,61 @@
+tags = ["write"]
+# `interactive`, like `ask-user`: this tool's entire effect is to put a decision
+# in front of the operator, and that decision IS the approval. `control_plane`
+# would make the approval gate prompt for permission to ask for permission — two
+# cards for one question, the first of which changes nothing. The access it can
+# obtain is gated by the operator's answer, not by this class.
+risk_class = "interactive"
+
+[manifest]
+name        = "workspace-request"
+version     = "1.0.0"
+description = "Ask the operator for read/write/exec access to a host folder. Blocks until they decide; approval writes the grant."
+author      = "agentos-core"
+trust_tier  = "core"
+search_hints = [
+  "I need access to a folder",
+  "permission denied on a path",
+  "grant me a directory",
+  "ask the operator for filesystem access",
+]
+
+[capabilities_required]
+permissions = ["user.interact:x"]
+
+[capabilities_provided]
+outputs = ["granted", "path", "mode", "escalation_id"]
+
+[intent_schema]
+input  = "WorkspaceRequestIntent"
+output = "WorkspaceRequestResult"
+
+[payload_schema]
+type = "object"
+required = ["path", "reason"]
+
+[payload_schema.properties.path]
+type        = "string"
+description = "Absolute path of the folder you need. No `..`, and never a parent of the kernel data directory."
+
+[payload_schema.properties.mode]
+type        = "string"
+enum        = ["r", "rw", "rwx"]
+description = "Access level to request: r = read, rw = read+write, rwx = also run commands there (default: r)"
+
+[payload_schema.properties.reason]
+type        = "string"
+description = "Why you need it. The operator decides on this text — be specific."
+
+[payload_schema.properties.timeout_secs]
+type        = "integer"
+description = "Seconds to wait for the operator before giving up (default: 300)"
+minimum     = 30
+maximum     = 3600
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

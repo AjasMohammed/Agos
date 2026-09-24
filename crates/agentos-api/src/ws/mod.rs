@@ -71,6 +71,10 @@ async fn handle_connection(
     broadcaster: WsBroadcaster,
     permissions: Vec<String>,
 ) {
+    // Counted as a live panel session for the lifetime of this connection —
+    // the signal `when_away` notification rules resolve against.
+    let _panel_session = broadcaster.track_panel_session();
+
     let (ws_sink, mut ws_stream) = socket.split();
     let (outbound_tx, outbound_rx) = mpsc::channel::<ServerFrame>(256);
 

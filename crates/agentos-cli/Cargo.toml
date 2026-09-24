@@ -19,7 +19,6 @@ agentos-vault = { path = "../agentos-vault" }
 agentos-tools = { path = "../agentos-tools" }
 agentos-mcp = { path = "../agentos-mcp" }
 agentos-api = { path = "../agentos-api" }
-agentos-web = { path = "../agentos-web" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 toml = { workspace = true }
@@ -58,6 +57,16 @@ otel = ["agentos-kernel/otel"]
 bluetooth = ["agentos-kernel/bluetooth"]
 wifi = ["agentos-kernel/wifi"]
 all-peripherals = ["agentos-kernel/all-peripherals"]
+# What release.yml ships: every peripheral driver that links no extra .so.
+# The kernel registers each one only if the host has the hardware (see
+# agentos_hal::probe_peripherals). Bluetooth is left out: bluer -> dbus ->
+# libdbus-sys makes the binary need libdbus-1.so.3 at exec time
+# (plans/hal-runtime-detection/04-bluetooth-driver-zbus-port.md).
+release-peripherals = [
+    "agentos-kernel/audio", "agentos-kernel/display", "agentos-kernel/printer",
+    "agentos-kernel/raw-usb", "agentos-kernel/usb-storage", "agentos-kernel/webcam",
+    "agentos-kernel/wifi", "agentos-kernel/mqtt", "agentos-kernel/homeassistant",
+]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -43,7 +43,7 @@ use tokio::sync::RwLock;
 /// are already collapsed and both sides read the identical string.
 /// `verify_manifest` bounds the table's values to `ReadonlyExternal`, so this
 /// can only ever lower friction, never punch through an operator's `deny`.
-fn risk_class_for_payload(
+pub(crate) fn risk_class_for_payload(
     manifest: &ToolManifest,
     input_json: &str,
 ) -> (RiskClass, Option<String>) {
@@ -150,6 +150,8 @@ const TARGET_KEYS: &[&str] = &[
     "to",
     "channel",
     "target",
+    "pid",
+    "process_id",
     "name",
 ];
 // Deliberately absent: `key`. It names an env var for `env-get` but holds a
@@ -280,11 +282,18 @@ fn compose_prompt(
     task_prompt: Option<&str>,
     redacted_input: &str,
 ) -> (String, String) {
-    let action_suffix = scoped_action.map(|a| format!(" ({a})")).unwrap_or_default();
-    let target = serde_json::from_str::<serde_json::Value>(redacted_input)
-        .ok()
+    let payload = serde_json::from_str::<serde_json::Value>(redacted_input).ok();
+    // Fall back to the payload's own `action`: a tool without a
+    // `risk_class_by_action` table has no scoped action, and "use
+    // 'process-manager'?" hid a `kill` from the operator (2026-09-17).
+    let payload_action = payload
         .as_ref()
-        .and_then(describe_target);
+        .and_then(|p| p.get("action"))
+        .and_then(serde_json::Value::as_str)
+        .map(|a| clip(&one_line(a), 40));
+    let scoped_action = scoped_action.or(payload_action.as_deref());
+    let action_suffix = scoped_action.map(|a| format!(" ({a})")).unwrap_or_default();
+    let target = payload.as_ref().and_then(describe_target);
 
     let decision_point = match &target {
         Some(t) => format!("Allow {agent} to use '{tool_name}'{action_suffix} on {t}?"),
@@ -714,10 +723,18 @@ impl Hook for ApprovalHook {
                 return HookResult::Continue;
             }
             if let Some(matcher) = &self.policy_matcher {
-                let payload_path = serde_json::from_str::<serde_json::Value>(input_json)
-                    .ok()
+                let payload = serde_json::from_str::<serde_json::Value>(input_json).ok();
+                let payload_path = payload
                     .as_ref()
                     .and_then(|v| v.get("path"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                // The call's own action, not `scoped_action`: a grant is
+                // matched against what this call does, and a tool can have an
+                // action without a per-action risk override.
+                let payload_action = payload
+                    .as_ref()
+                    .and_then(|v| v.get("action"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 // Path-traversal guard, matching `should_auto_approve` above: a
@@ -727,7 +744,14 @@ impl Hook for ApprovalHook {
                     .as_deref()
                     .map(|p| p.contains(".."))
                     .unwrap_or(false);
-                if !has_traversal && matcher.allows(tool_name, agent_id, payload_path.as_deref()) {
+                if !has_traversal
+                    && matcher.allows(
+                        tool_name,
+                        payload_action.as_deref(),
+                        agent_id,
+                        payload_path.as_deref(),
+                    )
+                {
                     tracing::info!(
                         tool = %tool_name,
                         agent_id = %agent_id,
@@ -1319,6 +1343,27 @@ mod tests {
         assert!(context.contains("What: wifi (connect)\n"));
         // The redacted payload rides through verbatim — no secret re-appears.
         assert!(!context.contains("hunter2"));
+    }
+
+    /// 2026-09-17: a `kill` was approved off "Allow OSS to use
+    /// 'process-manager'?" — the manifest has no per-action table, so the
+    /// action and pid never reached the headline.
+    #[test]
+    fn unscoped_action_and_pid_reach_the_headline() {
+        let (decision, _) = compose_prompt(
+            "OSS",
+            "process-manager",
+            None,
+            &RiskClass::ExecCapable,
+            None,
+            ApprovalMode::AskEdit,
+            None,
+            r#"{"action":"kill","pid":2031459}"#,
+        );
+        assert_eq!(
+            decision,
+            "Allow OSS to use 'process-manager' (kill) on 2031459?"
+        );
     }
 
     /// The target is read off the redacted payload, so a credential-bearing

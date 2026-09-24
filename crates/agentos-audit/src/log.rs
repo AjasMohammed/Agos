@@ -229,6 +229,9 @@ pub enum AuditEventType {
     NotificationSent,
     /// Emitted when a notification is successfully delivered via a channel adapter.
     NotificationDelivered,
+    /// Emitted when the operator's notification routing matrix withheld a
+    /// message from a channel. The answer to "why didn't I get that?".
+    NotificationSuppressed,
     /// Emitted when a notification is marked read by the user.
     NotificationRead,
     /// Emitted when the user responds to an interactive (Question) notification.

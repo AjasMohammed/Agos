@@ -108,8 +108,16 @@ impl Kernel {
             }
         };
 
+        let agent_home = agentos_tools::traits::agent_home_dir(
+            &self.data_dir,
+            Some(&agent_name),
+            &task.agent_id,
+        )
+        .to_string_lossy()
+        .into_owned();
         let system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
+            agent_home,
             agent_description,
             agent_roles,
             custom_instructions,
@@ -124,7 +132,14 @@ impl Kernel {
             granted_folders: system_prompt::GrantedFolders::from_paths(
                 &self.workspace_paths_for_agent(&task.agent_id),
             ),
+            // Task execution is not a conversation turn: no shared workspace.
+            shared_workspace: None,
             unattended: task.trigger_source.is_some() || task.autonomous,
+            // The task's own scope, not the agent's full set: a sub-agent
+            // scoped down cannot load a skill its parent kept.
+            skills: self
+                .skill_hints_for(&task.capability_token.permissions)
+                .await,
         });
         // Returned to the caller rather than appended: unread counts change as
         // notifications arrive, and appending them here would bust the cached

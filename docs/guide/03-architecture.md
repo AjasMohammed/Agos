@@ -91,7 +91,6 @@ agentos-cli
 | **agentos-sdk**        | Ergonomic macros and re-exports for tool development | `#[tool]` attribute macro, re-exports from `agentos-types` and `agentos-tools`                                                                    |
 | **agentos-sdk-macros** | Proc-macro crate for `#[tool]` attribute | `tool` attribute macro                                                                                                                            |
 | **agentos-wasm**       | WASM tool execution via Wasmtime        | `WasmExecutor`, `WasmModule`                                                                                                                       |
-| **agentos-web**        | Web UI server (Axum + HTMX)            | `WebServer`, task/agent/audit views, chat interface                                                                                                |
 | **agentos-kernel**     | Central orchestrator — the "brain"      | `Kernel`, `TaskScheduler`, `ContextCompiler`, `AgentRegistry`, `ToolRegistry`, `TaskRouter`, `CostTracker`, `IntentValidator`, `EventDispatch`     |
 | **agentos-cli**        | User-facing CLI (`agentos`)            | `Cli`, `Commands`, all command handlers                                                                                                            |
 

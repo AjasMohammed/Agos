@@ -91,7 +91,7 @@ agent_id    — which agent produced the event
 entry_type  — one of the types above
 content     — full event content
 summary     — short searchable summary (for FTS5)
-metadata    — JSON blob for structured extras (e.g., outcome=&quot;success&quot;)
+metadata    — JSON blob for structured extras (e.g., outcome="success")
 timestamp   — UTC timestamp
 trace_id    — optional distributed trace correlation ID
 </pre></div>
@@ -152,15 +152,15 @@ tags          — searchable labels
 <h3 id="example" class="anchored"><a class="hanchor" href="#example" aria-label="link">#</a>Example</h3>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// memory-block-write</span>
 <span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user-preferred-language&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;TypeScript&quot;</span>
+<span class="w">  </span><span class="nt">"label"</span><span class="p">:</span><span class="w"> </span><span class="s2">"user-preferred-language"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"content"</span><span class="p">:</span><span class="w"> </span><span class="s2">"TypeScript"</span>
 <span class="p">}</span>
 
 <span class="c1">// memory-block-read</span>
 <span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user-preferred-language&quot;</span>
+<span class="w">  </span><span class="nt">"label"</span><span class="p">:</span><span class="w"> </span><span class="s2">"user-preferred-language"</span>
 <span class="p">}</span>
-<span class="c1">// → { &quot;label&quot;: &quot;user-preferred-language&quot;, &quot;content&quot;: &quot;TypeScript&quot; }</span>
+<span class="c1">// → { "label": "user-preferred-language", "content": "TypeScript" }</span>
 </pre></div>
 </div>
 <hr>
@@ -173,7 +173,7 @@ tags          — searchable labels
 <h3 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h3>
 <div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[memory.extraction]</span>
 <span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<span class="n">conflict_threshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.85</span><span class="w">   </span><span class="c1"># similarity threshold between &quot;update&quot; and &quot;add new&quot;</span>
+<span class="n">conflict_threshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.85</span><span class="w">   </span><span class="c1"># similarity threshold between "update" and "add new"</span>
 <span class="n">max_facts_per_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="w">    </span><span class="c1"># maximum facts extracted from a single tool result</span>
 <span class="n">min_result_length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">50</span><span class="w">      </span><span class="c1"># minimum result length (chars) to attempt extraction</span>
 </pre></div>
@@ -246,7 +246,7 @@ key: deployment-checklist
 <h3 id="general-memory-tools" class="anchored"><a class="hanchor" href="#general-memory-tools" aria-label="link">#</a>General Memory Tools</h3>
 <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>memory-read</code></td><td><code>memory:r</code></td><td>Read a specific memory entry</td></tr><tr><td><code>memory-delete</code></td><td><code>memory:w</code></td><td>Delete a memory entry</td></tr><tr><td><code>memory-stats</code></td><td><code>memory:r</code></td><td>Show memory system statistics</td></tr></tbody></table></div>
 <h3 id="context-memory-tools" class="anchored"><a class="hanchor" href="#context-memory-tools" aria-label="link">#</a>Context Memory Tools</h3>
-<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>context-memory-read</code></td><td><code>agent.context:r</code></td><td>Read agent's context memory document</td></tr><tr><td><code>context-memory-update</code></td><td><code>agent.context:w</code></td><td>Update agent's context memory document</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>context-memory-read</code></td><td><code>memory.context:r</code></td><td>Read agent's context memory document</td></tr><tr><td><code>context-memory-update</code></td><td><code>memory.context:w</code></td><td>Update agent's context memory document</td></tr></tbody></table></div>
 <hr>
 <h2 id="full-configuration-reference" class="anchored"><a class="hanchor" href="#full-configuration-reference" aria-label="link">#</a>Full Configuration Reference</h2>
 <h3 id="memory" class="anchored"><a class="hanchor" href="#memory" aria-label="link">#</a><code>[memory]</code></h3>

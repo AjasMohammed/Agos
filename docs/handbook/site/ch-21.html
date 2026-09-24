@@ -63,9 +63,9 @@ UserMessageKind::StatusUpdate { task_id, old_state, new_state, detail? }
 <div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>subject</code></td><td>string</td><td>Yes</td><td>—</td><td>≤80 chars; used as the email subject and CLI one-liner</td></tr><tr><td><code>body</code></td><td>string</td><td>Yes</td><td>—</td><td>Markdown-formatted message body</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td><code>info</code>, <code>warning</code>, <code>urgent</code>, or <code>critical</code></td></tr><tr><td><code>channels</code></td><td>array of strings</td><td>No</td><td>—</td><td>Restrict delivery to specific channel display-names/kinds (e.g. <code>telegram</code>, <code>ntfy</code>, <code>email</code>, <code>webhook</code>, <code>cli</code>, <code>web</code>). Omit to fan out to all configured channels; an empty array <code>[]</code> is rejected.</td></tr></tbody></table></div>
 <p><strong>Example agent usage:</strong></p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Analysis complete&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Finished scanning 4,200 log lines. Found **3 anomalies** — see attached report.&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;warning&quot;</span>
+<span class="w">  </span><span class="nt">"subject"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Analysis complete"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Finished scanning 4,200 log lines. Found **3 anomalies** — see attached report."</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"priority"</span><span class="p">:</span><span class="w"> </span><span class="s2">"warning"</span>
 <span class="p">}</span>
 </pre></div>
 </div>
@@ -78,11 +78,11 @@ UserMessageKind::StatusUpdate { task_id, old_state, new_state, detail? }
 <div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>question</code></td><td>string</td><td>Yes</td><td>—</td><td>The question to ask the user</td></tr><tr><td><code>options</code></td><td>array of strings</td><td>No</td><td>—</td><td>Optional list of allowed answer choices</td></tr><tr><td><code>timeout_secs</code></td><td>u64</td><td>No</td><td><code>300</code></td><td>Seconds before <code>auto_action</code> fires. Range 10–86400 seconds.</td></tr><tr><td><code>auto_action</code></td><td>string</td><td>No</td><td><code>&quot;auto_denied&quot;</code></td><td>Text injected as the answer if timeout fires with no response</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td>Notification priority level</td></tr></tbody></table></div>
 <p><strong>Example agent usage:</strong></p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;question&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Should I delete the 847 duplicate records from the users table?&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Yes, delete them&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Archive instead&quot;</span><span class="p">],</span>
-<span class="w">  </span><span class="nt">&quot;timeout_secs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;auto_action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;urgent&quot;</span>
+<span class="w">  </span><span class="nt">"question"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Should I delete the 847 duplicate records from the users table?"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"options"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"Yes, delete them"</span><span class="p">,</span><span class="w"> </span><span class="s2">"No, skip"</span><span class="p">,</span><span class="w"> </span><span class="s2">"Archive instead"</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"timeout_secs"</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"auto_action"</span><span class="p">:</span><span class="w"> </span><span class="s2">"No, skip"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"priority"</span><span class="p">:</span><span class="w"> </span><span class="s2">"urgent"</span>
 <span class="p">}</span>
 </pre></div>
 </div>
@@ -100,10 +100,10 @@ agentos<span class="w"> </span>notifications<span class="w"> </span>list<span cl
 agentos<span class="w"> </span>notifications<span class="w"> </span><span class="nb">read</span><span class="w"> </span>&lt;notification-id&gt;
 
 <span class="c1"># Submit your response</span>
-agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, delete them&quot;</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">"Yes, delete them"</span>
 </pre></div>
 </div>
-<p>From the web UI: navigate to the <strong>Notifications</strong> section in the sidebar and click <strong>Reply</strong> on any pending question.</p>
+<p>Over HTTP: <code>POST /api/v1/notifications/&lt;id&gt;/respond</code> — see <a class="wikilink" href="ch-23.html">REST API Reference</a>. Requires <code>[api] enabled = true</code>.</p>
 <hr>
 <h2 id="notification-inbox-cli" class="anchored"><a class="hanchor" href="#notification-inbox-cli" aria-label="link">#</a>Notification Inbox CLI</h2>
 <h3 id="notifications-list" class="anchored"><a class="hanchor" href="#notifications-list" aria-label="link">#</a><code>notifications list</code></h3>
@@ -127,7 +127,7 @@ agentos<span class="w"> </span>notifications<span class="w"> </span>list<span cl
 <p>Submit a response to an interactive <code>Question</code> notification. Unblocks the waiting task.</p>
 <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--response</code> / <code>-r</code></td><td>String</td><td>Your response text</td></tr><tr><td><code>id</code></td><td>String</td><td>Notification UUID (positional)</td></tr></tbody></table></div>
 <p><strong>Example:</strong></p>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>a3b2c1d0<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, proceed&quot;</span>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>a3b2c1d0<span class="w"> </span>--response<span class="w"> </span><span class="s2">"Yes, proceed"</span>
 </pre></div>
 </div>
 <h3 id="notifications-watch" class="anchored"><a class="hanchor" href="#notifications-watch" aria-label="link">#</a><code>notifications watch</code></h3>
@@ -158,26 +158,26 @@ agentos<span class="w"> </span>notifications<span class="w"> </span>list<span cl
 <p>Then connect the channel (chat_id is your numeric Telegram chat ID):</p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--kind<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;@myhandle&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">"123456789"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">"@myhandle"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--credential-key<span class="w"> </span>TELEGRAM_BOT_TOKEN
 </pre></div>
 </div>
 <p><strong>ntfy example:</strong></p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--kind<span class="w"> </span>ntfy<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;my-agentos-alerts&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;ntfy/my-agentos-alerts&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--reply-topic<span class="w"> </span><span class="s2">&quot;my-agentos-replies&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--server-url<span class="w"> </span><span class="s2">&quot;https://ntfy.sh&quot;</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">"my-agentos-alerts"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">"ntfy/my-agentos-alerts"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reply-topic<span class="w"> </span><span class="s2">"my-agentos-replies"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--server-url<span class="w"> </span><span class="s2">"https://ntfy.sh"</span>
 </pre></div>
 </div>
 <p><strong>Email example:</strong></p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>EMAIL_PASSWORD
 agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--kind<span class="w"> </span>email<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;ops-team@example.com&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;ops-team@example.com&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">"ops-team@example.com"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">"ops-team@example.com"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--credential-key<span class="w"> </span>EMAIL_PASSWORD
 </pre></div>
 </div>
@@ -212,8 +212,8 @@ agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">se
 <span class="c1"># 2. Register the Telegram channel</span>
 agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--kind<span class="w"> </span>telegram<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;@ops-handle&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--external-id<span class="w"> </span><span class="s2">"123456789"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">"@ops-handle"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--credential-key<span class="w"> </span>TELEGRAM_BOT_TOKEN
 
 <span class="c1"># 3. Verify the channel is working</span>
@@ -228,13 +228,13 @@ agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="
 <span class="w">  </span>--grant<span class="w"> </span>user.interact:x
 
 <span class="c1"># 5. Run a task — the agent sends notifications automatically</span>
-agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>worker<span class="w"> </span><span class="s2">&quot;Audit the user database and ask me before deleting anything&quot;</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>worker<span class="w"> </span><span class="s2">"Audit the user database and ask me before deleting anything"</span>
 
 <span class="c1"># 6. Watch for incoming questions in another terminal</span>
 agentos<span class="w"> </span>notifications<span class="w"> </span>watch
 
 <span class="c1"># 7. When a question arrives, respond to it</span>
-agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, proceed&quot;</span>
+agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>&lt;notification-id&gt;<span class="w"> </span>--response<span class="w"> </span><span class="s2">"Yes, proceed"</span>
 </pre></div>
 </div>
 <hr>

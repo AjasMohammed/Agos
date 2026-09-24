@@ -4,6 +4,7 @@ use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 
@@ -128,7 +129,7 @@ pub trait BroadcastSink: Send + Sync {
 /// if not resolved by a human operator (Spec §12: "Auto-action on expiry: deny").
 pub struct EscalationManager {
     escalations: RwLock<Vec<PendingEscalation>>,
-    next_id: RwLock<u64>,
+    next_id: AtomicU64,
     /// Configurable timeout in seconds. Defaults to 300 (5 minutes).
     timeout_secs: i64,
     /// Optional webhook URL: receives HTTP POST on escalation creation.
@@ -160,6 +161,20 @@ pub struct EscalationManager {
     /// escalation and the agent could never get through. Set at kernel boot;
     /// `None` in unit tests and in the CLI, where no HAL exists.
     hardware_registry: RwLock<Option<Arc<agentos_hal::HardwareRegistry>>>,
+    /// Workspace grant registry, so that approving a `workspace_access`
+    /// escalation actually widens the agent's filesystem access. Same lesson as
+    /// `hardware_registry`, learned again on 2026-09-21: an operator approved
+    /// three escalations for a path the sandbox never bound, because approval
+    /// only ever meant "re-run the call". Set at kernel boot; `None` in unit
+    /// tests and in the CLI.
+    /// Paired with `workspace_grants`: the kernel data directory, needed to
+    /// re-run the tool's own path validation at resolve time.
+    workspace_grants: RwLock<
+        Option<(
+            Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
+            std::path::PathBuf,
+        )>,
+    >,
     /// Driver-level capture consent for `webcam:` / `audio:` devices. An
     /// approved `device_access` escalation is the same operator decision as
     /// `agentos hal approve`, which opens this window; without it a channel
@@ -244,7 +259,7 @@ impl EscalationManager {
     pub fn with_state_store(state_store: Option<Arc<KernelStateStore>>) -> Self {
         Self {
             escalations: RwLock::new(Vec::new()),
-            next_id: RwLock::new(1),
+            next_id: AtomicU64::new(1),
             timeout_secs: DEFAULT_ESCALATION_TIMEOUT_SECS,
             notify_url: RwLock::new(None),
             state_store,
@@ -253,9 +268,20 @@ impl EscalationManager {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            workspace_grants: RwLock::new(None),
             capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the workspace grant registry so `workspace_access` approvals take
+    /// effect. See [`Self::workspace_grants`].
+    pub async fn set_workspace_grants(
+        &self,
+        registry: Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
+        data_dir: std::path::PathBuf,
+    ) {
+        *self.workspace_grants.write().await = Some((registry, data_dir));
     }
 
     /// Attach the hardware registry so device-access approvals take effect.
@@ -439,7 +465,7 @@ impl EscalationManager {
         }
 
         *self.escalations.write().await = unresolved;
-        *self.next_id.write().await = next_id;
+        self.next_id.store(next_id, Ordering::SeqCst);
 
         Ok(restored)
     }
@@ -594,10 +620,7 @@ impl EscalationManager {
             return (u64::MAX, None);
         }
 
-        let mut next_id = self.next_id.write().await;
-        let id = *next_id;
-        *next_id += 1;
-        drop(next_id);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::seconds(self.timeout_secs);
@@ -797,7 +820,7 @@ impl EscalationManager {
         // sent on the resolution channel must never disagree.
         let mut approved = resolution_is_approval(&resolution);
 
-        if let Some(escalation) = to_persist {
+        if let Some(mut escalation) = to_persist {
             // Grant first, for two reasons. An executor woken by the sender
             // below may retry the HAL call immediately and must not race the
             // grant; and if the grant fails there is nothing to approve, so
@@ -809,6 +832,31 @@ impl EscalationManager {
             if device_grant_failed {
                 approved = false;
             }
+            let workspace_grant_failed = !self
+                .apply_workspace_access_resolution(&escalation, approved)
+                .await;
+            if workspace_grant_failed {
+                approved = false;
+            }
+            // The stored decision string drives every later read —
+            // `EscalationSummary.resolution`, the CLI list, the panel card, and
+            // `resolution_is_approval` on a restart. Leaving it at "approve"
+            // for a decision the system refused shows the operator an approval
+            // that never took effect, which is the failure this whole feature
+            // exists to remove.
+            if device_grant_failed || workspace_grant_failed {
+                let downgraded = format!("denied (grant failed): {resolution}");
+                escalation.resolution = Some(downgraded.clone());
+                if let Some(live) = self
+                    .escalations
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                {
+                    live.resolution = Some(downgraded);
+                }
+            }
             self.audit(Self::audit_entry(
                 AuditEventType::EscalationResolved,
                 &escalation,
@@ -817,6 +865,7 @@ impl EscalationManager {
                     "resolution": resolution,
                     "approved": approved,
                     "device_grant_failed": device_grant_failed,
+                    "workspace_grant_failed": workspace_grant_failed,
                     "decision_point": escalation.decision_point,
                 }),
             ))
@@ -1056,9 +1105,7 @@ impl EscalationManager {
         options: Vec<String>,
         trace_id: TraceID,
     ) -> u64 {
-        let mut next_id = self.next_id.write().await;
-        let id = *next_id;
-        *next_id += 1;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::seconds(30); // 30s soft-approval window
@@ -1108,9 +1155,7 @@ impl EscalationManager {
             return (existing.id, false);
         }
 
-        let mut next_id = self.next_id.write().await;
-        let id = *next_id;
-        *next_id += 1;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::seconds(self.timeout_secs);
@@ -1226,6 +1271,109 @@ impl EscalationManager {
     /// it does not survive a kernel restart; the escalation does, restored as
     /// resolved, so nothing replays it and the agent re-escalates. Persisting
     /// `granted_to` is the upgrade path if restarts start costing approvals.
+    /// Apply a `workspace_access` escalation: write the grant the operator just
+    /// approved. Returns false when it could not be written — the caller then
+    /// flips the outcome to denied, because an approval the system cannot honour
+    /// must never be reported as one.
+    ///
+    /// The path is re-validated here. The metadata was produced from a tool
+    /// payload, i.e. from model output, and by resolve time nothing else has
+    /// checked it.
+    async fn apply_workspace_access_resolution(
+        &self,
+        escalation: &PendingEscalation,
+        approved: bool,
+    ) -> bool {
+        if !approved {
+            return true;
+        }
+        if escalation
+            .metadata
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("workspace_access")
+        {
+            return true;
+        }
+        let (Some(path), mode) = (
+            escalation
+                .metadata
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            escalation
+                .metadata
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("r"),
+        ) else {
+            return true;
+        };
+        let Some((registry, data_dir)) = self.workspace_grants.read().await.clone() else {
+            tracing::error!(
+                escalation_id = escalation.id,
+                path,
+                "Workspace access approved but no grant registry is attached — grant dropped"
+            );
+            return false;
+        };
+        let parsed_mode = match agentos_types::WorkspaceGrantMode::parse(mode) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(escalation_id = escalation.id, mode, error = %e, "Workspace approval carries an invalid mode");
+                return false;
+            }
+        };
+        let p = std::path::Path::new(path);
+        // The SAME validator the tool ran, not a subset of it. A weaker
+        // re-check is not defence in depth — it is a second gate that misses
+        // what the first one caught, and escalations are persisted, so this
+        // metadata can be re-read from SQLite long after the tool call.
+        if let Err(e) = agentos_tools::workspace_request::validate_request(path, mode, &data_dir) {
+            tracing::error!(
+                escalation_id = escalation.id,
+                path,
+                error = %e,
+                "Workspace approval carries an unsafe path — grant refused"
+            );
+            return false;
+        }
+        match registry.grant(
+            p,
+            Some(escalation.agent_id),
+            parsed_mode,
+            "escalation",
+            &format!("escalation:{}", escalation.id),
+        ) {
+            Ok(grant) => {
+                self.audit(Self::audit_entry(
+                    AuditEventType::WorkspaceGranted,
+                    escalation,
+                    serde_json::json!({
+                        "id": grant.id,
+                        "path": grant.path.to_string_lossy(),
+                        "mode": grant.mode.to_string(),
+                        "source": grant.source,
+                        "granted_by": grant.granted_by,
+                        "escalation_id": escalation.id,
+                    }),
+                ))
+                .await;
+                tracing::info!(
+                    escalation_id = escalation.id,
+                    path,
+                    mode,
+                    agent_id = %escalation.agent_id,
+                    "Workspace access granted by escalation"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::error!(escalation_id = escalation.id, path, error = %e, "Workspace grant failed after approval");
+                false
+            }
+        }
+    }
+
     async fn apply_device_access_resolution(
         &self,
         escalation: &PendingEscalation,
@@ -1683,7 +1831,7 @@ mod tests {
         // Manager with zero timeout so create + sweep round-trip is instant.
         let manager = EscalationManager {
             escalations: RwLock::new(Vec::new()),
-            next_id: RwLock::new(1),
+            next_id: AtomicU64::new(1),
             timeout_secs: 0,
             notify_url: RwLock::new(None),
             state_store: None,
@@ -1692,6 +1840,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            workspace_grants: RwLock::new(None),
             capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };
@@ -1937,7 +2086,7 @@ mod tests {
     async fn test_sweep_expired_auto_denies() {
         let manager = EscalationManager {
             escalations: RwLock::new(Vec::new()),
-            next_id: RwLock::new(1),
+            next_id: AtomicU64::new(1),
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
             state_store: None,
@@ -1946,6 +2095,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            workspace_grants: RwLock::new(None),
             capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };
@@ -1987,7 +2137,7 @@ mod tests {
     async fn test_sweep_expired_auto_approves() {
         let manager = EscalationManager {
             escalations: RwLock::new(Vec::new()),
-            next_id: RwLock::new(1),
+            next_id: AtomicU64::new(1),
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
             state_store: None,
@@ -1996,6 +2146,7 @@ mod tests {
             audit: RwLock::new(None),
             pending_resolution_rx: RwLock::new(HashMap::new()),
             hardware_registry: RwLock::new(None),
+            workspace_grants: RwLock::new(None),
             capture_consent: RwLock::new(None),
             realtime_tx: std::sync::OnceLock::new(),
         };

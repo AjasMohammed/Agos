@@ -5,7 +5,7 @@
 //! orchestration loop (round-robin participants); clients poll `GET {id}` for
 //! progress. Token-by-token streaming of each turn is a future enhancement.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::{Extension, Json};
 use std::sync::Arc;
 
@@ -19,14 +19,24 @@ use crate::types::{
     PostConvoMessageRequest,
 };
 
+/// Query for `GET /api/v1/agent-chats`.
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct ListConvosQuery {
+    /// Restrict to one origin: `dm` (opened by an agent's `agent-message`) or
+    /// `operator` (started from the UI or API). Omit for every conversation.
+    pub kind: Option<String>,
+}
+
 /// `GET /api/v1/agent-chats` — List multi-agent conversations (most-recent first).
 #[utoipa::path(
     get,
     path = "/api/v1/agent-chats",
     tag = "agent-chats",
     operation_id = "agent_chats_list",
+    params(ListConvosQuery),
     responses(
         (status = 200, description = "List of conversations", body = crate::response::ListEnvelope<crate::types::ApiConvoSummary>),
+        (status = 400, description = "Unknown kind", body = crate::error::ApiErrorBody),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
     ),
     security(("bearer_auth" = []))
@@ -34,9 +44,19 @@ use crate::types::{
 pub async fn list(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
+    Query(q): Query<ListConvosQuery>,
 ) -> Result<Json<ListEnvelope<ApiConvoSummary>>, ApiError> {
     require_permission(&key, "chat:r")?;
-    let convos = svc.list_convos().await?;
+    // Reject an unknown value rather than silently listing everything: a typo
+    // that quietly returns the wrong set is worse than a 400.
+    if let Some(kind) = q.kind.as_deref() {
+        if kind != "dm" && kind != "operator" {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown kind '{kind}' — expected 'dm' or 'operator'"
+            )));
+        }
+    }
+    let convos = svc.list_convos(q.kind.as_deref()).await?;
     let total = convos.len() as u64;
     Ok(Json(ListEnvelope::new(convos, total)))
 }

@@ -48,6 +48,8 @@ pub struct KernelConfig {
     #[serde(default)]
     pub preflight: PreflightConfig,
     #[serde(default)]
+    pub resource_guard: ResourceGuardConfig,
+    #[serde(default)]
     pub logging: LoggingSettings,
     #[serde(default)]
     pub notifications: NotificationsConfig,
@@ -70,9 +72,6 @@ pub struct KernelConfig {
     /// REST API server configuration.
     #[serde(default)]
     pub api: ApiSettings,
-    /// Web UI server configuration (auth token source).
-    #[serde(default)]
-    pub web: WebConfig,
     /// User-selectable approval mode for tool calls. Controls when the
     /// kernel auto-approves vs. escalates a tool call for human review.
     #[serde(default)]
@@ -114,6 +113,13 @@ pub struct KernelConfig {
     /// Inbound voice/audio transcription (speech-to-text) for channel media.
     #[serde(default)]
     pub transcription: TranscriptionSettings,
+    /// Outbound text-to-speech for the `speak` tool (disabled by default).
+    #[serde(default)]
+    pub tts: agentos_tools::TtsSettings,
+    /// Bounds on a stored procedure run (`procedure-run`, and later a
+    /// `mode="procedure"` schedule fire).
+    #[serde(default)]
+    pub procedures: ProcedureSettings,
     /// Per-agent heartbeat wakeups (opt-in; disabled by default).
     #[serde(default)]
     pub agent_heartbeat: HeartbeatSettings,
@@ -251,6 +257,14 @@ pub struct HalSettings {
     /// allowlist every open/read/write/control is denied.
     #[serde(default)]
     pub raw_usb: RawUsbSettings,
+    /// Register these peripheral drivers even when the boot-time host probe
+    /// says absent (e.g. `"printer"` for a remote CUPS server). The driver
+    /// must be compiled in.
+    #[serde(default)]
+    pub force_enable: Vec<String>,
+    /// Never register these peripheral drivers, even when present (privacy).
+    #[serde(default)]
+    pub disable: Vec<String>,
 }
 
 /// Raw-USB allowlist, the only way to make the `raw-usb` driver usable.
@@ -305,6 +319,9 @@ impl Default for HeartbeatSettings {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TranscriptionSettings {
     /// Master switch. When false, voice/audio is stored but not transcribed.
+    /// When true it also changes retention: a *voice note* whose transcript was
+    /// appended is no longer written to the file store (the transcript is the
+    /// artifact), while an uploaded *audio file* is transcribed and still kept.
     #[serde(default)]
     pub enabled: bool,
     /// OpenAI-compatible transcription endpoint (multipart `file` + `model`).
@@ -849,6 +866,9 @@ pub struct KernelSettings {
     /// Event broadcast channel configuration.
     #[serde(default)]
     pub events: EventChannelConfig,
+    /// Agent-to-agent conversation (DM session) tunables.
+    #[serde(default)]
+    pub convo: ConvoConfig,
     /// Controls when tools are executed in sandbox child processes vs in-process.
     #[serde(default)]
     pub sandbox_policy: SandboxPolicy,
@@ -1006,6 +1026,59 @@ pub struct EventChannelConfig {
     /// without waiting out the window.
     #[serde(default = "default_reaction_batch_max_events")]
     pub reaction_batch_max_events: usize,
+}
+
+/// Tunables for agent-to-agent conversation threads (`kind = "dm"` convos).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConvoConfig {
+    /// Agent turns granted each time an `agent-message` reopens a DM session.
+    /// This is the budget that replaced `max_chain_depth` for agent-to-agent
+    /// talk: it is visible in the UI, raisable with `/continue`, and an
+    /// unanswered operator message still buys one extra round.
+    #[serde(default = "default_dm_max_turns")]
+    pub dm_max_turns: u32,
+    /// How long a DM session lives, measured from when it opens. Fixed, not
+    /// slid by activity: a pair that keeps each other busy is exactly the case
+    /// that needs a ceiling. A session ends when its turns are done or when
+    /// this runs out — see `dm_expiry_escalation`, which lets the operator
+    /// extend a session that is still going.
+    #[serde(default = "default_dm_session_ttl_secs")]
+    pub dm_session_ttl_secs: u64,
+    /// Ask the operator to extend a DM session when its clock runs out instead
+    /// of closing it outright. The question is asked from the expiry sweep and
+    /// nothing blocks on it; unanswered, the session closes after the
+    /// escalation's own timeout. Set false for unattended operation.
+    #[serde(default = "default_true")]
+    pub dm_expiry_escalation: bool,
+    /// How long a conversation's shared workspace stays accessible, for convos
+    /// with no deadline of their own (operator convos). DM sessions use their
+    /// own `dm_expires_at` instead. The directory survives; only the
+    /// participants' zones over it expire.
+    #[serde(default = "default_shared_zone_ttl_secs")]
+    pub shared_zone_ttl_secs: u64,
+}
+
+fn default_shared_zone_ttl_secs() -> u64 {
+    86_400
+}
+
+impl Default for ConvoConfig {
+    fn default() -> Self {
+        Self {
+            dm_max_turns: default_dm_max_turns(),
+            dm_session_ttl_secs: default_dm_session_ttl_secs(),
+            dm_expiry_escalation: default_true(),
+            shared_zone_ttl_secs: default_shared_zone_ttl_secs(),
+        }
+    }
+}
+
+fn default_dm_max_turns() -> u32 {
+    6
+}
+
+fn default_dm_session_ttl_secs() -> u64 {
+    1800 // 30 minutes
 }
 
 impl Default for EventChannelConfig {
@@ -1825,6 +1898,57 @@ fn default_check_db_writable() -> bool {
     true
 }
 
+/// Runtime disk-headroom guard. `[preflight]` checks once at boot; this keeps
+/// checking, so a filling disk degrades the system deliberately instead of
+/// surfacing as `SQLITE_FULL` write failures nobody is watching.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResourceGuardConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Seconds between measurements of the data-dir partition.
+    #[serde(default = "default_resource_check_interval_secs")]
+    pub check_interval_secs: u64,
+    /// Below this many free MB the level becomes `warn` (operator notified).
+    #[serde(default = "default_resource_warn_free_mb")]
+    pub warn_free_mb: u64,
+    /// Below this many free MB the level becomes `critical`: deferrable
+    /// writers pause and `/readyz` reports 503.
+    #[serde(default = "default_resource_critical_free_mb")]
+    pub critical_free_mb: u64,
+    /// Inode exhaustion fails writes just as hard as byte exhaustion, so it
+    /// gets its own critical threshold.
+    #[serde(default = "default_resource_critical_free_inodes")]
+    pub critical_free_inodes: u64,
+}
+
+impl Default for ResourceGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: default_resource_check_interval_secs(),
+            warn_free_mb: default_resource_warn_free_mb(),
+            critical_free_mb: default_resource_critical_free_mb(),
+            critical_free_inodes: default_resource_critical_free_inodes(),
+        }
+    }
+}
+
+fn default_resource_check_interval_secs() -> u64 {
+    60
+}
+
+fn default_resource_warn_free_mb() -> u64 {
+    2048
+}
+
+fn default_resource_critical_free_mb() -> u64 {
+    512
+}
+
+fn default_resource_critical_free_inodes() -> u64 {
+    10_000
+}
+
 /// Configuration for the periodic system health monitoring loop.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthMonitorConfig {
@@ -2344,25 +2468,6 @@ impl Default for ApiSettings {
             config_writable: false,
         }
     }
-}
-
-/// `[web]` config block. Controls the Web UI authentication token.
-///
-/// The token is resolved at server startup in this precedence order:
-/// 1. `$AGENTOS_WEB_TOKEN` environment variable (best for systemd/Docker —
-///    never persisted to disk).
-/// 2. `auth_token` set here in config.
-/// 3. A token generated once and persisted to `{data_dir}/web_token` (mode
-///    `0600`) on first boot, then reused on every subsequent restart.
-///
-/// This makes the token *stable across restarts* instead of regenerating a
-/// fresh random token on every boot.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct WebConfig {
-    /// Stable Web UI auth token. When unset (or empty), the server falls back
-    /// to `$AGENTOS_WEB_TOKEN`, then to a persisted `{data_dir}/web_token` file.
-    #[serde(default)]
-    pub auth_token: Option<String>,
 }
 
 /// `[approval]` config block. Controls when the kernel auto-approves vs.
@@ -2972,6 +3077,16 @@ mod tests {
         // Omitting the section entirely yields an empty (fail-closed) list.
         let empty: HalSettings = toml::from_str("").expect("parse empty hal settings");
         assert!(empty.raw_usb.allow.is_empty());
+        assert!(empty.force_enable.is_empty() && empty.disable.is_empty());
+    }
+
+    #[test]
+    fn hal_peripheral_overrides_parse() {
+        let settings: HalSettings =
+            toml::from_str("force_enable = [\"printer\"]\ndisable = [\"webcam\"]")
+                .expect("parse hal overrides");
+        assert_eq!(settings.force_enable, vec!["printer"]);
+        assert_eq!(settings.disable, vec!["webcam"]);
     }
 
     #[test]
@@ -3486,4 +3601,53 @@ default_model = "llama3.2"
         assert_eq!(api.host, "127.0.0.1");
         assert!(!api.enabled, "API server is opt-in");
     }
+}
+
+/// `[procedures]` — bounds applied to every compiled procedure run.
+///
+/// A recipe is agent-authored, so every one of these is a ceiling on what a
+/// mistake can cost, not a tuning knob. They are deliberately modest: a
+/// procedure that needs more than this is doing something its author should
+/// think about again.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProcedureSettings {
+    /// Per-step wall-clock cap.
+    #[serde(default = "default_procedure_step_timeout_minutes")]
+    pub step_timeout_minutes: u64,
+    /// Ceiling on the whole run's inference spend. `None` = uncapped.
+    #[serde(default = "default_procedure_max_cost_usd")]
+    pub max_cost_usd: Option<f64>,
+    /// Ceiling on the whole run's wall-clock time. `None` = uncapped.
+    #[serde(default = "default_procedure_max_wall_time_minutes")]
+    pub max_wall_time_minutes: Option<u64>,
+    /// Largest bound-input payload, matching the schedule path's args cap.
+    #[serde(default = "default_procedure_max_input_bytes")]
+    pub max_input_bytes: usize,
+}
+
+impl Default for ProcedureSettings {
+    fn default() -> Self {
+        Self {
+            step_timeout_minutes: default_procedure_step_timeout_minutes(),
+            max_cost_usd: default_procedure_max_cost_usd(),
+            max_wall_time_minutes: default_procedure_max_wall_time_minutes(),
+            max_input_bytes: default_procedure_max_input_bytes(),
+        }
+    }
+}
+
+fn default_procedure_step_timeout_minutes() -> u64 {
+    5
+}
+
+fn default_procedure_max_cost_usd() -> Option<f64> {
+    Some(1.0)
+}
+
+fn default_procedure_max_wall_time_minutes() -> Option<u64> {
+    30.into()
+}
+
+fn default_procedure_max_input_bytes() -> usize {
+    16 * 1024
 }

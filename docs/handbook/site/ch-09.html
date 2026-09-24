@@ -58,12 +58,12 @@
 </div>
 <p>The command prompts for the value with hidden input — the value is never visible in the shell history or process table:</p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>OPENAI_API_KEY
-<span class="c1"># Enter value for &#39;OPENAI_API_KEY&#39; (input hidden): ▌</span>
-<span class="c1"># ✅ Secret &#39;OPENAI_API_KEY&#39; stored securely</span>
+<span class="c1"># Enter value for 'OPENAI_API_KEY' (input hidden): ▌</span>
+<span class="c1"># ✅ Secret 'OPENAI_API_KEY' stored securely</span>
 
 agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>DB_PASSWORD<span class="w"> </span>--scope<span class="w"> </span>agent:worker
-<span class="c1"># Enter value for &#39;DB_PASSWORD&#39; (input hidden): ▌</span>
-<span class="c1"># ✅ Secret &#39;DB_PASSWORD&#39; stored securely</span>
+<span class="c1"># Enter value for 'DB_PASSWORD' (input hidden): ▌</span>
+<span class="c1"># ✅ Secret 'DB_PASSWORD' stored securely</span>
 </pre></div>
 </div>
 <p><strong>Parameters:</strong></p>
@@ -76,10 +76,10 @@ agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">se
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Global — any agent can use this</span>
 agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>ANTHROPIC_API_KEY<span class="w"> </span>--scope<span class="w"> </span>global
 
-<span class="c1"># Scoped to the &#39;finance-agent&#39; only</span>
+<span class="c1"># Scoped to the 'finance-agent' only</span>
 agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>PAYROLL_DB_PASSWORD<span class="w"> </span>--scope<span class="w"> </span>agent:finance-agent
 
-<span class="c1"># Scoped to the &#39;stripe-payment&#39; tool only</span>
+<span class="c1"># Scoped to the 'stripe-payment' tool only</span>
 agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>STRIPE_SECRET_KEY<span class="w"> </span>--scope<span class="w"> </span>tool:stripe-payment
 </pre></div>
 </div>
@@ -105,8 +105,8 @@ STRIPE_SECRET_KEY         Tool(stripe-payment) 2026-03-16 14:05:00 UTC
 </pre></div>
 </div>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>rotate<span class="w"> </span>OPENAI_API_KEY
-<span class="c1"># Enter new value for &#39;OPENAI_API_KEY&#39; (input hidden): ▌</span>
-<span class="c1"># ✅ Secret &#39;OPENAI_API_KEY&#39; rotated</span>
+<span class="c1"># Enter new value for 'OPENAI_API_KEY' (input hidden): ▌</span>
+<span class="c1"># ✅ Secret 'OPENAI_API_KEY' rotated</span>
 </pre></div>
 </div>
 <p>The rotation is logged to the audit trail with a <code>SecretRotated</code> event. The scope and ownership are preserved — only the encrypted value changes.</p>
@@ -117,7 +117,7 @@ STRIPE_SECRET_KEY         Tool(stripe-payment) 2026-03-16 14:05:00 UTC
 </pre></div>
 </div>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>revoke<span class="w"> </span>OLD_API_KEY
-<span class="c1"># ✅ Secret &#39;OLD_API_KEY&#39; revoked</span>
+<span class="c1"># ✅ Secret 'OLD_API_KEY' revoked</span>
 </pre></div>
 </div>
 <p>After revocation, any agent or tool that attempts to access the secret will receive an error. The revocation event is written to the audit log.</p>
@@ -137,7 +137,7 @@ STRIPE_SECRET_KEY         Tool(stripe-payment) 2026-03-16 14:05:00 UTC
 <p>Agents <strong>never see raw secret values</strong>. The flow is:</p>
 <div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent task starts
   → Kernel issues CapabilityToken with allowed tools
-  → Agent issues intent: Execute(&quot;llm-call&quot;, {model: &quot;gpt-4&quot;})
+  → Agent issues intent: Execute("llm-call", {model: "gpt-4"})
   → Kernel retrieves OPENAI_API_KEY from vault (decrypt with master key)
   → Kernel injects raw value into the LLM adapter HTTP request
   → Raw value is zeroed from memory after the request
@@ -150,7 +150,7 @@ STRIPE_SECRET_KEY         Tool(stripe-payment) 2026-03-16 14:05:00 UTC
 <p>Vault settings in <code>config/default.toml</code>:</p>
 <div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[secrets]</span>
 <span class="c1"># Path to the SQLite vault database</span>
-<span class="n">vault_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/tmp/agentos/vault/secrets.db&quot;</span>
+<span class="n">vault_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/tmp/agentos/vault/secrets.db"</span>
 </pre></div>
 </div>
 <p>Argon2id key derivation parameters (64 MiB memory, 3 iterations, 4 lanes) are hardcoded for security and cannot be weakened via config.</p>

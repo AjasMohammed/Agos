@@ -5,7 +5,7 @@
 # Usage:
 #   ./release.sh                                    # defaults
 #   ./release.sh --clean                            # wipe data and start fresh
-#   AGENTOS_PORT=9090 ./release.sh                  # custom port
+#   AGENTOS_PORT=9090 ./release.sh --clean          # custom port (baked into generated config)
 #   AGENTOS_VAULT_PASSPHRASE=mypass ./release.sh    # skip vault prompt
 #   AGENTOS_LLM_PROVIDER=anthropic ./release.sh     # use cloud LLM
 #
@@ -56,8 +56,8 @@ for arg in "$@"; do
       echo "  --skip-build  Skip cargo build (use existing binary)"
       echo ""
       echo "Environment variables:"
-      echo "  AGENTOS_HOST              Listen address (default: 127.0.0.1)"
-      echo "  AGENTOS_PORT              Listen port (default: 8080)"
+      echo "  AGENTOS_HOST              API listen address for a generated config (default: 127.0.0.1)"
+      echo "  AGENTOS_PORT              API listen port for a generated config (default: 8080)"
       echo "  AGENTOS_DATA_DIR          Data directory (default: ~/.agentos)"
       echo "  AGENTOS_VAULT_PASSPHRASE  Vault passphrase (default: devpass)"
       echo "  AGENTOS_FEATURES          Extra cargo features (default: otel)"
@@ -138,7 +138,6 @@ mkdir -p \
   "$DATA_DIR/tools/user" \
   "$DATA_DIR/plugins/core" \
   "$DATA_DIR/plugins/user" \
-  "$DATA_DIR/static" \
   "$DATA_DIR/logs"
 
 # Seed core tool manifests
@@ -147,11 +146,6 @@ cp -r "$SCRIPT_DIR"/tools/core/. "$DATA_DIR/tools/core/"
 # Seed core plugin manifests if they exist
 if [[ -d "$SCRIPT_DIR/plugins/core" ]]; then
   cp -r "$SCRIPT_DIR"/plugins/core/. "$DATA_DIR/plugins/core/"
-fi
-
-# Copy web UI static assets if they exist
-if [[ -d "$SCRIPT_DIR/crates/agentos-web/static" ]]; then
-  cp -r "$SCRIPT_DIR"/crates/agentos-web/static/. "$DATA_DIR/static/"
 fi
 
 # ─── Generate host config ───────────────────────────────────────────────────
@@ -353,7 +347,6 @@ else
 fi
 
 export AGENTOS_CONFIG="$CONFIG"
-export AGENTOS_STATIC_DIR="$DATA_DIR/static"
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
@@ -379,7 +372,7 @@ echo ""
 echo "==> Starting AgentOS (release, host-native)"
 echo "    Config   : $CONFIG"
 echo "    Data     : $DATA_DIR"
-echo "    Web UI   : http://$HOST:$PORT"
+echo "    REST API : [api] host/port in $CONFIG (generated as http://$HOST:$PORT)"
 echo "    Logs     : $DATA_DIR/logs/"
 echo "    Socket   : $DATA_DIR/data/agentos.sock"
 echo ""
@@ -393,4 +386,4 @@ echo ""
 echo "    Press Ctrl+C to stop."
 echo ""
 
-exec ./target/release/agentos --config "$CONFIG" web serve --host "$HOST" --port "$PORT"
+exec ./target/release/agentos --config "$CONFIG" start

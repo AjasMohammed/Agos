@@ -16,7 +16,6 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 sysinfo.workspace = true
-procfs.workspace = true
 nix.workspace = true
 regex.workspace = true
 chrono.workspace = true
@@ -35,6 +34,9 @@ toml.workspace = true
 # peripheral features on other platforms compiles (the driver modules are
 # cfg(target_os = "linux")-gated and simply absent off-Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
+# procfs refuses to build off Linux ("Currently only linux and android are
+# supported"), and every call site is already cfg(target_os = "linux").
+procfs.workspace = true
 zbus = { workspace = true }
 bluer = { version = "0.17", optional = true, features = ["full"] }
 wayland-client = { version = "0.31", optional = true }

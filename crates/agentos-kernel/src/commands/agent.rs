@@ -1740,7 +1740,15 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             }
         }
 
-        match self.message_bus.send_direct(msg, 0).await {
+        // Operator-sent: same session rule, same thread. The operator is the
+        // one deciding here, so nothing is escalated on this path.
+        let convo_id = self.append_dm_turn(&from_name, &to_name, &content).await;
+
+        match self
+            .message_bus
+            .send_direct(msg, 0, convo_id.as_deref())
+            .await
+        {
             Ok(_) => KernelResponse::Success { data: None },
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
@@ -2133,7 +2141,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
 /// Every one of these backs a tool the system already ships in its own default
 /// inventory (`CHAT_DEFAULT_TOOL_NAMES`), so an agent was being offered the
 /// tool while holding no permission to call it:
-///   `fs.artifacts`     → artifact-write
+///   `fs.artifacts`     → artifact-write, file-publish
 ///   `schedule.*`       → schedule-once/-recurring/-control, list-my-schedules,
 ///                        get-schedule-runs, get-task-logs, list-timers, set-timer
 ///
@@ -2153,6 +2161,12 @@ Once you have explored, briefly summarise what you found and confirm you are rea
 /// agent: `agentos perm grant <agent> system.services:r`.
 const LATE_DEFAULT_GRANTS: &[(&str, bool, bool, bool)] = &[
     // (resource, read, write, execute)
+    // Broad skill grant: covers every installed skill, including ones
+    // installed later (`skill:` prefix-matches `skill:<name>/`). The operator
+    // scopes one out per agent with
+    // `agentos perm revoke <agent> skill:<name>/:x`, which records a deny —
+    // and a deny beats this grant in `PermissionSet::check`.
+    ("skill:", false, false, true),
     ("fs.artifacts", true, true, false),
     ("schedule.job", true, true, false),
     ("schedule.timer", true, true, false),
@@ -2236,6 +2250,10 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
 
     // Agent registry — read-only (agent-self, agent-list, agent-manual)
     perms.grant("agent.registry".to_string(), true, false, false, None);
+
+    // Skills (`skill:` prefix-matches `skill:<name>/`) come from
+    // `LATE_DEFAULT_GRANTS`, applied below by `backfill_late_default_grants`
+    // — granting here too would just write the same entry twice.
 
     // Agent messaging — execute (agent-message, task-delegate)
     perms.grant_op("agent.message".to_string(), PermissionOp::Execute, None);

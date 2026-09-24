@@ -61,7 +61,7 @@ description = "Fixed argument payload passed to the tool (optional when mode='to
 
 [payload_schema.properties.agent_name]
 type        = "string"
-description = "Name of the agent that will run the task. Defaults to the calling agent."
+description = "Agent (name or AgentID) that runs the scheduled work. Defaults to the calling agent. Targeting another agent runs with only the permissions both of you hold."
 
 [payload_schema.properties.fire_at]
 type        = "string"

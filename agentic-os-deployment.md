@@ -167,7 +167,7 @@ RUN mkdir -p \
 # Persistent volumes — these must survive container restarts
 VOLUME ["/opt/agentos/vault", "/opt/agentos/data", "/opt/agentos/agents", "/opt/agentos/logs"]
 
-# Web UI
+# REST API + WebSocket (agentos-api, [api] enabled = true)
 EXPOSE 8080
 # Internal kernel API (should NOT be exposed to host network)
 # EXPOSE 9090   ← intentionally not exposed
@@ -194,7 +194,7 @@ services:
     container_name: agentos
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"    # Web UI — bound to localhost only
+      - "127.0.0.1:8080:8080"    # REST API — bound to localhost only
                                   # Use a reverse proxy (nginx/caddy) for external access
     volumes:
       - agentos_vault:/opt/agentos/vault       # Encrypted secrets
@@ -206,7 +206,6 @@ services:
       - ./config/agentos.toml:/opt/agentos/config/agentos.toml:ro
     environment:
       - AGENTOS_LOG_LEVEL=info
-      - AGENTOS_WEB_UI=true
       # NOTE: No API keys here — use: agentctl secret set
     security_opt:
       - no-new-privileges:true               # Prevent privilege escalation
@@ -306,7 +305,7 @@ networks:
 agentos.yourdomain.com {
     reverse_proxy agentos:8080
 
-    # Basic auth for web UI (until AgentOS has native auth)
+    # Optional basic auth in front of the REST API (it also has API-key auth)
     basicauth {
         admin $2a$14$...  # bcrypt hash of your password
     }
@@ -605,7 +604,7 @@ cd agentos && docker compose up -d
 **Security Groups (Firewall):**
 ```
 Inbound:
-  - Port 443 (HTTPS) from 0.0.0.0/0    ← Web UI via Caddy
+  - Port 443 (HTTPS) from 0.0.0.0/0    ← REST API via Caddy
   - Port 22 (SSH) from your IP only    ← Admin access
 
 Outbound:
@@ -840,7 +839,7 @@ Once the bare metal kernel is built, AgentOS can run directly on:
 └─────────────────────────────────────────────────────┘
 
 External access:
-  HTTPS :443 → Caddy → AgentOS Web UI :8080
+  HTTPS :443 → Caddy → AgentOS REST API :8080
   
 Internal (never exposed):
   AgentOS Kernel API :9090 (Unix socket or internal only)
@@ -851,10 +850,10 @@ Internal (never exposed):
 
 | Port | Service | Exposure |
 |---|---|---|
-| 8080 | AgentOS Web UI | Internal only (proxy via Caddy/nginx) |
+| 8080 | AgentOS REST API | Internal only (proxy via Caddy/nginx) |
 | 9090 | Kernel API | Internal only (never exposed) |
 | 11434 | Ollama | Internal only (never exposed) |
-| 443 | Caddy HTTPS | Public (Web UI access) |
+| 443 | Caddy HTTPS | Public (REST API / panel access) |
 | 80 | Caddy HTTP | Public (redirects to HTTPS) |
 
 ### Firewall Rules (ufw)
@@ -864,7 +863,7 @@ Internal (never exposed):
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow ssh                   # Your admin access
-ufw allow 443/tcp               # Web UI (HTTPS)
+ufw allow 443/tcp               # REST API (HTTPS)
 ufw allow 80/tcp                # HTTP (redirects to HTTPS)
 ufw deny 8080/tcp               # Never expose directly
 ufw deny 9090/tcp               # Never expose directly
@@ -1384,7 +1383,7 @@ Expected result: `test result: ok. 7 passed; 0 failed; 0 ignored`
 ### After First Launch
 
 - [ ] `agentctl status` returns healthy
-- [ ] Web UI accessible via HTTPS
+- [ ] REST API accessible via HTTPS
 - [ ] First agent connected via `agentctl agent connect` (interactive key prompt)
 - [ ] Test task runs successfully
 - [ ] Audit log shows task activity

@@ -21,6 +21,7 @@ pub mod permission;
 pub mod personalization;
 pub mod pipeline;
 pub mod plugin;
+pub mod procedure;
 pub mod provider;
 pub mod resource;
 pub mod role;

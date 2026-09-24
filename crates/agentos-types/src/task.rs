@@ -132,6 +132,19 @@ impl ThinkingLevel {
             ThinkingLevel::Max => Some(100_000),
         }
     }
+
+    /// Convert to the `output_config.effort` value used by Claude 4.6 and
+    /// later, which replaced `budget_tokens` as the reasoning-depth dial.
+    /// Returns `None` when thinking is disabled.
+    pub fn effort(&self) -> Option<&'static str> {
+        match self {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Low => Some("low"),
+            ThinkingLevel::Medium => Some("medium"),
+            ThinkingLevel::High => Some("high"),
+            ThinkingLevel::Max => Some("max"),
+        }
+    }
 }
 
 #[cfg(test)]

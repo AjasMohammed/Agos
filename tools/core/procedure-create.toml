@@ -4,7 +4,8 @@ risk_class = "write_agent_state"
 [manifest]
 name        = "procedure-create"
 version     = "1.0.0"
-description = "Save a learned procedure or SOP to procedural memory for future reuse"
+description = "Save a learned procedure or SOP to procedural memory. Give every step a 'tool' and an 'input' payload to make the procedure EXECUTABLE — procedure-run then invokes the steps directly, with no LLM in the loop. Omit them for a prose SOP that is only ever read back into context. Declare 'inputs' to parameterise it."
+search_hints = ["save a workflow", "remember how to do this", "automate these steps", "create a reusable procedure", "build a pipeline", "chain tools together"]
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "memory"
@@ -25,16 +26,42 @@ required = ["name", "description", "steps"]
 
 [payload_schema.properties.name]
 type = "string"
-description = "Procedure name"
+description = "Procedure name (1-128 characters). This is how procedure-run and schedules address the recipe."
 
 [payload_schema.properties.description]
 type = "string"
 description = "What the procedure accomplishes"
 
+[payload_schema.properties.inputs]
+type = "array"
+maxItems = 16
+description = "Parameters the procedure accepts at run time. Reference one from a step payload as {{inputs.<name>}}. Omit for a procedure that takes no arguments."
+
+[payload_schema.properties.inputs.items]
+type = "object"
+required = ["name"]
+
+[payload_schema.properties.inputs.items.properties.name]
+type = "string"
+description = "Parameter name: 1-64 characters, [A-Za-z_][A-Za-z0-9_]*. It becomes a template key."
+
+[payload_schema.properties.inputs.items.properties.description]
+type = "string"
+description = "What this parameter is for."
+
+[payload_schema.properties.inputs.items.properties.required]
+type = "boolean"
+default = false
+description = "When true, procedure-run fails if the caller omits it."
+
+[payload_schema.properties.inputs.items.properties.default]
+description = "Value used when the caller omits a non-required parameter. Any JSON type."
+
 [payload_schema.properties.steps]
 type = "array"
 minItems = 1
-description = "Ordered procedure steps"
+maxItems = 32
+description = "Ordered procedure steps. Either ALL steps carry a 'tool' + 'input' (an executable procedure) or none do (a prose SOP) — a mix is rejected."
 
 [payload_schema.properties.steps.items]
 type = "object"
@@ -46,11 +73,19 @@ description = "Instruction for this step"
 
 [payload_schema.properties.steps.items.properties.tool]
 type = "string"
-description = "Optional recommended tool name"
+description = "Tool to invoke for this step. Required alongside 'input' for an executable procedure; on its own it is only a recommendation to a reader. Scheduling, spawning, interactive and procedure-authoring tools (spawn-agent, schedule-*, task-delegate, ask-user, procedure-run, procedure-create) are rejected, to remove the obvious recursions. What actually bounds a step is your own permissions: each one is gated individually when the procedure runs."
+
+[payload_schema.properties.steps.items.properties.input]
+type = "object"
+description = "Tool payload for this step, making it executable. Must be an object. Use {{inputs.<name>}} for a declared parameter and {{<output_var>}} for an EARLIER step's output — a forward reference is rejected. Select into a value with dots, including array indexes: {{clip.path}}, {{rows.0.id}}. A field whose value is EXACTLY one binding takes that value's own JSON type; a binding among other text is stringified into it."
+
+[payload_schema.properties.steps.items.properties.output_var]
+type = "string"
+description = "Bind this step's output to a name later steps can reference as {{<name>}}. 1-64 characters, [A-Za-z_][A-Za-z0-9_]*, unique across steps. 'inputs' is reserved."
 
 [payload_schema.properties.steps.items.properties.expected_outcome]
 type = "string"
-description = "Optional expected result"
+description = "Optional expected result (documentation only; not asserted)"
 
 [payload_schema.properties.preconditions]
 type = "array"
@@ -81,3 +116,32 @@ gpu           = false
 max_memory_mb = 512
 max_cpu_ms    = 5000
 syscalls      = []
+
+[usage_hints]
+use_for = [
+  "capturing a multi-step routine you had to work out, so neither you nor another agent has to work it out again",
+  "building a parameterised recipe you can run in one call with procedure-run, instead of repeating the same tool sequence every time",
+]
+related_tools = ["procedure-run", "procedure-search", "procedure-list", "procedure-delete"]
+
+[[examples]]
+description = "An executable two-step recipe: synthesise speech, then play it on the host speakers"
+[examples.payload]
+name = "speak-aloud"
+description = "Say a line of text on the host speakers"
+[[examples.payload.inputs]]
+name = "text"
+description = "What to say"
+required = true
+[[examples.payload.steps]]
+action = "Synthesise the text to an audio file"
+tool = "speak"
+output_var = "clip"
+[examples.payload.steps.input]
+text = "{{inputs.text}}"
+[[examples.payload.steps]]
+action = "Play the synthesised file on the host speakers"
+tool = "audio"
+[examples.payload.steps.input]
+action = "playback"
+audio_path = "{{clip.path}}"

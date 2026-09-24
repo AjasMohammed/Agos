@@ -116,6 +116,15 @@ pub(crate) enum KernelAction {
     SwitchPartition {
         partition: String, // "active" or "scratchpad"
     },
+    /// Run a stored executable procedure as the calling agent.
+    ///
+    /// Every step is gated individually against that agent's own
+    /// `PermissionSet`, so this grants no authority the agent did not have.
+    RunProcedure {
+        procedure: String,
+        inputs: serde_json::Value,
+        detach: bool,
+    },
     MemoryBlockWrite {
         label: String,
         content: String,
@@ -145,6 +154,15 @@ pub(crate) enum KernelAction {
         timeout_secs: u64,
         priority: String,
         auto_action: String,
+    },
+    /// Blocking request for access to a host folder. Raises an escalation whose
+    /// approval WRITES the workspace grant before the caller is woken — an
+    /// approval that changes no state is what made 2026-09-21 unrecoverable.
+    WorkspaceRequest {
+        path: String,
+        mode: String,
+        reason: String,
+        timeout_secs: u64,
     },
     /// Synchronous agent-to-agent RPC call — blocks until the target agent
     /// completes the child task and returns its output.
@@ -353,12 +371,14 @@ impl KernelAction {
             KernelAction::SendAgentMessage { .. } => "send_agent_message",
             KernelAction::EscalateToHuman { .. } => "escalate",
             KernelAction::SwitchPartition { .. } => "switch_partition",
+            KernelAction::RunProcedure { .. } => "run_procedure",
             KernelAction::MemoryBlockWrite { .. } => "memory_block_write",
             KernelAction::MemoryBlockRead { .. } => "memory_block_read",
             KernelAction::MemoryBlockList => "memory_block_list",
             KernelAction::MemoryBlockDelete { .. } => "memory_block_delete",
             KernelAction::NotifyUser { .. } => "notify_user",
             KernelAction::AskUser { .. } => "ask_user",
+            KernelAction::WorkspaceRequest { .. } => "workspace_request",
             KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
             KernelAction::ContextMemoryUpdate { .. } => "context_memory_update",
             KernelAction::ContextMemoryRead => "context_memory_read",
@@ -410,6 +430,20 @@ impl KernelAction {
                     target_agent,
                     prompt,
                     priority,
+                })
+            }
+            "run_procedure" => {
+                let procedure = value.get("procedure")?.as_str()?.to_string();
+                Some(Self::RunProcedure {
+                    procedure,
+                    inputs: value
+                        .get("inputs")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    detach: value
+                        .get("detach")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 })
             }
             "send_agent_message" => {
@@ -675,6 +709,25 @@ impl KernelAction {
                     timeout_secs,
                     priority,
                     auto_action,
+                })
+            }
+            "workspace_request" => {
+                let path = value.get("path")?.as_str()?.to_string();
+                let reason = value.get("reason")?.as_str()?.to_string();
+                let mode = value
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("r")
+                    .to_string();
+                let timeout_secs = value
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(300);
+                Some(Self::WorkspaceRequest {
+                    path,
+                    mode,
+                    reason,
+                    timeout_secs,
                 })
             }
             "agent_rpc_call" => {
@@ -1092,6 +1145,14 @@ impl Kernel {
             KernelAction::SwitchPartition { partition } => {
                 self.execute_switch_partition(task, &partition).await
             }
+            KernelAction::RunProcedure {
+                procedure,
+                inputs,
+                detach,
+            } => {
+                self.execute_run_procedure(task, &procedure, &inputs, detach, trace_id)
+                    .await
+            }
             KernelAction::MemoryBlockWrite { label, content } => {
                 self.execute_memory_block_write(task, &label, &content)
                     .await
@@ -1129,6 +1190,15 @@ impl Kernel {
                     trace_id,
                 )
                 .await
+            }
+            KernelAction::WorkspaceRequest {
+                path,
+                mode,
+                reason,
+                timeout_secs,
+            } => {
+                self.execute_workspace_request(task, path, mode, reason, timeout_secs, trace_id)
+                    .await
             }
             KernelAction::AgentRpcCall {
                 target_agent,
@@ -1498,6 +1568,8 @@ impl Kernel {
 
                         // Cancel the task (cascades to children via existing logic)
                         let response = self.cmd_cancel_task(tid).await;
+                        let cancelled =
+                            matches!(response, agentos_bus::KernelResponse::Success { .. });
                         self.audit_log(AuditEntry {
                             timestamp: Utc::now(),
                             trace_id,
@@ -1507,7 +1579,7 @@ impl Kernel {
                             tool_id: None,
                             details: serde_json::json!({
                                 "action": "cancel_agent",
-                                "new_state": "cancelled",
+                                "new_state": if cancelled { "cancelled" } else { "unchanged" },
                                 "reason": reason,
                                 "cancelled_by": task.id.to_string(),
                             }),
@@ -1823,6 +1895,290 @@ impl Kernel {
         }
     }
 
+    /// Close every DM session whose clock has run out, asking the operator
+    /// first when `dm_expiry_escalation` is on.
+    ///
+    /// A DM session ends on exactly two things: its turns are completed (the
+    /// runner's own ceiling, status `complete`), or its clock runs out — this.
+    /// Only `running` rows are swept; a finished session's lapsed deadline is
+    /// enforced passively by `find_or_create_dm`, which will not reuse it.
+    pub async fn sweep_dm_session_expiry(&self) {
+        let store = Arc::clone(&self.convo_store);
+        let expired =
+            match tokio::task::spawn_blocking(move || store.expired_running_dm_sessions()).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "DM session expiry sweep failed");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "spawn_blocking panicked in the DM expiry sweep");
+                    return;
+                }
+            };
+
+        for (convo_id, participants) in expired {
+            if !self.config.kernel.convo.dm_expiry_escalation {
+                self.close_dm_session(&convo_id).await;
+                continue;
+            }
+
+            // Hold the session open while the question is pending, so the next
+            // sweep cannot raise a second card for the same session. If the
+            // kernel dies mid-question the deadline simply lapses again and the
+            // next boot's sweep re-asks — no state to reconcile.
+            {
+                let store = Arc::clone(&self.convo_store);
+                let id = convo_id.clone();
+                let hold = crate::escalation::DEFAULT_ESCALATION_TIMEOUT_SECS as u64 + 60;
+                let _ = tokio::task::spawn_blocking(move || store.extend_dm(&id, hold)).await;
+            }
+
+            let kernel = {
+                let slot = self.self_weak.lock().unwrap_or_else(|e| e.into_inner());
+                slot.as_ref().and_then(|w| w.upgrade())
+            };
+            let Some(kernel) = kernel else { continue };
+            // Spawned: the sweep must not hold up the TimeoutChecker for the
+            // five minutes this question can stay open.
+            tokio::spawn(async move {
+                kernel.ask_to_extend_dm(convo_id, participants).await;
+            });
+        }
+    }
+
+    /// Ask whether a lapsed session should keep running. Extends on approval,
+    /// closes on anything else.
+    async fn ask_to_extend_dm(&self, convo_id: String, participants: Vec<String>) {
+        let peers = participants.join(" and ");
+        let turns = {
+            let store = Arc::clone(&self.convo_store);
+            let id = convo_id.clone();
+            tokio::task::spawn_blocking(move || store.get_turns(&id))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|t| {
+                    t.iter()
+                        .filter(|t| t.agent_name != crate::convo_store::USER_SPEAKER)
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let agent_id = {
+            let registry = self.agent_registry.read().await;
+            participants
+                .first()
+                .and_then(|n| registry.get_by_name(n))
+                .map(|a| a.id)
+        };
+        let Some(agent_id) = agent_id else {
+            self.close_dm_session(&convo_id).await;
+            return;
+        };
+
+        // `blocking: false` with a synthetic task id: nothing is parked on this
+        // question. `EscalationManager::resolve` fires the resolution channel
+        // for every escalation regardless of the flag, while the expiry path in
+        // `run_loop` only touches the task when `blocking` is true — so a
+        // blocking card here would make the sweeper try to resume a task that
+        // does not exist.
+        let (esc_id, rx) = self
+            .escalation_manager
+            .create_escalation_with_resolution(
+                TaskID::new(),
+                agent_id,
+                EscalationReason::Other("dm_session_expired".to_string()),
+                format!(
+                    "The conversation between {peers} has been open for its full time \
+                     limit and is still going ({turns} turns so far)."
+                ),
+                "Extend this conversation, or let it close?".to_string(),
+                vec![
+                    "Extend — give it another full session".to_string(),
+                    "Close — the agents keep the history, not the live thread".to_string(),
+                ],
+                // Housekeeping, not an incident: it must not out-rank a real
+                // approval card in the operator's queue.
+                "low".to_string(),
+                false,
+                TraceID::new(),
+                Some(crate::escalation::AutoAction::Deny),
+            )
+            .await;
+
+        // Above the escalation's own 300s timeout, the same margin
+        // `APPROVAL_WAIT_TIMEOUT_SECS` uses, so the sweep resolves the card
+        // first and this waiter never leaves a live Approve button behind.
+        const DM_EXTEND_WAIT_SECS: u64 = 360;
+        let approved = match rx {
+            Some(rx) => matches!(
+                tokio::time::timeout(Duration::from_secs(DM_EXTEND_WAIT_SECS), rx).await,
+                Ok(Ok(crate::escalation::ResolutionOutcome::Approved))
+            ),
+            // Cap reached (esc_id == u64::MAX) or no channel installed.
+            None => false,
+        };
+        tracing::info!(
+            convo_id,
+            escalation_id = esc_id,
+            approved,
+            "DM session expiry decided"
+        );
+
+        if approved {
+            let ttl = self.config.kernel.convo.dm_session_ttl_secs;
+            let store = Arc::clone(&self.convo_store);
+            let id = convo_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = store.extend_dm(&id, ttl);
+                store.add_turn(
+                    &id,
+                    crate::convo_store::USER_SPEAKER,
+                    "_[operator extended this session]_",
+                    0,
+                )
+            })
+            .await;
+        } else {
+            self.close_dm_session(&convo_id).await;
+        }
+    }
+
+    /// End a session on the clock.
+    ///
+    /// `status = 'stopped'` is what `run_convo` already checks before each turn
+    /// and again after the in-flight one, so a running loop exits by itself
+    /// after finishing the turn it is on — the same path the operator's `/stop`
+    /// takes. The closing note is an operator row, so it does not count toward
+    /// `max_turns` and the transcript explains its own ending.
+    async fn close_dm_session(&self, convo_id: &str) {
+        let store = Arc::clone(&self.convo_store);
+        let id = convo_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = store.add_turn(
+                &id,
+                crate::convo_store::USER_SPEAKER,
+                "_[session closed — time limit reached]_",
+                0,
+            );
+            store.set_status(&id, "stopped")
+        })
+        .await;
+        tracing::info!(convo_id, "DM session closed on its time limit");
+    }
+
+    /// Append `content` to this pair's current DM session and make sure a
+    /// runner is working it. Returns the session id for the event payload, or
+    /// `None` when no session could be opened (logged; the durable inbox row
+    /// still stands).
+    ///
+    /// Three outcomes, all normal:
+    ///  * new session  → `find_or_create_dm` already wrote `running`; spawn.
+    ///  * reused, idle → `claim_resume` flips it back to `running` and raises the
+    ///    ceiling by `dm_max_turns`; spawn.
+    ///  * reused, live → `Busy`; the running loop re-reads the transcript every
+    ///    turn, so it picks this row up by itself. Do NOT spawn.
+    ///
+    /// Never waits on an operator. Closing a lapsed session (and asking first)
+    /// is the expiry sweep's job, not this path's.
+    pub(crate) async fn append_dm_turn(
+        &self,
+        from_name: &str,
+        to_name: &str,
+        content: &str,
+    ) -> Option<String> {
+        let max_turns = self.config.kernel.convo.dm_max_turns;
+        let ttl = self.config.kernel.convo.dm_session_ttl_secs;
+        let store = Arc::clone(&self.convo_store);
+
+        let (convo_id, created) = {
+            let store = Arc::clone(&store);
+            let (a, b) = (from_name.to_string(), to_name.to_string());
+            match tokio::task::spawn_blocking(move || {
+                store.find_or_create_dm(&a, &b, max_turns, ttl)
+            })
+            .await
+            {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::warn!(from = from_name, to = to_name, error = %e, "Could not open a DM session");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "spawn_blocking panicked opening a DM session");
+                    return None;
+                }
+            }
+        };
+
+        // Written before the spawn decision, so a live runner sees the row on
+        // its next pass. It does not move the session deadline — only an
+        // operator extension does.
+        {
+            let store = Arc::clone(&store);
+            let (id, name, body) = (convo_id.clone(), from_name.to_string(), content.to_string());
+            match tokio::task::spawn_blocking(move || store.add_turn(&id, &name, &body, 0)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(convo_id, error = %e, "Failed to persist the DM turn");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!(convo_id, error = %e, "spawn_blocking panicked persisting the DM turn");
+                    return None;
+                }
+            }
+        }
+
+        let spawn = if created {
+            true
+        } else {
+            let store = Arc::clone(&store);
+            let id = convo_id.clone();
+            let claimed = tokio::task::spawn_blocking(move || {
+                match store.claim_resume(&id, max_turns) {
+                    Ok(_) => true,
+                    Err(crate::convo_store::ResumeError::Busy) if store.is_live(&id) => false,
+                    Err(crate::convo_store::ResumeError::Busy) => {
+                        // The row says `running` but nothing in this process is
+                        // running it — a runner future dropped mid-turn without
+                        // its `RunGuard` cleanup. Settle it and claim once, or
+                        // the session wedges and every later message lands in a
+                        // transcript nobody reads.
+                        let _ = store.set_status(&id, "error");
+                        store.claim_resume(&id, max_turns).is_ok()
+                    }
+                    Err(e) => {
+                        tracing::warn!(convo_id = %id, error = ?e, "DM session could not be reopened");
+                        false
+                    }
+                }
+            })
+            .await;
+            claimed.unwrap_or(false)
+        };
+
+        if spawn {
+            self.spawn_convo_runner(convo_id.clone()).await;
+        }
+        Some(convo_id)
+    }
+
+    /// Ask the convo-runner pump to start this conversation's turn loop.
+    ///
+    /// Posting an id rather than spawning here is deliberate: the runner calls
+    /// back into tool dispatch, which can reach `append_dm_turn` again, and
+    /// rustc cannot compute `Send` through that cycle. The pump
+    /// (`wire_inbound_chat_bridge`) sits outside it.
+    pub(crate) async fn spawn_convo_runner(&self, convo_id: String) {
+        if let Err(e) = self.convo_run_tx.try_send(convo_id) {
+            // Full or closed: the transcript still holds the turn, so the next
+            // message (or an operator Continue) picks the conversation up.
+            tracing::warn!(error = %e, "Convo runner queue unavailable — turn loop not started");
+        }
+    }
+
     async fn execute_send_message(
         &self,
         task: &AgentTask,
@@ -1946,9 +2302,20 @@ impl Kernel {
             .await;
         }
 
+        // The thread must exist before the event is emitted: `event_dispatch`
+        // keys its "do not spawn a one-shot reaction task" decision off the
+        // `convo_id` in the payload. No thread is opened for an offline
+        // recipient — a conversation nobody can answer should not look live.
+        let convo_id = if recipient_online {
+            self.append_dm_turn(&from_name, &to_agent.name, content)
+                .await
+        } else {
+            None
+        };
+
         match self
             .message_bus
-            .send_direct(msg, task.event_chain_depth())
+            .send_direct(msg, task.event_chain_depth(), convo_id.as_deref())
             .await
         {
             Ok(_) => KernelActionResult {
@@ -1958,6 +2325,7 @@ impl Kernel {
                     "recipient_online": recipient_online,
                     "to": to,
                     "from": from_name,
+                    "convo_id": convo_id,
                 }),
             },
             Err(e) => KernelActionResult {
@@ -2742,6 +3110,170 @@ impl Kernel {
         }
     }
 
+    /// Ask the operator for access to a host folder and park until they decide.
+    ///
+    /// The escalation carries `metadata.kind = "workspace_access"`, which
+    /// `EscalationManager::resolve` acts on: the grant is written BEFORE the
+    /// caller is woken, so a woken-approved call finds the access already live.
+    /// Before this existed, approving the failing tool call was the only thing
+    /// an operator could do, and it changed nothing — three approvals in the
+    /// 2026-09-21 deadlock, all of them no-ops.
+    async fn execute_workspace_request(
+        &self,
+        task: &AgentTask,
+        path: String,
+        mode: String,
+        reason: String,
+        timeout_secs: u64,
+        trace_id: TraceID,
+    ) -> KernelActionResult {
+        let failed = |error: String| KernelActionResult {
+            success: false,
+            result: serde_json::json!({ "granted": false, "error": error }),
+        };
+
+        // Defense in depth: the tool validated this payload, but the tool runs
+        // on model output and the metadata below is acted on later by `resolve`.
+        if let Err(e) =
+            agentos_tools::workspace_request::validate_request(&path, &mode, &self.data_dir)
+        {
+            return failed(e.to_string());
+        }
+        if !task
+            .capability_token
+            .permissions
+            .check("fs.workspace", PermissionOp::Read)
+        {
+            return failed(
+                "Permission denied: 'fs.workspace:r' required for workspace-request".into(),
+            );
+        }
+
+        let agent_name = {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        };
+
+        // One pending question per (agent, path). Without this, a retry loop
+        // turns into an approval-fatigue loop — the operator sees the same
+        // request once per iteration and stops reading any of them.
+        if let Some(existing) = self
+            .escalation_manager
+            .list_pending()
+            .await
+            .into_iter()
+            .find(|e| {
+                e.agent_id == task.agent_id
+                    && e.metadata.get("kind").and_then(|v| v.as_str()) == Some("workspace_access")
+                    && e.metadata.get("path").and_then(|v| v.as_str()) == Some(path.as_str())
+            })
+        {
+            return KernelActionResult {
+                success: true,
+                result: serde_json::json!({
+                    "granted": false,
+                    "pending": true,
+                    "escalation_id": existing.id,
+                    "message": format!(
+                        "A request for '{path}' is already waiting for the operator (escalation {}). \
+                         Do not ask again — continue with something else, or say you are blocked.",
+                        existing.id
+                    ),
+                }),
+            };
+        }
+
+        let escalation_id = self
+            .escalation_manager
+            .create_escalation_with_metadata(
+                task.id,
+                task.agent_id,
+                EscalationReason::AuthorizationRequired,
+                format!("{reason}\n\nRequested: {path} ({mode})"),
+                format!("Grant {agent_name} '{mode}' access to {path}?"),
+                vec!["approve".to_string(), "deny".to_string()],
+                "high".to_string(),
+                true,
+                trace_id,
+                Some(crate::escalation::AutoAction::Deny),
+                serde_json::json!({
+                    "kind": "workspace_access",
+                    "path": path,
+                    "mode": mode,
+                }),
+            )
+            .await;
+
+        self.escalation_manager
+            .prepare_resolution(escalation_id)
+            .await;
+        // The operator can answer between creation and this park; installing
+        // the channel first means such a resolution still fires it.
+        let already_resolved = self
+            .escalation_manager
+            .get(escalation_id)
+            .await
+            .map(|e| e.resolved)
+            .unwrap_or(false);
+        let mut approved = false;
+        if !already_resolved {
+            if let Some(rx) = self
+                .escalation_manager
+                .take_resolution_receiver(escalation_id)
+                .await
+            {
+                approved = matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await,
+                    Ok(Ok(crate::escalation::ResolutionOutcome::Approved))
+                );
+            }
+        } else {
+            approved = self
+                .escalation_manager
+                .get(escalation_id)
+                .await
+                .and_then(|e| e.resolution)
+                .map(|r| crate::escalation::resolution_is_approval(&r))
+                .unwrap_or(false);
+        }
+
+        // The grant list, not the wake outcome, is the truth: `resolve` writes
+        // the grant before waking us, and a write can still fail after the
+        // operator said yes.
+        let live = self
+            .workspace_grants
+            .list_for_agent(&task.agent_id)
+            .into_iter()
+            .any(|g| g.path == std::path::Path::new(&path));
+
+        if live {
+            KernelActionResult {
+                success: true,
+                result: serde_json::json!({
+                    "granted": true,
+                    "path": path,
+                    "mode": mode,
+                    "escalation_id": escalation_id,
+                    "next": "Access is live now — retry the call that failed.",
+                }),
+            }
+        } else {
+            KernelActionResult {
+                success: true,
+                result: serde_json::json!({
+                    "granted": false,
+                    "path": path,
+                    "escalation_id": escalation_id,
+                    "reason": if approved { "approved but the grant could not be written" } else { "the operator did not grant it" },
+                    "next": "Do not ask again for this path in this task. Say what you are blocked on.",
+                }),
+            }
+        }
+    }
+
     /// Execute a synchronous agent-to-agent RPC call.
     ///
     /// Creates a child task for the target agent, registers a pending call
@@ -3162,6 +3694,15 @@ impl Kernel {
                 Some(trimmed.to_string())
             }
         });
+        if let Some(Err(e)) = payload_filter
+            .as_deref()
+            .map(crate::event_bus::validate_filter)
+        {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e }),
+            };
+        }
 
         let sub = EventSubscription {
             id: SubscriptionID::new(),
@@ -3650,6 +4191,30 @@ fn parse_priority(s: &str) -> NotificationPriority {
 }
 
 impl Kernel {
+    /// Resolve the run-as agent for an agent-created schedule/timer/once-job:
+    /// an AgentID maps to its display name, empty means the calling agent.
+    ///
+    /// Targeting *another* agent is allowed (orchestrator fan-out), but it does
+    /// not lend the caller that agent's grants: the creator is recorded on the
+    /// schedule and every fire runs with `target ∩ creator` permissions — see
+    /// `commands::background::clamp_to_schedule_creator`.
+    async fn resolve_schedule_agent(&self, task: &AgentTask, agent_name: String) -> String {
+        let registry = self.agent_registry.read().await;
+        if agent_name.is_empty() {
+            return registry
+                .get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string());
+        }
+        match agent_name.parse::<AgentID>() {
+            Ok(aid) => registry
+                .get_by_id(&aid)
+                .map(|a| a.name.clone())
+                .unwrap_or(agent_name),
+            Err(_) => agent_name,
+        }
+    }
+
     async fn execute_set_timer(
         &self,
         task: &AgentTask,
@@ -3658,23 +4223,7 @@ impl Kernel {
         agent_name: String,
         action: TimerAction,
     ) -> KernelActionResult {
-        // Resolve agent_name: if it looks like an AgentID, map to the display name.
-        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&aid)
-                .map(|a| a.name.clone())
-                .unwrap_or(agent_name)
-        } else if agent_name.is_empty() {
-            // Default to the calling agent's name.
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&task.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| task.agent_id.to_string())
-        } else {
-            agent_name
-        };
+        let resolved = self.resolve_schedule_agent(task, agent_name).await;
 
         match self
             .schedule_manager
@@ -3726,6 +4275,18 @@ impl Kernel {
     }
 
     async fn execute_cancel_timer(&self, task: &AgentTask, name: String) -> KernelActionResult {
+        // Same ownership rule as `execute_control_schedule`: only the creator may cancel.
+        if let Some(entry) = self.schedule_manager.get_timer_by_name(&name).await {
+            if self.schedule_manager.creator_of(&entry.id).await != Some(task.agent_id) {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Permission denied: timer '{}' is not owned by the calling agent", name),
+                        "error_kind": "permission_denied",
+                    }),
+                };
+            }
+        }
         match self.schedule_manager.cancel_timer_by_name(&name).await {
             Ok(timer) => {
                 self.audit_log(agentos_audit::AuditEntry {
@@ -3783,21 +4344,7 @@ impl Kernel {
         agent_name: String,
         fire_at: chrono::DateTime<chrono::Utc>,
     ) -> KernelActionResult {
-        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&aid)
-                .map(|a| a.name.clone())
-                .unwrap_or(agent_name)
-        } else if agent_name.is_empty() {
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&task.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| task.agent_id.to_string())
-        } else {
-            agent_name
-        };
+        let resolved = self.resolve_schedule_agent(task, agent_name).await;
 
         let action_tag = action.tag();
         match self
@@ -3844,6 +4391,18 @@ impl Kernel {
     }
 
     async fn execute_cancel_once_job(&self, task: &AgentTask, name: String) -> KernelActionResult {
+        // Same ownership rule as `execute_control_schedule`: only the creator may cancel.
+        if let Some(entry) = self.schedule_manager.get_once_job_by_name(&name).await {
+            if self.schedule_manager.creator_of(&entry.id).await != Some(task.agent_id) {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Permission denied: once-job '{}' is not owned by the calling agent", name),
+                        "error_kind": "permission_denied",
+                    }),
+                };
+            }
+        }
         match self.schedule_manager.cancel_once_job_by_name(&name).await {
             Ok(job) => {
                 self.audit_log(agentos_audit::AuditEntry {
@@ -4242,21 +4801,7 @@ impl Kernel {
     ) -> KernelActionResult {
         use agentos_types::schedule::OnceJobAction;
 
-        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&aid)
-                .map(|a| a.name.clone())
-                .unwrap_or(agent_name)
-        } else if agent_name.is_empty() {
-            let registry = self.agent_registry.read().await;
-            registry
-                .get_by_id(&task.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| task.agent_id.to_string())
-        } else {
-            agent_name
-        };
+        let resolved = self.resolve_schedule_agent(task, agent_name).await;
 
         // Build typed action. Anti-recursion guard for mode=tool is enforced
         // here too (the tool-layer check is belt-and-suspenders; this is the

@@ -804,6 +804,9 @@ impl Kernel {
                         Some(trimmed.to_string())
                     }
                 });
+                if let Some(f) = &filter_predicate {
+                    crate::event_bus::validate_filter(f)?;
+                }
 
                 let sub = EventSubscription {
                     id: SubscriptionID::new(),
@@ -966,9 +969,16 @@ impl Kernel {
                         .map(|a| a.id)
                         .collect();
 
+                    // A woken task whose previous executor future has not
+                    // returned yet stays queued: starting it now would run two
+                    // loops over one task/context.
+                    let unwinding: std::collections::HashSet<TaskID> =
+                        in_flight.values().map(|t| t.id).collect();
                     if let Some(task) = self
                         .scheduler
-                        .dequeue_runnable(|id| !paused.contains(id))
+                        .dequeue_runnable(|t| {
+                            !paused.contains(&t.agent_id) && !unwinding.contains(&t.id)
+                        })
                         .await
                     {
                         let kernel = self.clone();
@@ -2427,6 +2437,7 @@ impl Kernel {
                         storage_zone_query: Some(zone_query),
                         cancellation_token: tool_cancellation,
                         tool_categories: task_tool_categories,
+                        shared_dir: None,
                     };
 
                     let tool_start = std::time::Instant::now();
@@ -3495,6 +3506,11 @@ impl Kernel {
 
         for iteration in 0..max_iterations {
             completed_iterations = iteration + 1;
+            // Sub-agent results visible to this iteration's inference.
+            let child_results_seen = self
+                .context_manager
+                .injected_sub_agent_count(&task.id)
+                .await;
 
             // Re-taken every iteration: the adapter may have been swapped
             // (model downgrade) or flipped to rejected (400) since last turn.
@@ -4095,6 +4111,9 @@ impl Kernel {
             // ignore the flag) and provides up to 90% cost savings on repeated context.
             let inference_opts = agentos_llm::InferenceOptions {
                 thinking_budget_tokens: task.thinking_level.budget_tokens(),
+                // Claude 4.6+ takes `output_config.effort` instead of a token
+                // budget; the adapter picks the shape from the model id.
+                thinking_effort: task.thinking_level.effort().map(str::to_string),
                 enable_prompt_caching: true,
                 cache_ttl: prompt_cache_ttl,
                 tools_cache_prefix_len: Some(stable_len),
@@ -6073,6 +6092,7 @@ impl Kernel {
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
                         tool_categories: task.tool_categories.clone(),
+                        shared_dir: None,
                     };
                     let tool_payload_preview = Self::truncate_for_prompt_payload(
                         &serde_json::to_string(&tool_call.payload).unwrap_or_default(),
@@ -6828,6 +6848,21 @@ impl Kernel {
                             break;
                         }
                         // Continue to next iteration instead of breaking
+                        continue;
+                    }
+                    // Background children still out: park here, their report
+                    // requeues us with the result in context.
+                    if self.scheduler.park_until_children_report(&task.id).await {
+                        anyhow::bail!("{}", Self::DELEGATION_PARK_REASON);
+                    }
+                    // All reported, but one landed after this inference's
+                    // context was assembled — answer again with it in view.
+                    if self
+                        .context_manager
+                        .injected_sub_agent_count(&task.id)
+                        .await
+                        > child_results_seen
+                    {
                         continue;
                     }
                     final_answer = inference.text;

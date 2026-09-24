@@ -16,7 +16,7 @@
 
 use crate::agent_manual::SharedInstalledSkills;
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp};
+use agentos_types::{skill_permission_resource, AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ impl AgentTool for SkillCreateTool {
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let name = payload
             .get("name")
@@ -220,16 +220,38 @@ impl AgentTool for SkillCreateTool {
         // write. The snapshot is a lagging copy of the registry, so this is
         // advisory only — the authoritative duplicate decision is made by the
         // installer under the registry write lock (closes the TOCTOU window).
-        if !overwrite {
+        // Overwriting an existing skill requires the grant for it: without
+        // this, an agent could replace the on-disk definition of a skill the
+        // operator scoped out of it (the registry keys on name). The
+        // duplicate hint below is likewise limited to skills this agent can
+        // see, so it cannot probe for scoped-out names.
+        let exists_for_agent = {
             let snapshot = self.installed_skills.read().await;
-            if snapshot.iter().any(|s| s.name.eq_ignore_ascii_case(&name)) {
-                return Err(AgentOSError::ToolExecutionFailed {
-                    tool_name: "skill-create".into(),
-                    reason: format!(
-                        "skill '{name}' already installed. Pass overwrite=true to replace it."
-                    ),
+            snapshot.iter().any(|s| {
+                s.name.eq_ignore_ascii_case(&name)
+                    && context
+                        .permissions
+                        .check(&skill_permission_resource(&s.name), PermissionOp::Execute)
+            })
+        };
+        if overwrite {
+            let exists_at_all = {
+                let snapshot = self.installed_skills.read().await;
+                snapshot.iter().any(|s| s.name.eq_ignore_ascii_case(&name))
+            };
+            if exists_at_all && !exists_for_agent {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: skill_permission_resource(&name),
+                    operation: "execute".into(),
                 });
             }
+        } else if exists_for_agent {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "skill-create".into(),
+                reason: format!(
+                    "skill '{name}' already installed. Pass overwrite=true to replace it."
+                ),
+            });
         }
 
         // Compose the TOML manifest. Trust tier is forced — never honour an
@@ -431,13 +453,21 @@ mod tests {
         }
     }
 
+    /// Default agent scope: the broad `skill:` execute grant every agent
+    /// carries, which covers every installed skill.
     fn ctx() -> ToolExecutionContext {
+        let mut permissions = PermissionSet::new();
+        permissions.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        ctx_with(permissions)
+    }
+
+    fn ctx_with(permissions: PermissionSet) -> ToolExecutionContext {
         ToolExecutionContext {
             data_dir: std::path::PathBuf::from("/tmp"),
             task_id: TaskID::new(),
             agent_id: AgentID::new(),
             trace_id: TraceID::new(),
-            permissions: PermissionSet::new(),
+            permissions,
             vault: None,
             hal: None,
             file_lock_registry: None,
@@ -452,6 +482,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -597,6 +628,34 @@ mod tests {
             AgentOSError::SchemaValidation(msg) => assert!(msg.contains("invalid character")),
             other => panic!("expected SchemaValidation, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn overwrite_of_a_scoped_out_skill_is_refused() {
+        // The registry keys on name, so overwriting a skill this agent cannot
+        // see would let it replace a definition the operator scoped out.
+        let mut permissions = PermissionSet::new();
+        permissions.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        permissions.deny("skill:hidden/".to_string());
+        let tmp = TempDir::new().unwrap();
+        let installer = Arc::new(NoopInstaller {
+            installed: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let tool =
+            SkillCreateTool::new(tmp.path().to_path_buf(), installer, snapshot_with("hidden"));
+        let err = tool
+            .execute(
+                json!({
+                    "name": "hidden",
+                    "description": "d",
+                    "system_prompt": "p",
+                    "overwrite": true,
+                }),
+                ctx_with(permissions),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
     }
 
     #[tokio::test]

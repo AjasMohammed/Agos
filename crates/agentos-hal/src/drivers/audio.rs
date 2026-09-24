@@ -977,23 +977,54 @@ impl AudioDriver {
         }))
     }
 
+    /// Set a node's volume, clearing its mute flag when the target is audible.
+    ///
+    /// `wpctl set-volume` leaves the mute flag alone, so raising a muted sink
+    /// used to report `updated: true` and stay silent — and nothing in the
+    /// result said why. A caller asking for a non-zero volume is asking to
+    /// hear something, so the mute is cleared as part of the same action.
+    /// `volume: 0.0` leaves the flag untouched; explicit muting is what
+    /// `action: "mute"` is for.
     async fn set_volume(&self, params: &Value) -> Result<Value, AgentOSError> {
         let node_id = self
             .sanitize_audio_target(params, &["node_id", "sink", "source"], "node_id")?
             .unwrap_or(DEFAULT_SINK);
         let volume = self.volume_from_params(params)?;
-        let args = vec![
-            "set-volume".to_string(),
-            Self::normalize_device_key(node_id),
-            format!("{volume:.2}"),
-        ];
+        let device = Self::normalize_device_key(node_id);
+        // Everything below reads the *rounded* level, never the raw param.
+        // `0.001` is sent to wpctl as `0.00`, so deciding the unmute (or
+        // reporting the level back) from the unrounded value would claim an
+        // audible node that is in fact silent — the exact failure this
+        // function was changed to stop reporting.
+        let level = format!("{volume:.2}");
+        let applied = level.parse::<f64>().unwrap_or(volume);
+        let args = vec!["set-volume".to_string(), device.clone(), level];
         self.run_checked("wpctl", &args, "PipeWire volume update failed")
             .await?;
 
+        // After the level, so a failure here cannot leave a node unmuted at a
+        // volume the caller never got to set.
+        let unmuted = applied > 0.0;
+        if unmuted {
+            let args = vec!["set-mute".to_string(), device.clone(), "0".to_string()];
+            self.run_checked(
+                "wpctl",
+                &args,
+                // Name the half that already landed: the caller otherwise has
+                // to re-read the node to find out whether the level changed.
+                &format!("PipeWire mute update failed (volume was set to {applied:.2})"),
+            )
+            .await?;
+        }
+
         Ok(json!({
             "updated": true,
-            "node_id": Self::normalize_device_key(node_id),
-            "volume": volume,
+            "node_id": device,
+            "volume": applied,
+            // `muted` too, with the same polarity `mute` and `get_volume` use,
+            // so one key reads the same across all three actions.
+            "muted": !unmuted,
+            "unmuted": unmuted,
         }))
     }
 
@@ -2272,10 +2303,8 @@ mod tests {
 
     #[tokio::test]
     async fn volume_set_calls_wpctl() {
-        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::from([(
-            "wpctl set-volume 62 0.50".to_string(),
-            success(""),
-        )]))));
+        let runner = Arc::new(FakeRunner::new(HashMap::new()).permissive());
+        let driver = AudioDriver::with_runner(Arc::clone(&runner));
 
         let result = driver
             .set_volume(&json!({ "node_id": "62", "volume": 0.5 }))
@@ -2283,6 +2312,114 @@ mod tests {
             .expect("volume set should succeed");
         assert_eq!(result["updated"], true);
         assert_eq!(result["node_id"], "62");
+        assert!(
+            runner
+                .calls()
+                .contains(&"wpctl set-volume 62 0.50".to_string()),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// Raising the volume also clears the mute flag.
+    ///
+    /// Regression for 2026-09-19: `wpctl set-volume` leaves mute alone, so an
+    /// agent told to "turn the volume up" set 100% on a muted sink, was told
+    /// `updated: true`, and the box stayed silent with nothing in the result
+    /// to explain it.
+    #[tokio::test]
+    async fn volume_set_clears_the_mute_flag() {
+        let runner = Arc::new(FakeRunner::new(HashMap::new()).permissive());
+        let driver = AudioDriver::with_runner(Arc::clone(&runner));
+
+        let result = driver
+            .set_volume(&json!({ "volume": 1.0 }))
+            .await
+            .expect("volume set should succeed");
+        assert_eq!(result["unmuted"], true);
+
+        let calls = runner.calls();
+        let volume_at = calls
+            .iter()
+            .position(|c| c == "wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.00")
+            .unwrap_or_else(|| panic!("no set-volume call: {calls:?}"));
+        let mute_at = calls
+            .iter()
+            .position(|c| c == "wpctl set-mute @DEFAULT_AUDIO_SINK@ 0")
+            .unwrap_or_else(|| panic!("no set-mute call: {calls:?}"));
+        assert!(
+            volume_at < mute_at,
+            "the level must be set before the unmute: {calls:?}"
+        );
+    }
+
+    /// `volume: 0.0` is not a request to hear anything, so it leaves the mute
+    /// flag exactly as it found it — `action: "mute"` owns that state.
+    #[tokio::test]
+    async fn volume_set_to_zero_leaves_mute_alone() {
+        let runner = Arc::new(FakeRunner::new(HashMap::new()).permissive());
+        let driver = AudioDriver::with_runner(Arc::clone(&runner));
+
+        let result = driver
+            .set_volume(&json!({ "node_id": "62", "volume": 0.0 }))
+            .await
+            .expect("volume set should succeed");
+        assert_eq!(result["unmuted"], false);
+        assert_eq!(result["muted"], true);
+        assert!(
+            !runner.calls().iter().any(|c| c.contains("set-mute")),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// A level that rounds to `0.00` is silent, so it must not be reported as
+    /// unmuted — and the result must echo the level that was actually applied,
+    /// not the raw param.
+    #[tokio::test]
+    async fn volume_below_rounding_resolution_is_not_reported_as_audible() {
+        let runner = Arc::new(FakeRunner::new(HashMap::new()).permissive());
+        let driver = AudioDriver::with_runner(Arc::clone(&runner));
+
+        let result = driver
+            .set_volume(&json!({ "node_id": "62", "volume": 0.001 }))
+            .await
+            .expect("volume set should succeed");
+        assert_eq!(result["unmuted"], false);
+        assert_eq!(result["volume"], 0.0, "must report the applied level");
+        assert!(
+            !runner.calls().iter().any(|c| c.contains("set-mute")),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// A mute failure after the level landed must surface as an error that
+    /// names the half that succeeded — never `updated: true`.
+    #[tokio::test]
+    async fn volume_set_reports_a_failed_unmute_and_names_the_applied_level() {
+        // `set-mute` is scripted to a non-zero exit, the way a real wpctl
+        // failure arrives (an unscripted command errors in the runner itself,
+        // before `run_checked` can attach its context).
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::from([
+            ("wpctl set-volume 62 0.80".to_string(), success("")),
+            (
+                "wpctl set-mute 62 0".to_string(),
+                CommandResult {
+                    status_code: 1,
+                    stdout: String::new(),
+                    stderr: "Node 62 not found".into(),
+                },
+            ),
+        ]))));
+
+        let err = driver
+            .set_volume(&json!({ "node_id": "62", "volume": 0.8 }))
+            .await
+            .expect_err("a failed unmute must not report success");
+        let msg = err.to_string();
+        assert!(msg.contains("mute update failed"), "{msg}");
+        assert!(msg.contains("0.80"), "must name the applied level: {msg}");
     }
 
     #[tokio::test]
@@ -2410,10 +2547,15 @@ mod tests {
 
     #[tokio::test]
     async fn volume_set_without_target_uses_default_sink() {
-        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::from([(
-            "wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.00".to_string(),
-            success(""),
-        )]))));
+        // Permissive: `set_volume` also clears the mute flag for a non-zero
+        // level, so scripting the `set-volume` line alone would fail the run.
+        let driver = AudioDriver::with_runner(Arc::new(
+            FakeRunner::new(HashMap::from([(
+                "wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.00".to_string(),
+                success(""),
+            )]))
+            .permissive(),
+        ));
 
         let result = driver
             .set_volume(&json!({ "volume": 1.0 }))

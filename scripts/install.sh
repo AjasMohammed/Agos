@@ -7,10 +7,12 @@
 #   AGENTOS_VERSION       release tag (default: latest), e.g. v1.0.0
 #   AGENTOS_INSTALL_DIR   install dir   (default: ~/.local/bin)
 #   AGENTOS_FLAVOR        "lite" for the no-embeddings build (linux-amd64 only)
+#   AGENTOS_SKIP_SIG_VERIFY=1  install on checksum alone when no minisign/rsign
+#                              is available (not recommended — see below)
 #
-# Always verifies the SHA-256 checksum and requires the .sig asset; verifies the
-# minisign signature against the pinned public key when minisign or rsign is
-# installed (warns otherwise).
+# Always verifies the SHA-256 checksum, requires the .sig asset, and verifies
+# the minisign signature against the pinned public key. Without minisign or
+# rsign installed the signature cannot be checked and the install fails closed.
 set -euo pipefail
 
 REPO="AjasMohammed/Agos"
@@ -84,7 +86,12 @@ info "Verifying checksum"
 ( cd "$tmp" && sed "s|$ASSET|agentos|" agentos.sha256 | sha256 -c - ) \
   || die "Checksum verification failed — refusing to install."
 
-# --- verify signature (enforced when a verifier is installed) -----------------
+# --- verify signature (mandatory) ---------------------------------------------
+# The checksum above proves integrity, not authenticity: agentos.sha256 comes
+# from the same URL as the binary, so whoever can serve one can serve the other.
+# The minisign signature against the pinned pubkey is the only check an attacker
+# controlling the download cannot forge — so a missing verifier fails the
+# install instead of warning and running the binary anyway.
 if command -v minisign >/dev/null 2>&1; then
   info "Verifying signature (minisign)"
   minisign -V -P "$PUBKEY" -x "$tmp/agentos.sig" -m "$tmp/agentos" \
@@ -93,9 +100,17 @@ elif command -v rsign >/dev/null 2>&1; then
   info "Verifying signature (rsign)"
   rsign verify -P "$PUBKEY" -x "$tmp/agentos.sig" "$tmp/agentos" \
     || die "Signature verification failed — refusing to install."
+elif [ "${AGENTOS_SKIP_SIG_VERIFY:-}" = 1 ]; then
+  warn "AGENTOS_SKIP_SIG_VERIFY=1 — installing on checksum alone."
+  warn "The checksum comes from the same server as the binary; this does NOT"
+  warn "prove the release was signed by the AgentOS release key."
 else
-  warn "Neither 'minisign' nor 'rsign' installed; checksum verified, signature NOT."
-  warn "Install minisign (or 'cargo install rsign2') and re-run for full supply-chain verification."
+  warn "No signature verifier found. Install one and re-run:"
+  warn "  Debian/Ubuntu:  sudo apt install minisign"
+  warn "  macOS:          brew install minisign"
+  warn "  Fedora:         sudo dnf install minisign"
+  warn "  Any platform:   cargo install rsign2"
+  die "Cannot verify the release signature — refusing to install. Set AGENTOS_SKIP_SIG_VERIFY=1 to install on checksum alone (not recommended)."
 fi
 
 # --- install ------------------------------------------------------------------
@@ -116,7 +131,7 @@ cat <<EOF
 
 AgentOS installed. Next steps:
   agentos onboard          # interactive setup (no API keys written to disk)
-  agentos web serve        # start the web UI on http://127.0.0.1:8080
+  agentos start            # boot the kernel (REST API on :8080 when [api] enabled = true)
 
 On Linux, install bubblewrap for the shell-exec sandbox:  sudo apt install bubblewrap
 Docs: https://ajasmohammed.github.io/Agos

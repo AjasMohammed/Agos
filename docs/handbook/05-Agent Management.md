@@ -311,6 +311,21 @@ agentos identity revoke "code-reviewer"
 
 ---
 
+## Agent Files and Host Folders
+
+Every agent gets its own home directory, `<data_dir>/agents/<name>/`, keyed by agent **name**. File tools (`file-reader`, `file-writer`, `file-glob`, …) resolve relative paths inside it, so two agents never see each other's files by default.
+
+An agent reaches host folders only through an operator grant *plus* the `fs.workspace` permission:
+
+```bash
+agentos workspace grant ~/project --mode rw --agent worker
+agentos perm grant worker fs.workspace:rw
+```
+
+Inside a granted folder the agent uses absolute paths. `agent-self` shows the agent its current `granted_folders`. Files a user uploads in chat or sends over a channel are not in the home directory — the agent finds them with `user-file-list` and reads them with `user-file-reader`.
+
+---
+
 ## Permissions and Roles
 
 Every agent has two sources of permissions:

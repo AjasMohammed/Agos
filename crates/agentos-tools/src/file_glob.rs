@@ -73,7 +73,8 @@ impl AgentTool for FileGlob {
         // kernel state dir (audit.db, api_keys.db, chat.db, agents.json live there).
         let agent_root = context.agent_files_dir()?;
         let base_resolved =
-            crate::traits::resolve_tool_path(sub_path, &agent_root, &context.workspace_paths)?;
+            crate::traits::resolve_tool_path(sub_path, &agent_root, &context.read_roots())
+                .map_err(|e| context.with_path_hint(e))?;
 
         let canonical_agent_root =
             agent_root
@@ -102,10 +103,7 @@ impl AgentTool for FileGlob {
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_base))
             .unwrap_or(false);
         if !canonical_base.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "fs.user_data".into(),
-                operation: format!("Path traversal denied: {}", sub_path),
-            });
+            return Err(context.deny_path(sub_path));
         }
         if in_workspace
             && !context

@@ -590,6 +590,7 @@ mod tests {
             workspace_paths: vec![],
             agent_home: PathBuf::from("/tmp/agents/test"),
             workspace_paths_executable: vec![],
+            storage_zones: vec![],
         }
     }
 

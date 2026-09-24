@@ -1,6 +1,7 @@
 //! Fan-out from kernel events to subscribed WebSocket sessions.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -17,6 +18,29 @@ struct BroadcastEntry {
 #[derive(Clone)]
 pub struct WsBroadcaster {
     subscriptions: Arc<RwLock<HashMap<String, BroadcastEntry>>>,
+    /// Live control-panel WebSocket connections. Shared with the kernel, which
+    /// reads it to resolve `when_away` notification routing rules.
+    ///
+    /// Counted per *connection*, not per subscription: a panel session that has
+    /// not subscribed to any channel yet is still an operator sitting in front
+    /// of the panel. `None` when no kernel counter was wired (tests).
+    panel_sessions: Option<Arc<AtomicUsize>>,
+}
+
+/// Increments the live-panel-session count for as long as it is held.
+///
+/// A guard rather than a pair of calls so an early return or a panic in the
+/// connection handler cannot leak the count upward — a leaked increment would
+/// pin `panel_connected()` true forever and silently mute every `when_away`
+/// rule, which is exactly the bug this counter replaced.
+pub struct PanelSessionGuard(Option<Arc<AtomicUsize>>);
+
+impl Drop for PanelSessionGuard {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.0 {
+            counter.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for WsBroadcaster {
@@ -29,7 +53,23 @@ impl WsBroadcaster {
     pub fn new() -> Self {
         Self {
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            panel_sessions: None,
         }
+    }
+
+    /// Wire the kernel's live-panel-session counter, so notification routing
+    /// rules set to `when_away` can tell whether an operator is watching.
+    pub fn with_panel_sessions(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.panel_sessions = Some(counter);
+        self
+    }
+
+    /// Count this connection as a live panel session until the guard drops.
+    pub fn track_panel_session(&self) -> PanelSessionGuard {
+        if let Some(counter) = &self.panel_sessions {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        PanelSessionGuard(self.panel_sessions.clone())
     }
 
     /// Register a subscription. Events matching `channel` will be forwarded to `sender`.

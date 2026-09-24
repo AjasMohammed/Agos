@@ -332,6 +332,10 @@ impl HardwareAbstractionLayer {
         self.drivers.insert(driver.name().to_string(), driver);
     }
 
+    pub fn has_driver(&self, name: &str) -> bool {
+        self.drivers.contains_key(name)
+    }
+
     pub async fn query(
         &self,
         driver_name: &str,

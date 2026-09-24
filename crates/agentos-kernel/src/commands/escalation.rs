@@ -296,8 +296,13 @@ impl Kernel {
                 RememberSummary {
                     policy_id: Some(entry.id),
                     note: format!(
-                        "remembered for `{}`{}",
+                        "remembered for `{}`{}{}",
                         entry.tool_name,
+                        entry
+                            .action
+                            .as_deref()
+                            .map(|a| format!(" action `{a}`"))
+                            .unwrap_or_default(),
                         entry
                             .path_glob
                             .as_deref()

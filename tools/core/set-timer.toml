@@ -36,7 +36,7 @@ maximum     = 86400
 
 [payload_schema.properties.agent_name]
 type        = "string"
-description = "Name of the agent that will execute the timer action (for run_task). If omitted, defaults to the calling agent."
+description = "Agent (name or AgentID) that runs the scheduled work. Defaults to the calling agent. Targeting another agent runs with only the permissions both of you hold."
 
 [payload_schema.properties.action]
 type        = "string"

@@ -151,7 +151,27 @@ pub struct RecallResult {
     pub rrf_score: f32,      // Fused rank score
 }
 
+/// A parameter a procedure accepts at run time.
+///
+/// Bound into the execution template context as `inputs.<name>`, so a step
+/// payload references it as `{{inputs.text}}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcedureInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    /// Used when the caller omits a non-required input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
 /// A single step in a stored procedure.
+///
+/// A step is prose (`action` only) or a real call (`tool` + `input`). A
+/// procedure made entirely of the latter is executable; see
+/// [`Procedure::is_executable`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcedureStep {
     /// Execution order (0-indexed).
@@ -162,6 +182,36 @@ pub struct ProcedureStep {
     pub tool: Option<String>,
     /// What success looks like for this step.
     pub expected_outcome: Option<String>,
+    /// Tool payload template. `{{inputs.x}}` binds a declared input;
+    /// `{{var}}` binds an earlier step's `output_var`.
+    ///
+    /// A field whose value is EXACTLY one binding takes that value's own JSON
+    /// type; a binding among surrounding text is stringified and interpolated.
+    /// Either way the payload is rendered by walking the JSON, so a bound value
+    /// cannot change the payload's shape.
+    ///
+    /// `#[serde(default)]`: procedures written before executable steps existed
+    /// deserialize with `None` and stay prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// Name this step's output is bound to for later steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_var: Option<String>,
+}
+
+/// Longest procedure name / input name / output_var accepted.
+const MAX_IDENTIFIER_LEN: usize = 64;
+
+/// True for a template-safe identifier: `[A-Za-z_][A-Za-z0-9_]{0,63}`.
+///
+/// Input names and `output_var`s become template keys, so one containing `.`,
+/// `{` or `}` would make a rendered payload unparseable — a failure that would
+/// surface as a confusing JSON error inside an unrelated step.
+pub fn valid_template_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_IDENTIFIER_LEN
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A stored procedure representing a learned skill or SOP.
@@ -192,6 +242,9 @@ pub struct Procedure {
     pub agent_id: Option<AgentID>,
     /// Free-form tags for categorization.
     pub tags: Vec<String>,
+    /// Parameters this procedure accepts at run time. Empty for a prose SOP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<ProcedureInput>,
     /// When this procedure was first created.
     pub created_at: DateTime<Utc>,
     /// When this procedure was last modified.
@@ -208,6 +261,29 @@ pub struct Procedure {
     /// Lifecycle status; non-active entries are excluded from default search.
     #[serde(default)]
     pub status: MemoryStatus,
+}
+
+impl Procedure {
+    /// True when every step is a real tool call.
+    ///
+    /// All-or-nothing on purpose: a procedure with one prose step among four
+    /// tool calls is not three-quarters executable. Running it would silently
+    /// skip the prose step and produce a result that looks complete and is not,
+    /// so `procedure-run` refuses it and names the step to fix.
+    pub fn is_executable(&self) -> bool {
+        !self.steps.is_empty()
+            && self
+                .steps
+                .iter()
+                .all(|step| step.tool.is_some() && step.input.is_some())
+    }
+
+    /// The first step that keeps this procedure from being executable.
+    pub fn first_prose_step(&self) -> Option<&ProcedureStep> {
+        self.steps
+            .iter()
+            .find(|step| step.tool.is_none() || step.input.is_none())
+    }
 }
 
 /// Result of a hybrid procedural search with score breakdown.

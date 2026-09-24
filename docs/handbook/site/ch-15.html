@@ -68,7 +68,7 @@
 </div>
 <p>API key must already be stored in the vault (value entered interactively):</p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>openai_api_key
-<span class="c1"># Enter value for &#39;openai_api_key&#39; (input hidden): ▌</span>
+<span class="c1"># Enter value for 'openai_api_key' (input hidden): ▌</span>
 </pre></div>
 </div>
 <h3 id="anthropic-2" class="anchored"><a class="hanchor" href="#anthropic-2" aria-label="link">#</a>Anthropic</h3>
@@ -170,13 +170,13 @@ agentos<span class="w"> </span>provider<span class="w"> </span>probe<span class=
 <p><strong>Adding a custom provider to the catalog:</strong></p>
 <p>Add a <code>[[provider]]</code> block to <code>config/providers.toml</code>:</p>
 <div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[[provider]]</span>
-<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;my-corp-llm&quot;</span>
-<span class="n">display_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Corp LLM Gateway&quot;</span>
-<span class="n">base_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://llm.internal.corp/v1&quot;</span>
-<span class="n">api_key_env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;CORP_LLM_KEY&quot;</span>
-<span class="n">compatible_with</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;openai&quot;</span>
-<span class="n">default_model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;corp-model-v2&quot;</span>
-<span class="n">models</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;corp-model-v2&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;corp-model-v2-mini&quot;</span><span class="p">]</span>
+<span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"my-corp-llm"</span>
+<span class="n">display_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"Corp LLM Gateway"</span>
+<span class="n">base_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"https://llm.internal.corp/v1"</span>
+<span class="n">api_key_env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"CORP_LLM_KEY"</span>
+<span class="n">compatible_with</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"openai"</span>
+<span class="n">default_model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"corp-model-v2"</span>
+<span class="n">models</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"corp-model-v2"</span><span class="p">,</span><span class="w"> </span><span class="s2">"corp-model-v2-mini"</span><span class="p">]</span>
 </pre></div>
 </div>
 <p>Then <code>agentos agent connect --provider my-corp-llm --model corp-model-v2 --name corp</code>.</p>

@@ -106,7 +106,7 @@ The agent's standing system prompt includes an instruction to treat any content 
 
 Every security-relevant event is written to an **append-only SQLite database** (`audit.db`) protected by a **Merkle hash chain**. Each entry includes the SHA-256 hash of the previous entry, making log tampering detectable.
 
-146 event types are defined, including `PermissionGranted`, `TokenIssued`, `CapabilityGranted`, `ToolExecutionCompleted`, `McpInjectionDetected`, `RiskEscalation`, `SecretAccessed`, and `SecretRotated`.
+173 event types are defined, including `PermissionGranted`, `TokenIssued`, `CapabilityGranted`, `ToolExecutionCompleted`, `McpInjectionDetected`, `RiskEscalation`, `SecretAccessed`, and `SecretRotated`.
 
 ### Layer 6: Secrets Isolation
 
@@ -206,8 +206,47 @@ network.outbound:x          Make outbound network connections
 memory.semantic:rw           Read and write semantic memory
 fs.user_data:r               Read user data namespace (abstract resource)
 escalation.pending:rq        Read and query pending escalations
-agent.metrics:o              Observe agent metrics
+events.chat:o                 Observe (subscribe to) chat events
+events.task_lifecycle:o      Subscribe to one event category
+hardware.wifi.scan:x         One HAL device action
+mcp:gmail/:x                 Every tool of the attached MCP server "gmail"
 ```
+
+#### MCP servers are granted per server
+
+An attached MCP server's tools are gated by one resource, `mcp:<server>/`, not one permission per tool. The server name is sanitised (non-alphanumerics become `_`) and the trailing `/` is load-bearing: matching is by prefix, so without it a grant for `git` would also open `github`.
+
+```bash
+agentos perm grant worker "mcp:gmail/:x"    # one server
+agentos perm grant worker "mcp:x"           # every attached server
+```
+
+Older per-tool grants (`mcp.<tool>:x`) no longer match anything — re-grant per server. An agent's `agent-manual {section: mcp}` lists only the servers it has been granted.
+
+#### Skills are toggled per agent
+
+Installed skills follow the same shape: one resource per skill, `skill:<name>/`, with `PermissionOp::Execute`. Unlike MCP, the default is *on* — every agent is registered with the broad grant `skill:` (`x`), which prefix-matches every installed skill, including ones installed later.
+
+```bash
+agentos perm revoke worker "skill:researcher/:x"   # toggle one skill OFF for this agent
+agentos perm grant  worker "skill:researcher/:x"   # toggle it back ON
+agentos perm show   worker                         # grants, then the denies that override them
+```
+
+Toggling off records a **deny entry**, which outranks every grant — that is how one skill is removed while the broad `skill:` grant stays. Toggling back on clears the deny. A scoped-out skill disappears from the agent's `## Skills` system-prompt block and from `agent-manual {section: skills}`, and `skill-prompt` refuses it.
+
+#### Host folders need a grant *and* a permission
+
+File tools resolve relative paths inside the agent's own home, `<data_dir>/agents/<name>/`. Absolute host paths work only inside an operator-granted folder, and only when the agent also holds `fs.workspace`:
+
+```bash
+agentos workspace grant ~/project --mode rw                    # every agent
+agentos workspace grant /tmp/work --mode rwx --agent worker    # one agent
+agentos workspace list --agent worker
+agentos workspace revoke ~/project
+```
+
+Subpaths are covered. Broad paths directly under `$HOME` (such as `~/Desktop`) ask for confirmation first. Any path containing `..` is rejected before normalisation.
 
 ### Zero-Permissions Default
 
@@ -406,6 +445,23 @@ The classifier checks (in order):
 5. **Moderate-risk patterns** — file writes, config/settings changes, user directory writes
 6. **Default** — generic `Write` → Level 1, generic `Execute` → Level 2
 
+### Manifest Risk Class and Approval Modes
+
+The intent-level classifier above is the legacy gate. The gate that decides whether a **tool call** prompts the operator is the tool manifest's `risk_class`, combined with the approval mode from `[approval]` in config (global `mode`, plus per-agent `agent_overrides`).
+
+| Mode | `readonly_scoped` | `readonly_external` | `write_agent_state` | `write_scoped` | `exec_capable` | `control_plane` | `interactive` |
+|------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `auto` | allow | allow | allow | allow | allow | **prompt** | allow |
+| `ask_edit` (default) | allow | allow | allow | prompt | prompt | prompt | allow |
+| `ask_always` | allow | prompt | prompt | prompt | prompt | prompt | allow |
+| `deny` | allow | deny | deny | deny | deny | deny | allow |
+
+- `control_plane` is the floor — no mode, auto-approve rule, or remembered grant lifts it.
+- `write_agent_state` covers writes to the agent's own kernel-owned stores (memory, scratchpad, inbox, notifications, artifacts).
+- `interactive` is `ask-user` only, and is allowed everywhere: prompting a human to approve a request for human input is circular. Non-core manifests may not declare it.
+- A manifest that omits `risk_class` defaults to `exec_capable` — it fails closed.
+- A manifest can set `risk_class_by_action` so that, for example, a device tool's `list` action is read-only while `connect` is not.
+
 ### Adding Overrides
 
 Risk level overrides can be programmed into the kernel for site-specific policies:
@@ -482,6 +538,16 @@ agentos escalation resolve 1 --decision "Yes, send the email"
 # The task resumes with the operator's decision injected into its context.
 ```
 
+**Approve and stop being asked:**
+```bash
+agentos escalation resolve 1 --decision Approved --remember
+agentos approval list
+```
+
+`--remember` mints a 7-day standing grant for the escalated tool, scoped to that agent (and to the parent directory when the call carried a `path`). It never applies to `control_plane` tools.
+
+**From a paired chat channel** (Telegram, Slack, …): reply `/approve <id>`, `/approve <id> always`, or `/deny <id>`. Only paired senders are honoured. In the web chat the same choice appears as an inline approval card.
+
 If the deadline passes without resolution, the escalation is auto-denied and the task receives: `"Escalation #1 auto-denied: timeout exceeded"`.
 
 ---
@@ -529,17 +595,6 @@ agentos identity revoke compromised-worker
 
 > [!warning] Identity Revocation is Immediate
 > Revoking identity also revokes all associated permissions. The agent will be unable to execute any tools until disconnected and reconnected.
-
----
-
-## Web UI Session Cookie
-
-The web server (`agentos web serve`) sets a session cookie for browser authentication. The `Secure` flag on this cookie is set automatically based on the bind address:
-
-- **Production** (non-loopback address, e.g. `0.0.0.0` or a specific external IP): `Secure` flag is set, restricting the cookie to HTTPS connections.
-- **Local development** (`127.0.0.1` or `localhost`): `Secure` flag is omitted, so the cookie works over plain HTTP.
-
-No manual configuration is required — the flag is derived from whether the server binds to a loopback address.
 
 ---
 

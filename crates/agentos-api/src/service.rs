@@ -149,6 +149,15 @@ pub trait KernelService: Send + Sync {
 
     async fn get_unread_count(&self) -> Result<u64, ApiError>;
 
+    /// The notification routing matrix: which event kinds reach which channels.
+    async fn get_notification_routes(&self) -> Result<ApiNotificationRoutes, ApiError>;
+
+    /// Partial update of the matrix; unlisted cells are untouched.
+    async fn set_notification_routes(
+        &self,
+        rules: Vec<ApiRouteRule>,
+    ) -> Result<ApiNotificationRoutes, ApiError>;
+
     // ── Dashboard (composite) ───────────────────────────────────────────────
 
     async fn get_dashboard_summary(&self) -> Result<DashboardSummary, ApiError>;
@@ -726,7 +735,8 @@ pub trait KernelService: Send + Sync {
 
     // ── Agent conversations (multi-agent convos, read-only) ──────────────────
 
-    async fn list_convos(&self) -> Result<Vec<ApiConvoSummary>, ApiError>;
+    /// `kind` filters to `"dm"` or `"operator"`; `None` lists every convo.
+    async fn list_convos(&self, kind: Option<&str>) -> Result<Vec<ApiConvoSummary>, ApiError>;
 
     async fn get_convo(&self, id: &str) -> Result<ApiConvoDetail, ApiError>;
 

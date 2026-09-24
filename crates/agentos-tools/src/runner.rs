@@ -36,6 +36,7 @@ use crate::file_glob::FileGlob;
 use crate::file_grep::FileGrep;
 use crate::file_lock::FileLockRegistry;
 use crate::file_move::FileMove;
+use crate::file_publish::FilePublishTool;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::get_schedule_runs::GetScheduleRunsTool;
@@ -62,6 +63,7 @@ use crate::printer::PrinterTool;
 use crate::procedure_create::ProcedureCreate;
 use crate::procedure_delete::ProcedureDelete;
 use crate::procedure_list::ProcedureList;
+use crate::procedure_run::ProcedureRun;
 use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
 use crate::raw_usb::RawUsbTool;
@@ -87,6 +89,7 @@ use crate::web_fetch::WebFetch;
 use crate::web_search::WebSearchTool;
 use crate::webcam::WebcamTool;
 use crate::wifi::WifiTool;
+use crate::workspace_request::WorkspaceRequestTool;
 use agentos_memory::{Embedder, EpisodicStore, ProceduralStore, SemanticStore};
 use agentos_types::*;
 use std::collections::HashMap;
@@ -229,6 +232,8 @@ impl ToolRunner {
         )));
         self.register(Box::new(AgentMessageTool::new()));
         self.register(Box::new(TaskDelegate::new()));
+        // Stateless: it only emits a `_kernel_action`; the kernel does the work.
+        self.register(Box::new(ProcedureRun::new()));
         self.register(Box::new(TaskSpawnAsyncTool::new()));
         match HttpClientTool::new() {
             Ok(tool) => self.register(Box::new(tool)),
@@ -265,6 +270,7 @@ impl ToolRunner {
         self.register(Box::new(UserFileListTool::new()));
         self.register(Box::new(UserFileReader::new()));
         self.register(Box::new(ArtifactWriteTool::new()));
+        self.register(Box::new(FilePublishTool::new()));
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
@@ -277,6 +283,7 @@ impl ToolRunner {
         self.register(Box::new(NotifyUserTool::new()));
         self.register(Box::new(ChannelSendTool::new()));
         self.register(Box::new(AskUserTool::new()));
+        self.register(Box::new(WorkspaceRequestTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
         self.register(Box::new(AgentCallTool::new()));

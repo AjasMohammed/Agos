@@ -112,6 +112,10 @@ pub struct CapabilityContext {
     pub agent_home: PathBuf,
     /// Workspace grants with `--mode rwx`.
     pub workspace_paths_executable: Vec<PathBuf>,
+    /// Live storage zones for this agent, as (path, access). Read-write zones
+    /// join [`exec_roots`](Self::exec_roots): a project scaffolded in the
+    /// conversation's shared workspace has to be buildable there too.
+    pub storage_zones: Vec<(PathBuf, agentos_types::ZoneAccessLevel)>,
 }
 
 impl CapabilityContext {
@@ -129,6 +133,17 @@ impl CapabilityContext {
                 &self.data_dir,
             )
             .cloned(),
+        );
+        // Read-write zones only: a read-only zone must not become a place to
+        // build, and `exec_roots` is the writable set.
+        let writable_zones: Vec<PathBuf> = self
+            .storage_zones
+            .iter()
+            .filter(|(_, access)| matches!(access, agentos_types::ZoneAccessLevel::ReadWrite))
+            .map(|(p, _)| p.clone())
+            .collect();
+        roots.extend(
+            agentos_tools::sandbox_fs::grants_outside(&writable_zones, &self.data_dir).cloned(),
         );
         roots
     }
@@ -298,6 +313,7 @@ mod tests {
             workspace_paths: vec![],
             agent_home: PathBuf::from("/tmp/test-data/agents/test"),
             workspace_paths_executable: vec![],
+            storage_zones: vec![],
         }
     }
 

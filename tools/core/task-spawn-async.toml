@@ -4,7 +4,7 @@ risk_class = "control_plane"
 [manifest]
 name        = "task-spawn-async"
 version     = "1.0.0"
-description = "Spawn a background task on a named agent and return immediately. The caller is never blocked. If still running when the child completes, the result is injected into the caller's context. Use poll-agent with the returned task_id for reliable status checks."
+description = "Spawn a background task on a named agent and return immediately. The caller is never blocked. When the child completes, its result is delivered into the caller's context; a caller that finishes first is resumed automatically when the child reports. poll-agent with the returned task_id gives interim progress."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "task"

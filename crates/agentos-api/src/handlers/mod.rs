@@ -82,6 +82,19 @@ pub fn require_permission(key: &AuthenticatedKey, perm: &str) -> Result<(), ApiE
     Err(ApiError::Forbidden(format!("Missing permission: {perm}")))
 }
 
+/// Whether `key` already holds everything `scope` would grant. A key may only
+/// mint keys no broader than itself — otherwise any `keys:w` key could issue a
+/// `"*"` admin key.
+pub fn key_covers(key: &AuthenticatedKey, scope: &str) -> bool {
+    if scope == "*" {
+        return key.0.permissions.iter().any(|p| p == "*");
+    }
+    let (res, ops) = scope.split_once(':').unwrap_or((scope, "r"));
+    let ops = if ops == "*" { "rwx" } else { ops };
+    ops.chars()
+        .all(|op| require_permission(key, &format!("{res}:{op}")).is_ok())
+}
+
 #[cfg(test)]
 mod require_permission_tests {
     use super::*;
@@ -98,6 +111,19 @@ mod require_permission_tests {
             expires_at: None,
             revoked: false,
         })
+    }
+
+    #[test]
+    fn a_key_can_only_mint_scopes_it_holds() {
+        let k = key(&["keys:rw", "tasks:r"]);
+        assert!(key_covers(&k, "tasks:r"));
+        assert!(!key_covers(&k, "tasks:w"));
+        assert!(!key_covers(&k, "*"));
+        assert!(!key_covers(&k, "*:rw"));
+        let login = key(&["*:rw"]);
+        assert!(key_covers(&login, "agents:rw"));
+        assert!(!key_covers(&login, "*"));
+        assert!(key_covers(&key(&["*"]), "*"));
     }
 
     #[test]

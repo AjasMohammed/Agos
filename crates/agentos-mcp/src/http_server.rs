@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-/// Maximum MCP request body size (256 KiB). Matches agentos-web's CSP policy.
+/// Maximum MCP request body size (256 KiB), same as the API webhook body limit.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 use crate::server::{McpAuthValidator, McpServer, McpToolExecutor};

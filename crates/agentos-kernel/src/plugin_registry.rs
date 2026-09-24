@@ -262,10 +262,22 @@ impl PluginRegistry {
                 .parent()
                 .unwrap_or(&entry.manifest_path)
                 .to_path_buf();
+            // Tool manifests must live inside the plugin's own directory: an
+            // absolute or `..` path let a plugin register any TOML on disk,
+            // including one an agent wrote into its home.
             let tool_paths: Vec<PathBuf> = entry
                 .manifest
                 .tools
                 .iter()
+                .filter(|rel| {
+                    let ok = Path::new(rel.as_str())
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)));
+                    if !ok {
+                        warn!(plugin_id = %plugin_id, path = %rel, "Ignoring plugin tool path outside the plugin directory");
+                    }
+                    ok
+                })
                 .map(|rel| manifest_dir.join(rel))
                 .collect();
 
@@ -287,7 +299,10 @@ impl PluginRegistry {
             if let Some(loaded) = loaded {
                 let tool_name = loaded.manifest.manifest.name.clone();
                 let mut tr = self.tool_registry.write().await;
-                match tr.register(loaded.manifest) {
+                // Plugins install at runtime, so their tools can never be core:
+                // no shipped plugin carries tools, and a self-declared core tier
+                // would skip signature checks and the Core-only gates.
+                match tr.register_untrusted(loaded.manifest) {
                     Ok(tool_id) => {
                         registered.push(tool_id);
                         info!(plugin_id = %plugin_id, tool = %tool_name, "Registered tool from plugin");
@@ -502,6 +517,29 @@ permissions = []
         let registry = make_registry();
         registry.discover(&[tmp.path().to_path_buf()]).await;
         assert!(registry.activate("bad-plugin").await.is_err());
+    }
+
+    /// A plugin could register a self-declared core tool, from any path on disk.
+    #[tokio::test]
+    async fn plugin_tools_are_contained_and_never_core() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = VALID_MANIFEST.replace(
+            "permissions = [\"network.outbound\"]",
+            "permissions = [\"network.outbound\"]\ntools = [\"/etc/x.toml\", \"../x.toml\", \"think.toml\"]",
+        );
+        let path = write_manifest(&tmp, "test-plugin", &manifest);
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core");
+        std::fs::copy(core.join("think.toml"), path.with_file_name("think.toml")).unwrap();
+
+        let registry = make_registry();
+        registry.discover(&[tmp.path().to_path_buf()]).await;
+        registry.activate("test-plugin").await.unwrap();
+        assert!(registry
+            .tool_registry
+            .read()
+            .await
+            .get_by_name("think")
+            .is_none());
     }
 
     #[tokio::test]

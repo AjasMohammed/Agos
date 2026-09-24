@@ -4,10 +4,11 @@ risk_class = "write_scoped"
 [manifest]
 name        = "file-move"
 version     = "1.0.0"
-description = "Moves or renames a file. Both source and destination must be under your home dir or inside a write-granted folder. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires write lock on source, creates destination parent directories automatically."
+description = "Moves or renames a file, or copies it with copy=true (the source is left in place and may sit in a read-only granted folder; regular files only). Never overwrites an existing destination. Restores a deleted or overwritten file when `from` is its .trash/ path. Both source and destination must be under your home dir or inside a write-granted folder. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires write lock on source, creates destination parent directories automatically."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
+search_hints = ["move a file", "rename a file", "mv", "copy a file", "cp", "restore a deleted file"]
 
 [capabilities_required]
 permissions = ["fs.user_data:w", "fs.workspace:w"]
@@ -30,6 +31,10 @@ description = "Source file path"
 [payload_schema.properties.to]
 type = "string"
 description = "Destination file path"
+[payload_schema.properties.copy]
+type = "boolean"
+default = false
+description = "Copy instead of move: the source is left in place"
 
 [sandbox]
 network       = false

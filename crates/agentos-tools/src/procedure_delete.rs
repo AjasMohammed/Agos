@@ -43,6 +43,20 @@ impl AgentTool for ProcedureDelete {
             AgentOSError::SchemaValidation("procedure-delete requires 'id' field".into())
         })?;
 
+        // Ownership: `procedure-search` scopes reads by agent, delete must too.
+        // Shared procedures (no owner) are operator-managed, not agent-deletable.
+        let owned = self
+            .procedural
+            .get(id)
+            .await?
+            .is_some_and(|p| p.agent_id == Some(context.agent_id));
+        if !owned {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "memory.procedural".to_string(),
+                operation: format!("delete '{id}': not found or not owned by this agent"),
+            });
+        }
+
         self.procedural
             .delete(id)
             .await

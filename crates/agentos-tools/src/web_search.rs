@@ -9,6 +9,8 @@ use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 /// A single search result from any provider.
@@ -19,6 +21,30 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
+/// A cached result set, with the instant it was stored.
+struct CacheEntry {
+    stored_at: Instant,
+    results: Vec<SearchResult>,
+}
+
+/// How long a cached result set stays usable. Short enough that an agent
+/// tracking a developing situation still sees movement; long enough to absorb
+/// the repeat queries an autonomous loop issues within one line of reasoning.
+const CACHE_TTL: Duration = Duration::from_secs(900);
+
+/// Hard ceiling on cached queries. An unbounded cache in a kernel that runs for
+/// weeks is a slow leak, not a cache.
+const CACHE_MAX: usize = 256;
+
+/// Queries longer than this are not cached. A model that pastes a document into
+/// `query` would otherwise pin a copy of it for the full TTL, once per variant.
+const MAX_CACHED_QUERY_LEN: usize = 1024;
+
+/// After every rung fails, don't retry for this long. The cache only spares the
+/// network on the *success* path; this is what stops a 10000-iteration
+/// autonomous loop from hammering a provider that is already rate-limiting us.
+const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+
 pub struct WebSearchTool {
     client: Client,
     /// Optional Brave Search API key (env: BRAVE_API_KEY).
@@ -27,6 +53,13 @@ pub struct WebSearchTool {
     tavily_key: Option<Zeroizing<String>>,
     /// Optional Serper API key (env: SERPER_API_KEY).
     serper_key: Option<Zeroizing<String>>,
+    /// (query, limit) -> results. TTL-expired and size-capped.
+    ///
+    /// `std::sync::Mutex`, not tokio's: the guard is taken, used and dropped
+    /// without crossing an await. Never hold it across a provider call.
+    cache: std::sync::Mutex<HashMap<(String, usize), CacheEntry>>,
+    /// When every rung last failed, and with what message. Drives `FAILURE_COOLDOWN`.
+    last_total_failure: std::sync::Mutex<Option<(Instant, String)>>,
 }
 
 impl WebSearchTool {
@@ -43,6 +76,8 @@ impl Default for WebSearchTool {
             brave_key: std::env::var("BRAVE_API_KEY").ok().map(Zeroizing::new),
             tavily_key: std::env::var("TAVILY_API_KEY").ok().map(Zeroizing::new),
             serper_key: std::env::var("SERPER_API_KEY").ok().map(Zeroizing::new),
+            cache: std::sync::Mutex::new(HashMap::new()),
+            last_total_failure: std::sync::Mutex::new(None),
         }
     }
 }
@@ -316,28 +351,149 @@ impl WebSearchTool {
         Ok(results)
     }
 
+    /// Return a cached result set for this query, if one is present and fresh.
+    /// Expired entries are swept on every lookup — with `CACHE_MAX` at 256 the
+    /// scan is cheaper than tracking expiry separately.
+    fn cache_get(&self, key: &(String, usize)) -> Option<Vec<SearchResult>> {
+        // A cache has no invariant to protect, so recover from poisoning rather
+        // than going silently no-op for the rest of the kernel's lifetime —
+        // matches `runner.rs` and `file_lock.rs`.
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|_, e| e.stored_at.elapsed() < CACHE_TTL);
+        cache.get(key).map(|e| e.results.clone())
+    }
+
+    /// Store a result set. Only non-empty results are cached — a provider
+    /// outage must not be remembered as "no results" for the next 15 minutes.
+    fn cache_put(&self, key: (String, usize), results: &[SearchResult]) {
+        if results.is_empty() {
+            return;
+        }
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        // ponytail: O(n) oldest-entry eviction, n <= CACHE_MAX. Swap for an LRU
+        // crate only if CACHE_MAX ever needs to be in the thousands.
+        // `contains_key` first: refreshing an existing hot query overwrites in
+        // place, so evicting for it would cost an unrelated entry for nothing.
+        if cache.len() >= CACHE_MAX && !cache.contains_key(&key) {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, e)| e.stored_at)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            key,
+            CacheEntry {
+                stored_at: Instant::now(),
+                results: results.to_vec(),
+            },
+        );
+    }
+
+    /// Cache key for a query, or `None` when the query is too large to be worth
+    /// pinning. Normalized: providers ignore case and surrounding whitespace, and
+    /// a model re-issuing "the same" query across iterations drifts in both.
+    fn cache_key(query: &str, limit: usize) -> Option<(String, usize)> {
+        (query.len() <= MAX_CACHED_QUERY_LEN).then(|| (query.trim().to_lowercase(), limit))
+    }
+
+    /// The error to return immediately if every rung failed within the cooldown.
+    fn failure_cooldown_active(&self) -> Option<String> {
+        let guard = self
+            .last_total_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (at, msg) = guard.as_ref()?;
+        (at.elapsed() < FAILURE_COOLDOWN)
+            .then(|| format!("{msg} (not retried: every provider failed within the last 60s)"))
+    }
+
+    fn record_total_failure(&self, msg: &str) {
+        let mut guard = self
+            .last_total_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some((Instant::now(), msg.to_string()));
+    }
+
+    /// Try the cache, then the provider chain. Cache hits never touch the network.
+    ///
+    /// Autonomous runs re-issue identical queries; without this, every repeat is
+    /// a live call against a quota or a scrape that can get the host IP banned.
+    /// Returns the results and whether they came from the cache, so the caller
+    /// can tell the agent — an agent polling a developing situation must be able
+    /// to see that identical results are a cache hit, not an unchanged world.
+    async fn search(&self, query: &str, limit: usize) -> Result<(Vec<SearchResult>, bool), String> {
+        let key = Self::cache_key(query, limit);
+        if let Some(hit) = key.as_ref().and_then(|k| self.cache_get(k)) {
+            tracing::debug!(query, limit, count = hit.len(), "web-search: cache hit");
+            return Ok((hit, true));
+        }
+        if let Some(cooled) = self.failure_cooldown_active() {
+            tracing::warn!(query, "web-search: in failure cooldown, not retrying");
+            return Err(cooled);
+        }
+        let results = match self.search_uncached(query, limit).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.record_total_failure(&e);
+                return Err(e);
+            }
+        };
+        if let Some(k) = key {
+            self.cache_put(k, &results);
+        }
+        Ok((results, false))
+    }
+
     /// Try all providers in order, returning results from the first that succeeds.
     /// Accumulates error messages for the final error if all fail.
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
+    async fn search_uncached(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, String> {
         let mut errors: Vec<String> = Vec::new();
 
         match self.search_brave(query, limit).await {
-            Ok(r) if !r.is_empty() => return Ok(r),
+            Ok(r) if !r.is_empty() => {
+                // `query` deliberately not logged at info: it reaches the kernel
+                // log, a different retention surface from the provider call.
+                tracing::info!(rung = "brave", count = r.len(), "web-search answered");
+                return Ok(r);
+            }
             Ok(_) => errors.push("Brave: no results".to_string()),
             Err(e) => errors.push(format!("Brave: {e}")),
         }
         match self.search_tavily(query, limit).await {
-            Ok(r) if !r.is_empty() => return Ok(r),
+            Ok(r) if !r.is_empty() => {
+                // `query` deliberately not logged at info: it reaches the kernel
+                // log, a different retention surface from the provider call.
+                tracing::info!(rung = "tavily", count = r.len(), "web-search answered");
+                return Ok(r);
+            }
             Ok(_) => errors.push("Tavily: no results".to_string()),
             Err(e) => errors.push(format!("Tavily: {e}")),
         }
         match self.search_serper(query, limit).await {
-            Ok(r) if !r.is_empty() => return Ok(r),
+            Ok(r) if !r.is_empty() => {
+                // `query` deliberately not logged at info: it reaches the kernel
+                // log, a different retention surface from the provider call.
+                tracing::info!(rung = "serper", count = r.len(), "web-search answered");
+                return Ok(r);
+            }
             Ok(_) => errors.push("Serper: no results".to_string()),
             Err(e) => errors.push(format!("Serper: {e}")),
         }
         match self.search_ddg(query, limit).await {
-            Ok(r) if !r.is_empty() => return Ok(r),
+            Ok(r) if !r.is_empty() => {
+                // `query` deliberately not logged at info: it reaches the kernel
+                // log, a different retention surface from the provider call.
+                tracing::info!(rung = "ddg", count = r.len(), "web-search answered");
+                return Ok(r);
+            }
             Ok(_) => errors.push("DDG: no results".to_string()),
             Err(e) => errors.push(format!("DDG: {e}")),
         }
@@ -370,7 +526,7 @@ impl AgentTool for WebSearchTool {
 
         let limit = payload["limit"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
 
-        let results = self.search(query, limit).await.map_err(|reason| {
+        let (results, cached) = self.search(query, limit).await.map_err(|reason| {
             AgentOSError::ToolExecutionFailed {
                 tool_name: "web-search".into(),
                 reason,
@@ -386,6 +542,8 @@ impl AgentTool for WebSearchTool {
             "query": query,
             "results": json_results,
             "count": json_results.len(),
+            // Identical results on a repeat poll mean "cached", not "unchanged".
+            "cached": cached,
         }))
     }
 
@@ -437,10 +595,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_search_missing_query_returns_error() {
+        let tool = WebSearchTool::new();
+        let result = tool.execute(serde_json::json!({}), test_ctx()).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("query"), "error should mention 'query'");
+    }
+
+    fn test_ctx() -> crate::traits::ToolExecutionContext {
         use crate::traits::ToolExecutionContext;
         use agentos_types::{AgentID, TaskID, TraceID};
-        let tool = WebSearchTool::new();
-        let ctx = ToolExecutionContext {
+        ToolExecutionContext {
             data_dir: std::path::PathBuf::from("/tmp"),
             task_id: TaskID::new(),
             agent_id: AgentID::new(),
@@ -460,11 +625,8 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
-        };
-        let result = tool.execute(serde_json::json!({}), ctx).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("query"), "error should mention 'query'");
+            shared_dir: None,
+        }
     }
 
     #[test]
@@ -476,5 +638,127 @@ mod tests {
         let _brave: Option<&str> = tool.brave_key.as_deref().map(|k| k.as_str());
         let _tavily: Option<&str> = tool.tavily_key.as_deref().map(|k| k.as_str());
         let _serper: Option<&str> = tool.serper_key.as_deref().map(|k| k.as_str());
+    }
+
+    fn one_result(url: &str) -> Vec<SearchResult> {
+        vec![SearchResult {
+            title: "t".into(),
+            url: url.into(),
+            snippet: String::new(),
+        }]
+    }
+
+    #[test]
+    fn cache_put_then_get_returns_results() {
+        let tool = WebSearchTool::new();
+        let key = ("rust".to_string(), 5);
+        tool.cache_put(key.clone(), &one_result("https://rust-lang.org"));
+        let hit = tool.cache_get(&key).expect("expected a cache hit");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].url, "https://rust-lang.org");
+    }
+
+    #[test]
+    fn cache_does_not_store_empty_results() {
+        // A provider outage must not be cached as "no results".
+        let tool = WebSearchTool::new();
+        let key = ("rust".to_string(), 5);
+        tool.cache_put(key.clone(), &[]);
+        assert!(tool.cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn cache_distinguishes_limit() {
+        // Same query at a different limit is a different key — a limit-3 hit
+        // must not satisfy a limit-10 request with only three results.
+        let tool = WebSearchTool::new();
+        tool.cache_put(("rust".to_string(), 3), &one_result("https://example.com"));
+        assert!(tool.cache_get(&("rust".to_string(), 10)).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_oldest_at_capacity() {
+        let tool = WebSearchTool::new();
+        let overflow = CACHE_MAX + 10;
+        for i in 0..overflow {
+            tool.cache_put((format!("q{i}"), 5), &one_result("https://example.com"));
+        }
+        // Evict-one-then-insert on distinct keys settles at exactly the cap.
+        // `assert!(<=)` would also pass for a `clear()`, or for evicting the
+        // *newest* entry — a one-character min/max slip that guts the cache.
+        let len = tool.cache.lock().expect("cache lock").len();
+        assert_eq!(len, CACHE_MAX, "cache should settle at exactly the cap");
+        assert!(
+            tool.cache_get(&("q0".to_string(), 5)).is_none(),
+            "oldest entry should have been evicted"
+        );
+        assert!(
+            tool.cache_get(&(format!("q{}", overflow - 1), 5)).is_some(),
+            "newest entry should have survived"
+        );
+    }
+
+    #[test]
+    fn cache_get_drops_expired_entries() {
+        let tool = WebSearchTool::new();
+        let key = ("rust".to_string(), 5);
+        let stale = Instant::now()
+            .checked_sub(CACHE_TTL + Duration::from_secs(1))
+            .expect("clock far enough from the epoch");
+        tool.cache.lock().expect("cache lock").insert(
+            key.clone(),
+            CacheEntry {
+                stored_at: stale,
+                results: one_result("https://stale.example"),
+            },
+        );
+        assert!(tool.cache_get(&key).is_none(), "expired entry must not hit");
+    }
+
+    #[test]
+    fn cache_key_normalizes_case_and_whitespace() {
+        // A model re-issuing "the same" query across iterations drifts in both.
+        assert_eq!(
+            WebSearchTool::cache_key("  Rust Tokio ", 5),
+            WebSearchTool::cache_key("rust tokio", 5)
+        );
+        // Oversized queries are not cached at all.
+        let huge = "x".repeat(MAX_CACHED_QUERY_LEN + 1);
+        assert!(WebSearchTool::cache_key(&huge, 5).is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_serves_from_cache_without_touching_the_network() {
+        // The invariant the whole phase turns on: execute() must go through the
+        // caching wrapper. A hit returns before any provider call, so this is
+        // deterministic whether or not API keys are set in the environment.
+        let tool = WebSearchTool::new();
+        tool.cache_put(
+            ("rust".to_string(), 5),
+            &one_result("https://cached.example"),
+        );
+        let out = tool
+            .execute(serde_json::json!({"query": "Rust", "limit": 5}), test_ctx())
+            .await
+            .expect("cache hit should succeed offline");
+        assert_eq!(out["results"][0]["url"], "https://cached.example");
+        assert_eq!(out["cached"], true, "a hit must be reported to the agent");
+    }
+
+    #[test]
+    fn failure_cooldown_suppresses_retries() {
+        // Without this, a rate-limited provider gets hammered once per iteration
+        // for the whole 10000-iteration autonomous budget.
+        let tool = WebSearchTool::new();
+        assert!(tool.failure_cooldown_active().is_none());
+        tool.record_total_failure("All search providers failed: DDG: 429");
+        let cooled = tool
+            .failure_cooldown_active()
+            .expect("cooldown should be active right after a total failure");
+        assert!(cooled.contains("429"), "original error must be preserved");
+        assert!(
+            cooled.contains("not retried"),
+            "should say it was suppressed"
+        );
     }
 }

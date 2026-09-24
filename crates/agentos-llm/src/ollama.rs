@@ -34,6 +34,10 @@ pub struct OllamaCore {
     image_resolver: Arc<dyn ImageResolver>,
     /// Model IDs that accept `images: [...]` on user messages (e.g. `llava`). Empty → no vision.
     vision_models: Vec<String>,
+    /// Whether the loaded model declares a `thinking` capability. Asked of
+    /// `/api/show` on first use and cached; only successful probes are cached,
+    /// so a network blip doesn't disable the dial for the process lifetime.
+    thinking_capable: tokio::sync::OnceCell<bool>,
 }
 
 impl OllamaCore {
@@ -45,22 +49,7 @@ impl OllamaCore {
 
     pub fn new(host: &str, model: &str) -> Self {
         // Ollama wildcard entry has zero-cost (local inference).
-        let table = default_pricing_table();
-        let pricing = table
-            .iter()
-            .find(|p| p.provider == "ollama" && p.model == model)
-            .or_else(|| {
-                table
-                    .iter()
-                    .find(|p| p.provider == "ollama" && p.model == "*")
-            })
-            .cloned()
-            .unwrap_or(ModelPricing {
-                provider: "ollama".to_string(),
-                model: model.to_string(),
-                input_per_1k: 0.0,
-                output_per_1k: 0.0,
-            });
+        let pricing = crate::lookup_pricing(&default_pricing_table(), "ollama", model);
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -82,7 +71,12 @@ impl OllamaCore {
                 supports_streaming: true,
                 supports_parallel_tools: false,
                 supports_prompt_caching: false,
-                supports_thinking: false,
+                // Declared at adapter level because the honest answer is
+                // per-model and only `/api/show` knows it. Nothing static can
+                // say whether the loaded tag reasons, so this reports "the
+                // adapter carries the dial" and `model_supports_thinking`
+                // settles the real question before any `think` is sent.
+                supports_thinking: true,
                 supports_structured_output: false,
             },
             pricing,
@@ -91,6 +85,7 @@ impl OllamaCore {
             concurrency: crate::retry::concurrency_limiter_for(host),
             image_resolver: Arc::new(NoopImageResolver),
             vision_models: Vec::new(),
+            thinking_capable: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -201,7 +196,7 @@ impl OllamaCore {
     fn context_to_messages(&self, context: &ContextWindow) -> Vec<OllamaChatMessage> {
         use serde_json::Value;
         context
-            .active_entries()
+            .wire_entries()
             .iter()
             .map(|entry| {
                 match entry.role {
@@ -462,6 +457,69 @@ impl OllamaCore {
         self.model.contains("gpt-oss")
     }
 
+    /// Ask `/api/show` whether the loaded model declares a `thinking`
+    /// capability. `None` means the question could not be answered (endpoint
+    /// down, old Ollama with no `capabilities` field), which is not cached.
+    async fn probe_thinking_capability(&self) -> Option<bool> {
+        let res = self
+            .client
+            .post(format!("{}/api/show", self.host))
+            .json(&serde_json::json!({ "model": self.model }))
+            // Its own deadline: `self.client` carries the *generation* timeout
+            // (900s in a tuned config), and a metadata endpoint that accepts
+            // the connection then stalls would hold the whole inference there.
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !res.status().is_success() {
+            return None;
+        }
+        let body: Value = res.json().await.ok()?;
+        let Some(caps) = body.get("capabilities").and_then(|c| c.as_array()) else {
+            // The server answered and declares no capabilities at all, i.e. it
+            // predates the field — and every such server also predates `think`.
+            // That is a definite "no", so it caches instead of re-probing on
+            // every single request for the life of the process.
+            return Some(false);
+        };
+        Some(caps.iter().any(|c| c.as_str() == Some("thinking")))
+    }
+
+    /// Cached answer to "does this model reason?". False whenever the probe
+    /// cannot say — Ollama rejects `think` on a model without the capability,
+    /// so the unknown case must send nothing.
+    async fn model_supports_thinking(&self) -> bool {
+        if let Some(cached) = self.thinking_capable.get() {
+            return *cached;
+        }
+        let Some(capable) = self.probe_thinking_capability().await else {
+            tracing::debug!(
+                model = %self.model,
+                "ollama: thinking capability probe failed; sending no `think` this turn"
+            );
+            return false;
+        };
+        let _ = self.thinking_capable.set(capable);
+        capable
+    }
+
+    /// The `think` value for this request, or `None` when thinking is off or
+    /// the model has no thinking mode.
+    ///
+    /// ponytail: a bare `true`, never a rung string. Ollama grew
+    /// `think: "low"|"medium"|"high"` later than `think: true`, and
+    /// `/api/show` answers "does this model think", not "does this daemon take
+    /// a level" — so a rung would 400 on an older server with no way to tell
+    /// in advance. On/off is what the boolean can promise; depth needs a
+    /// daemon-version probe to be worth sending.
+    async fn think_value(&self, options: &InferenceOptions) -> Option<Value> {
+        options.thinking_effort.as_deref()?;
+        self.model_supports_thinking()
+            .await
+            .then_some(Value::Bool(true))
+    }
+
     /// See [`tool_helpers::recover_harmony_leak`]. Native calls win; a
     /// recovered call is kept only for a tool this request offered, with the
     /// same manifest-derived intent a native call gets.
@@ -689,6 +747,11 @@ struct OllamaChatRequest {
     /// Response format — set to "json" for JSON mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<String>,
+    /// Reasoning toggle: `true`, or a rung string on models that take one.
+    /// Omitted unless the model declares the `thinking` capability, because
+    /// Ollama rejects the field outright on models that do not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -784,6 +847,8 @@ impl LLMCore for OllamaCore {
             },
             tools: Vec::new(),
             format: None,
+            // No `InferenceOptions` on this path, so no dial to carry.
+            think: None,
         };
 
         let ollama_response = self.send_chat_request(request).await?;
@@ -851,6 +916,7 @@ impl LLMCore for OllamaCore {
             } else {
                 None
             },
+            think: self.think_value(options).await,
         };
 
         let intent_by_tool: HashMap<String, String> = effective_tools
@@ -931,6 +997,8 @@ impl LLMCore for OllamaCore {
             },
             tools: Vec::new(),
             format: None,
+            // No `InferenceOptions` on this path, so no dial to carry.
+            think: None,
         };
 
         let url = format!("{}/api/chat", self.host);
@@ -1171,6 +1239,8 @@ impl LLMCore for OllamaCore {
             },
             tools: ollama_tools,
             format: None,
+            // No `InferenceOptions` on this path, so no dial to carry.
+            think: None,
         };
 
         let url = format!("{}/api/chat", self.host);
@@ -1549,6 +1619,7 @@ mod tests {
     #[test]
     fn test_context_to_messages_native_tool_result() {
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("call_xyz", "shell")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1574,9 +1645,9 @@ mod tests {
         let adapter = OllamaCore::new("http://localhost:11434", "llama3.2");
         let messages = adapter.context_to_messages(&ctx);
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "tool");
-        assert_eq!(messages[0].content, "tool output");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, "tool");
+        assert_eq!(messages[1].content, "tool output");
     }
 
     #[test]
@@ -1865,5 +1936,77 @@ mod tests {
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].tool_name, "file-writer");
         assert_eq!(result.stop_reason, StopReason::ToolUse);
+    }
+
+    /// Ollama rejects `think` on a model without the capability, so a model
+    /// that cannot reason must send no field at all — not `false`.
+    #[tokio::test]
+    async fn think_is_omitted_when_the_model_cannot_reason() {
+        let core = OllamaCore::new("http://127.0.0.1:1", "llama3.2");
+        core.thinking_capable.set(false).unwrap();
+        let options = InferenceOptions {
+            thinking_effort: Some("high".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(core.think_value(&options).await, None);
+    }
+
+    /// Thinking off must not probe or send anything, whatever the model is.
+    #[tokio::test]
+    async fn think_is_omitted_when_thinking_is_off() {
+        let core = OllamaCore::new("http://127.0.0.1:1", "deepseek-r1");
+        core.thinking_capable.set(true).unwrap();
+        assert_eq!(core.think_value(&InferenceOptions::default()).await, None);
+    }
+
+    /// Every rung sends the same bare `true`: the level-string form is newer
+    /// than the boolean one and nothing here knows the daemon's version.
+    #[tokio::test]
+    async fn think_is_a_bare_bool_on_every_rung() {
+        let options = |effort: &str| InferenceOptions {
+            thinking_effort: Some(effort.to_string()),
+            ..Default::default()
+        };
+
+        for model in ["gpt-oss:20b", "deepseek-r1", "qwen3"] {
+            let core = OllamaCore::new("http://127.0.0.1:1", model);
+            core.thinking_capable.set(true).unwrap();
+            for rung in ["low", "medium", "high", "max"] {
+                assert_eq!(
+                    core.think_value(&options(rung)).await,
+                    Some(Value::Bool(true)),
+                    "{model} @ {rung}"
+                );
+            }
+        }
+    }
+
+    /// `think` has to ride at the request root under that exact name — a
+    /// rename or a nesting slip is a 400 that no unit test on `think_value`
+    /// alone would catch.
+    #[test]
+    fn think_serializes_at_the_request_root() {
+        let request = OllamaChatRequest {
+            model: "deepseek-r1".to_string(),
+            messages: Vec::new(),
+            stream: false,
+            options: OllamaOptions {
+                num_ctx: 4096,
+                temperature: None,
+            },
+            tools: Vec::new(),
+            format: None,
+            think: Some(Value::Bool(true)),
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["think"], true);
+
+        // Thinking off omits the key entirely; Ollama rejects `think` on a
+        // model without the capability, so `false` is not an acceptable
+        // stand-in for absent.
+        let mut off = request;
+        off.think = None;
+        let body = serde_json::to_value(&off).unwrap();
+        assert!(body.get("think").is_none());
     }
 }

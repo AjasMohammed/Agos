@@ -105,7 +105,8 @@ impl AgentTool for FileDiff {
                         })?;
 
                 let resolve = |p: &str| -> Result<std::path::PathBuf, AgentOSError> {
-                    let resolved = resolve_tool_path(p, &agent_root, &context.workspace_paths)?;
+                    let resolved = resolve_tool_path(p, &agent_root, &context.read_roots())
+                        .map_err(|e| context.with_path_hint(e))?;
                     resolved
                         .canonicalize()
                         .map_err(|_| AgentOSError::ToolExecutionFailed {
@@ -129,10 +130,7 @@ impl AgentTool for FileDiff {
                         .map(|q| q.is_path_in_zone(&context.agent_id, canon))
                         .unwrap_or(false);
                     if !canon.starts_with(&agent_root_canon) && !in_workspace && !in_storage_zone {
-                        return Err(AgentOSError::PermissionDenied {
-                            resource: "fs.user_data".into(),
-                            operation: format!("Path traversal denied: {}", path_str),
-                        });
+                        return Err(context.deny_path(path_str));
                     }
                     if in_workspace
                         && !context
@@ -229,6 +227,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -308,6 +307,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         };
         let result = tool
             .execute(

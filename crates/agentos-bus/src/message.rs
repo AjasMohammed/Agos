@@ -518,6 +518,21 @@ pub enum KernelCommand {
         notification_id: agentos_types::NotificationID,
     },
 
+    /// Read the notification routing matrix (which event kinds reach which
+    /// delivery channels).
+    GetNotificationRoutes,
+
+    /// Set one cell of the notification routing matrix.
+    SetNotificationRoute {
+        /// `approval`, `task_complete`, `task_failed`, `question`,
+        /// `agent_message`, `system_alert`, `status_update`.
+        event: String,
+        /// Channel instance id or builtin delivery kind (`desktop`, `cli`, …).
+        channel: String,
+        /// `always`, `never`, or `when_away`.
+        mode: String,
+    },
+
     /// Submit a response to an interactive notification (Question kind).
     RespondToNotification {
         notification_id: agentos_types::NotificationID,
@@ -940,10 +955,13 @@ pub enum KernelCommand {
         agent_name: String,
     },
     /// Add a learned "allow always" policy entry.
+    /// `action` is optional (None = every action of the tool).
     /// `path_glob` is optional (None = match any payload).
     /// `agent_name` is optional (None = applies to every agent).
     AddApprovalPolicy {
         tool_name: String,
+        #[serde(default)]
+        action: Option<String>,
         path_glob: Option<String>,
         agent_name: Option<String>,
     },
@@ -1167,6 +1185,8 @@ pub enum KernelResponse {
     ApprovalPolicyAdded {
         id: i64,
         tool_name: String,
+        #[serde(default)]
+        action: Option<String>,
         path_glob: Option<String>,
         agent_name: Option<String>,
     },

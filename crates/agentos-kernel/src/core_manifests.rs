@@ -14,6 +14,31 @@ use std::path::Path;
 #[folder = "../../tools/core/"]
 pub(crate) struct EmbeddedCoreManifests;
 
+/// Risk class of a core-tool call, resolved from the embedded manifests with
+/// the same per-action table the approval hook uses. For callers that gate
+/// tool execution without a booted kernel (`agentos mcp serve`). A tool with
+/// no embedded manifest is `ExecCapable`, matching the kernel's fail-closed
+/// default for unknown tools.
+pub fn embedded_risk_class(tool_name: &str, args: &serde_json::Value) -> agentos_types::RiskClass {
+    static MANIFESTS: std::sync::OnceLock<
+        std::collections::HashMap<String, agentos_types::ToolManifest>,
+    > = std::sync::OnceLock::new();
+    let manifests = MANIFESTS.get_or_init(|| {
+        EmbeddedCoreManifests::iter()
+            .filter_map(|f| EmbeddedCoreManifests::get(&f))
+            .filter_map(|asset| {
+                let text = std::str::from_utf8(asset.data.as_ref()).ok()?;
+                agentos_tools::loader::parse_manifest(text).ok()
+            })
+            .map(|m| (m.manifest.name.clone(), m))
+            .collect()
+    });
+    match manifests.get(tool_name) {
+        Some(m) => crate::hooks::approval_hook::risk_class_for_payload(m, &args.to_string()).0,
+        None => agentos_types::RiskClass::ExecCapable,
+    }
+}
+
 impl Kernel {
     /// Install bundled core tool manifests into the runtime directory, seeding
     /// **every** embedded `tools/core/*.toml` so no shipped tool's manifest
@@ -142,7 +167,8 @@ mod tests {
     }
 
     /// Every `risk_class_by_action` entry a shipped manifest declares must name
-    /// `readonly_external` AND an action the tool's own `payload_schema` accepts.
+    /// `readonly_external` or `exec_capable` AND an action the tool's own
+    /// `payload_schema` accepts.
     ///
     /// The class bound is enforced at load by `verify_manifest`, so a violation
     /// there is a boot failure, not a silent downgrade. The *key* bound is not
@@ -179,10 +205,15 @@ mod tests {
 
             for (action, class) in &manifest.risk_class_by_action {
                 assert!(
-                    matches!(class, agentos_types::RiskClass::ReadonlyExternal),
+                    matches!(
+                        class,
+                        agentos_types::RiskClass::ReadonlyExternal
+                            | agentos_types::RiskClass::ExecCapable
+                    ),
                     "{tool}: risk_class_by_action[{action}] = {class:?}; only \
-                     readonly_external is permitted (readonly_scoped is Allow \
-                     under `deny` too, so it is a bypass, not less friction)"
+                     readonly_external and exec_capable are permitted \
+                     (readonly_scoped is Allow under `deny` too, so it is a \
+                     bypass, not less friction)"
                 );
                 assert!(
                     declared.contains(&action.as_str()),

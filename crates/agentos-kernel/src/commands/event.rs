@@ -77,6 +77,12 @@ impl Kernel {
                 Some(trimmed.to_string())
             }
         });
+        if let Some(Err(message)) = payload_filter
+            .as_deref()
+            .map(crate::event_bus::validate_filter)
+        {
+            return KernelResponse::Error { message };
+        }
 
         let sub = EventSubscription {
             id: SubscriptionID::new(),

@@ -1,6 +1,6 @@
 use crate::agent_manual::SharedInstalledSkills;
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp};
+use agentos_types::{skill_permission_resource, AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -37,7 +37,7 @@ impl AgentTool for SkillPromptTool {
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let name = payload
             .get("name")
@@ -48,15 +48,30 @@ impl AgentTool for SkillPromptTool {
                 )
             })?;
 
+        // Scope the snapshot to the skills this agent is granted BEFORE any
+        // lookup: a skill the operator toggled off must be indistinguishable
+        // from one that was never installed, or the "Installed: [...]" hint
+        // below leaks the names of skills this agent may not use.
         let snapshot = {
             let guard = self.installed_skills.read().await;
-            guard.clone()
+            guard
+                .iter()
+                .filter(|s| {
+                    context
+                        .permissions
+                        .check(&skill_permission_resource(&s.name), PermissionOp::Execute)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         };
 
         if snapshot.is_empty() {
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "skill-prompt".into(),
-                reason: "no skills currently installed".into(),
+            // PermissionDenied, not a generic failure: this is the shape the
+            // audit log and the approval surfaces key on, and "none installed"
+            // vs "none granted" is deliberately not distinguished.
+            return Err(AgentOSError::PermissionDenied {
+                resource: skill_permission_resource(name),
+                operation: "execute".into(),
             });
         }
 
@@ -69,7 +84,8 @@ impl AgentTool for SkillPromptTool {
                 AgentOSError::ToolExecutionFailed {
                     tool_name: "skill-prompt".into(),
                     reason: format!(
-                        "skill '{name}' not installed. Installed: [{}]",
+                        "skill '{name}' not available to you. Available: [{}] \
+                         (a skill the operator scoped out is not listed)",
                         known.join(", ")
                     ),
                 }
@@ -126,13 +142,21 @@ mod tests {
         }
     }
 
+    /// Default agent scope: the broad `skill:` execute grant every agent is
+    /// registered with, which covers every installed skill.
     fn ctx() -> ToolExecutionContext {
+        let mut permissions = PermissionSet::new();
+        permissions.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        ctx_with(permissions)
+    }
+
+    fn ctx_with(permissions: PermissionSet) -> ToolExecutionContext {
         ToolExecutionContext {
             data_dir: std::path::PathBuf::from("/tmp"),
             task_id: TaskID::new(),
             agent_id: AgentID::new(),
             trace_id: TraceID::new(),
-            permissions: PermissionSet::new(),
+            permissions,
             vault: None,
             hal: None,
             file_lock_registry: None,
@@ -147,6 +171,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -208,9 +233,50 @@ mod tests {
             .await
             .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("not installed"));
+        assert!(msg.contains("not available"));
         assert!(msg.contains("alert-builder"));
         assert!(msg.contains("cost-optimizer"));
+    }
+
+    #[tokio::test]
+    async fn skill_without_grant_is_refused() {
+        let snap = snapshot(vec![skill("alert-builder", "x")]);
+        let tool = SkillPromptTool::new(snap);
+        let err = tool
+            .execute(
+                json!({"name": "alert-builder"}),
+                ctx_with(PermissionSet::new()),
+            )
+            .await
+            .unwrap_err();
+        // Classified as a permission denial (not a generic tool failure) so it
+        // audits and surfaces like every other denied capability.
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn denied_skill_is_neither_returned_nor_named() {
+        // Toggled off for this agent: must look exactly like "not installed",
+        // or the error message leaks the operator's scoping decision.
+        let mut permissions = PermissionSet::new();
+        permissions.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        permissions.deny("skill:cost-optimizer/".to_string());
+        let snap = snapshot(vec![
+            skill("alert-builder", "x"),
+            skill("cost-optimizer", "y"),
+        ]);
+        let tool = SkillPromptTool::new(snap);
+        let err = tool
+            .execute(json!({"name": "cost-optimizer"}), ctx_with(permissions))
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not available"));
+        assert!(msg.contains("alert-builder"));
+        assert!(
+            msg.contains("Available: [alert-builder]"),
+            "denied skill must not be listed as available: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -222,6 +288,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("no skills currently installed"));
+        assert!(msg.contains("Permission denied"));
+        assert!(msg.contains("skill:anything/"));
     }
 }

@@ -60,3 +60,6 @@
 {"query": "http-client", "expect_tools": ["http-client"], "category": "web", "type": "lexical"}
 {"query": "datetime", "expect_tools": ["datetime"], "category": "core", "type": "lexical"}
 {"query": "task-status", "expect_tools": ["task-status"], "category": "task", "type": "lexical"}
+{"query": "say this out loud to the user", "expect_tools": ["speak"], "category": "core", "type": "synonym"}
+{"query": "text to speech", "expect_tools": ["speak"], "category": "core", "type": "lexical"}
+{"query": "let the user see a picture I downloaded", "expect_tools": ["file-publish"], "category": "artifact", "type": "synonym"}

@@ -102,7 +102,8 @@ impl AgentTool for FileGrep {
         let agent_root = context.agent_files_dir()?;
         // SECURITY: resolve search root, checking workspace paths before falling back to data_dir.
         let resolved =
-            crate::traits::resolve_tool_path(&search_path, &agent_root, &context.workspace_paths)?;
+            crate::traits::resolve_tool_path(&search_path, &agent_root, &context.read_roots())
+                .map_err(|e| context.with_path_hint(e))?;
 
         let canonical_root =
             resolved
@@ -131,10 +132,7 @@ impl AgentTool for FileGrep {
             .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_root))
             .unwrap_or(false);
         if !canonical_root.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "fs.user_data".into(),
-                operation: format!("Path traversal denied: {}", search_path),
-            });
+            return Err(context.deny_path(&search_path));
         }
         if in_workspace
             && !context

@@ -10,6 +10,17 @@ The distributed binary is `agentos` (crate `agentos-cli`); the version reported 
 
 ## [Unreleased]
 
+### Changed
+- Peripheral HAL drivers (audio, bluetooth, display, printer, raw-usb,
+  usb-storage, webcam, wifi) are registered at boot only when the host has the
+  hardware and the service the driver uses. Their tools are hidden otherwise,
+  so a headless server no longer advertises `wifi` or `audio`. Override per
+  driver with `[hal] force_enable` / `[hal] disable`. `agentos doctor` shows
+  what was detected.
+- The linux-amd64 release binary now includes every peripheral driver except
+  bluetooth (new `release-peripherals` feature). A release gate fails if the
+  binary links any shared library beyond the glibc set.
+
 ## [1.0.0-rc.1] - 2026-09-17
 
 Release candidate for 1.0.0: Linux x86_64, single-operator deployments. Same

@@ -71,19 +71,19 @@
 <p>State transitions are enforced by <code>TaskState::can_transition_to()</code> — invalid transitions are rejected.</p>
 <hr>
 <h2 id="creating-tasks" class="anchored"><a class="hanchor" href="#creating-tasks" aria-label="link">#</a>Creating Tasks</h2>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;NAME&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--autonomous<span class="o">]</span><span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;NAME&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--autonomous<span class="o">]</span><span class="w"> </span><span class="s2">"&lt;PROMPT&gt;"</span>
 </pre></div>
 </div>
 <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>String</code></td><td>No</td><td>Agent name to execute the task. If omitted, the router selects one automatically</td></tr><tr><td><code>--autonomous</code></td><td>flag</td><td>No</td><td>Run without iteration or timeout limits. Use for long-running workflows</td></tr><tr><td><code>--no-checkpoint</code></td><td>flag</td><td>No</td><td>Disable checkpoint writes for this task (ephemeral execution)</td></tr><tr><td>`--thinking &lt;off\</td><td>low\</td><td>medium\</td><td>high\</td><td>max&gt;`</td><td>enum</td><td>No</td><td>Extended-thinking budget (default: <code>off</code>; Anthropic models only)</td></tr><tr><td><code>-i</code>, <code>--interactive</code></td><td>flag</td><td>No</td><td>Prompt inline at the terminal for human approval instead of returning to the shell (requires a TTY)</td></tr><tr><td><code>prompt</code></td><td>positional</td><td>Yes</td><td>The task prompt</td></tr></tbody></table></div>
 <p><strong>Examples:</strong></p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Route automatically to the best available agent</span>
-agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="s2">&quot;Summarize the contents of /data/report.csv&quot;</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="s2">"Summarize the contents of /data/report.csv"</span>
 
 <span class="c1"># Assign to a specific agent</span>
-agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span><span class="w"> </span><span class="s2">&quot;Review the authentication module for security issues&quot;</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span><span class="s2">"code-reviewer"</span><span class="w"> </span><span class="s2">"Review the authentication module for security issues"</span>
 
 <span class="c1"># Run an autonomous long-running task with no iteration/timeout ceiling</span>
-agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">&quot;Refactor the entire auth module, write tests, and ensure all tests pass&quot;</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">"Refactor the entire auth module, write tests, and ensure all tests pass"</span>
 </pre></div>
 </div>
 <p>When a task is created:</p>
@@ -98,13 +98,13 @@ agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> <
 <p>Routing rules are evaluated before the strategy fallback. Each rule has a regex pattern matched against the task prompt, a preferred agent, and an optional fallback agent.</p>
 <div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Example routing rule configuration</span>
 <span class="k">[[routing.rules]]</span>
-<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;security|audit|vulnerability&quot;</span>
-<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;security-agent&quot;</span>
-<span class="n">fallback_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span>
+<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"security|audit|vulnerability"</span>
+<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"security-agent"</span>
+<span class="n">fallback_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"code-reviewer"</span>
 
 <span class="k">[[routing.rules]]</span>
-<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;deploy|staging|production&quot;</span>
-<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;ops&quot;</span>
+<span class="n">task_pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"deploy|staging|production"</span>
+<span class="n">preferred_agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"ops"</span>
 </pre></div>
 </div>
 <p>Rules are evaluated in order. The first matching rule wins. If the preferred agent is offline, the fallback agent is tried. If no rules match, the strategy is applied.</p>
@@ -132,10 +132,10 @@ agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> <
 agentos<span class="w"> </span>escalation<span class="w"> </span>list
 
 <span class="c1"># Approve an escalation</span>
-agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Approved&quot;</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">"Approved"</span>
 
 <span class="c1"># Deny an escalation</span>
-agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Denied&quot;</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span>&lt;ESCALATION_ID&gt;<span class="w"> </span>--decision<span class="w"> </span><span class="s2">"Denied"</span>
 </pre></div>
 </div>
 <hr>
@@ -190,16 +190,16 @@ agentos<span class="w"> </span>task<span class="w"> </span>traces<span class="w"
 <h2 id="background-tasks" class="anchored"><a class="hanchor" href="#background-tasks" aria-label="link">#</a>Background Tasks</h2>
 <p>Background tasks run detached from the CLI session. Use the <code>bg</code> command group to manage them.</p>
 <h3 id="running-a-background-task" class="anchored"><a class="hanchor" href="#running-a-background-task" aria-label="link">#</a>Running a Background Task</h3>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span><span class="w"> </span><span class="o">[</span>--detach<span class="o">]</span>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span>--task<span class="w"> </span><span class="s2">"&lt;PROMPT&gt;"</span><span class="w"> </span><span class="o">[</span>--detach<span class="o">]</span>
 </pre></div>
 </div>
 <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td>—</td><td>Unique name for the background task</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>—</td><td>Agent to execute the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td>—</td><td>Task prompt</td></tr><tr><td><code>--detach</code></td><td>flag</td><td><code>false</code></td><td>Return immediately without waiting for output</td></tr></tbody></table></div>
 <p><strong>Example:</strong></p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run a background task and detach</span>
-agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;nightly-audit&quot;</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Run full security audit&quot;</span><span class="w"> </span>--detach
+agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">"nightly-audit"</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">"ops"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Run full security audit"</span><span class="w"> </span>--detach
 
 <span class="c1"># Run and stay attached (see output)</span>
-agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;data-export&quot;</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">&quot;local-dev&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Export user data to CSV&quot;</span>
+agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span><span class="s2">"data-export"</span><span class="w"> </span>--agent<span class="w"> </span><span class="s2">"local-dev"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Export user data to CSV"</span>
 </pre></div>
 </div>
 <h3 id="listing-background-tasks" class="anchored"><a class="hanchor" href="#listing-background-tasks" aria-label="link">#</a>Listing Background Tasks</h3>
@@ -213,7 +213,7 @@ agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span
 </div>
 <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>positional</td><td>—</td><td>Background task name</td></tr><tr><td><code>--follow</code></td><td>flag</td><td><code>false</code></td><td>Stream logs in real-time (like <code>tail -f</code>)</td></tr></tbody></table></div>
 <p><strong>Example:</strong></p>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span><span class="s2">&quot;nightly-audit&quot;</span><span class="w"> </span>--follow
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span><span class="s2">"nightly-audit"</span><span class="w"> </span>--follow
 </pre></div>
 </div>
 <h3 id="killing-a-background-task" class="anchored"><a class="hanchor" href="#killing-a-background-task" aria-label="link">#</a>Killing a Background Task</h3>
@@ -225,8 +225,8 @@ agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span
 <h2 id="scheduled-tasks" class="anchored"><a class="hanchor" href="#scheduled-tasks" aria-label="link">#</a>Scheduled Tasks</h2>
 <p>Scheduled tasks run on a cron schedule. The kernel evaluates cron expressions and spawns tasks at the specified times.</p>
 <h3 id="creating-a-scheduled-task" class="anchored"><a class="hanchor" href="#creating-a-scheduled-task" aria-label="link">#</a>Creating a Scheduled Task</h3>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;&lt;EXPRESSION&gt;&quot;</span><span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--task<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span><span class="w"> </span>--permissions<span class="w"> </span><span class="s2">&quot;&lt;PERM1,PERM2,...&gt;&quot;</span>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span>&lt;NAME&gt;<span class="w"> </span>--cron<span class="w"> </span><span class="s2">"&lt;EXPRESSION&gt;"</span><span class="w"> </span>--agent<span class="w"> </span>&lt;AGENT&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--task<span class="w"> </span><span class="s2">"&lt;PROMPT&gt;"</span><span class="w"> </span>--permissions<span class="w"> </span><span class="s2">"&lt;PERM1,PERM2,...&gt;"</span>
 </pre></div>
 </div>
 <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td>Yes</td><td>Unique schedule name</td></tr><tr><td><code>--cron</code></td><td><code>String</code></td><td>Yes</td><td>Cron expression (5-field standard format)</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Yes</td><td>Agent to execute the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td>Yes</td><td>Task prompt</td></tr><tr><td><code>--permissions</code></td><td><code>String</code></td><td>Yes</td><td>Comma-separated permissions for the task</td></tr></tbody></table></div>
@@ -242,19 +242,19 @@ agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span
 </div>
 <p><strong>Examples:</strong></p>
 <div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run every day at 2 AM</span>
-agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;daily-report&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;0 2 * * *&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Generate daily system health report&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read,audit.read&quot;</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">"daily-report"</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">"0 2 * * *"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">"ops"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Generate daily system health report"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">"fs.read,audit.read"</span>
 
 <span class="c1"># Run every Monday at 9 AM</span>
-agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;weekly-review&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;0 9 * * 1&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;code-reviewer&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Review code changes from last week&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read&quot;</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">"weekly-review"</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">"0 9 * * 1"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">"code-reviewer"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Review code changes from last week"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">"fs.read"</span>
 
 <span class="c1"># Run every 15 minutes</span>
-agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;health-check&quot;</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">&quot;*/15 * * * *&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--agent<span class="w"> </span><span class="s2">&quot;ops&quot;</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Check system health&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.read,shell.exec&quot;</span>
+agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span><span class="s2">"health-check"</span><span class="w"> </span>--cron<span class="w"> </span><span class="s2">"*/15 * * * *"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span><span class="s2">"ops"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Check system health"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">"fs.read,shell.exec"</span>
 </pre></div>
 </div>
 <h3 id="listing-scheduled-tasks" class="anchored"><a class="hanchor" href="#listing-scheduled-tasks" aria-label="link">#</a>Listing Scheduled Tasks</h3>
@@ -281,7 +281,7 @@ agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class
 <h2 id="autonomous-mode" class="anchored"><a class="hanchor" href="#autonomous-mode" aria-label="link">#</a>Autonomous Mode</h2>
 <p>Tasks that must run to natural completion — deep refactors, multi-file analysis, extended research — should use autonomous mode to avoid hitting artificial iteration or time ceilings.</p>
 <h3 id="enabling-autonomous-mode" class="anchored"><a class="hanchor" href="#enabling-autonomous-mode" aria-label="link">#</a>Enabling Autonomous Mode</h3>
-<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">&quot;&lt;PROMPT&gt;&quot;</span>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--autonomous<span class="w"> </span><span class="s2">"&lt;PROMPT&gt;"</span>
 </pre></div>
 </div>
 <p>When <code>autonomous=true</code>, the kernel replaces all complexity-based limits with the <code>[kernel.autonomous_mode]</code> ceiling:</p>

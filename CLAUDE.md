@@ -38,7 +38,6 @@ crates/
   agentos-scratch/      # Agent scratchpad — markdown pages, wikilinks, backlink graph
   agentos-sdk/          # Ergonomic macros and re-exports for tool development
   agentos-sdk-macros/   # Proc-macro crate for #[tool] attribute
-  agentos-web/          # Web UI server (Axum + HTMX + Pico CSS)
   agentos-api/          # 35+ REST endpoints, OpenAI-compat /v1/chat/completions SSE, API key auth
   agentos-channels/     # ChannelAdapter trait + Discord, Slack, Telegram, Teams, Matrix, etc.
   agentos-skills/       # SkillManifest (SKILL.toml), SkillRegistry; 7 core skills in skills/core/
@@ -451,7 +450,7 @@ For legacy `next-steps/` files, add a row to `obsidian-vault/next-steps/Index.md
 
 ## Current Development Phase
 
-The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired Improvements (7 phases) are done as of 2026-04-09. The focus is now on release readiness and web UI improvements.
+The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired Improvements (7 phases) are done as of 2026-04-09. The focus is now on release readiness.
 
 ---
 
@@ -534,7 +533,7 @@ The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired 
 ### REST API (`agentos-api`)
 - 35+ REST endpoints (34 routes / 39 operations) + OpenAI-compat `/v1/chat/completions` SSE streaming
 - API key auth via HMAC-SHA256
-- `KernelService` trait decouples `agentos-api` and `agentos-web` from kernel internals
+- `KernelService` trait decouples `agentos-api` from kernel internals
 
 ## Active / Planned Work
 
@@ -542,8 +541,8 @@ The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired 
 
 | Plan | Status | Gate | Notes |
 |------|--------|------|-------|
-| Web UI Overhaul | planned | post-v1.0.0 | Chat streaming, template fixes, CLI parity |
-| WebUI Redesign | planned | post-v1.0.0 | Dashboard, task management, audit viewer |
+| Web UI Overhaul | dropped | post-v1.0.0 | obsolete — agentos-web removed 2026-09-23 |
+| WebUI Redesign | dropped | post-v1.0.0 | obsolete — agentos-web removed 2026-09-23 |
 | MCP Catalog Installer | planned | post-v1.0.0 | `agentos mcp install <id>`, runtime resolver, 8 seed entries |
 | Gmail MCP Server | planned | post-v1.0.0 | Standalone Rust repo, 9 phases |
 | Graceful Degradation Chains | planned | post-v1.0.0 | Tool fallback in manifests, kernel resolver |
@@ -553,6 +552,10 @@ The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired 
 | Agent Web Search | planned | post-v1.0.0 | DDG instant answers, SearXNG |
 | Slack Socket Mode Buttons | planned | post-v1.0.0 | Block Kit approve/deny buttons via `xapp-` token; `plans/slack-socket-mode-buttons/` |
 | Sandbox Execution Policy | planned | post-v1.0.0 | SandboxPolicy config, trust-aware dispatch |
+| Executable Procedures | planned | post-v1.0.0 | Agent-authored runnable pipelines: `procedure-run` over the existing pipeline engine, recipe approval pinning, `schedule mode=procedure`; 5 phases in `plans/executable-procedures/` |
+| Agent Message As Convo | planned | post-v1.0.0 | Route `agent-message` into the existing `ConvoStore`/`convo_runner` as an expiring DM session instead of one-shot event-triggered tasks: continuous transcript per session, operator-visible and interruptible, `kind = dm` in the list, fixed session lifetime with an operator escalation to extend it on the clock; 5 phases in `plans/agent-message-as-convo/` |
+| A2A Inbound Server | planned | post-v1.0.0 | Serve A2A v1.0 on the existing API router: public `/.well-known/agent-card.json` + `POST /api/v1/a2a` JSON-RPC (`SendMessage`/`GetTask`/`CancelTask`), peer = API key with `a2a:x` scope, each peer runs as its own zero-grant `a2a-<peer>` guest agent (token `allowed_tools` read-only, never a real agent); also moves outbound `a2a-delegate` off the homegrown non-spec dialect and closes its redirect SSRF; 5 phases in `plans/a2a-inbound-server/` |
+| MCP Guard | planned | post-v1.0.0 | Standalone `agentos-guard` binary between any MCP client (Claude Code, Cursor, OpenClaw, Hermes) and upstream MCP servers: `guard.toml` allow/deny/ask per server+tool, risk class + per-action class, JSON-Pointer arg rules; out-of-band approval via CLI / Telegram / desktop (shared `approvals.db`); `vault:KEY` upstream secrets; seccomp denylist + Landlock for stdio servers (Linux, none on macOS); injection scan of results + tool descriptions; hash-chained audit; `guard wrap` rewrites `.mcp.json`. Extracts the pure policy code into `agentos-policy`, decouples `agentos-mcp` from `agentos-tools`. Kill criterion: <10 external users within 60 days of launch => stop; 11 phases in `plans/mcp-guard/` |
 
 ## Key Feedback Rules
 - Never auto-commit — only commit when explicitly asked

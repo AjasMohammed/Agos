@@ -274,6 +274,12 @@ pub fn build_router(
             "/api/v1/notifications/read",
             delete(notifications::clear_read),
         )
+        // Static-segment route; axum's matcher prefers it over the `{id}`
+        // parameter below regardless of registration order.
+        .route(
+            "/api/v1/notifications/routes",
+            get(notifications::get_routes).put(notifications::set_routes),
+        )
         .route(
             "/api/v1/notifications/{id}",
             get(notifications::get).delete(notifications::dismiss),

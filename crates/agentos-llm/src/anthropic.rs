@@ -39,6 +39,31 @@ pub struct AnthropicCore {
     deferral_rejected: AtomicBool,
 }
 
+/// First `<major>-<minor>` version pair in a model id, or `None` when it has
+/// none. Handles both id orderings — `claude-opus-4-6` and the older
+/// `claude-3-7-sonnet-20250219` — and a bare major (`claude-opus-5` → `(5, 0)`).
+fn model_version(model: &str) -> Option<(u32, u32)> {
+    let segments: Vec<&str> = model.split('-').collect();
+    let first = segments.iter().position(|s| s.parse::<u32>().is_ok())?;
+    let major = segments[first].parse().ok()?;
+    let minor = segments
+        .get(first + 1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
+/// True when `model` takes adaptive thinking (`{"type": "adaptive"}` plus
+/// `output_config.effort`) instead of `{"type": "enabled", budget_tokens}`.
+/// The cutover is Claude 4.6, where `budget_tokens` was deprecated; from 4.7
+/// on it is rejected with a 400.
+///
+/// An unrecognised id defaults to adaptive: new model ids only ever appear
+/// above the cutover, and the legacy shape is the one that hard-fails there.
+fn uses_adaptive_thinking(model: &str) -> bool {
+    model_version(model).map(|v| v >= (4, 6)).unwrap_or(true)
+}
+
 impl AnthropicCore {
     /// Default maximum output tokens used when no config value is provided.
     pub const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -50,22 +75,7 @@ impl AnthropicCore {
 
     /// Create a new Anthropic adapter with a custom base URL (e.g., for enterprise proxies or tests).
     pub fn with_base_url(api_key: SecretString, model: String, base_url: String) -> Self {
-        let table = default_pricing_table();
-        let pricing = table
-            .iter()
-            .find(|p| p.provider == "anthropic" && p.model == model)
-            .or_else(|| {
-                table
-                    .iter()
-                    .find(|p| p.provider == "anthropic" && p.model == "*")
-            })
-            .cloned()
-            .unwrap_or(ModelPricing {
-                provider: "anthropic".to_string(),
-                model: model.clone(),
-                input_per_1k: 0.0,
-                output_per_1k: 0.0,
-            });
+        let pricing = crate::lookup_pricing(&default_pricing_table(), "anthropic", &model);
         // Hoisted: `base_url` is moved into the struct literal below.
         let concurrency = crate::retry::concurrency_limiter_for(&base_url);
         Self {
@@ -132,7 +142,7 @@ impl AnthropicCore {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
 
-        for entry in context.active_entries() {
+        for entry in context.wire_entries().iter().map(|e| &**e) {
             match entry.role {
                 ContextRole::System => continue, // Anthropic wants system prompt top-level
                 ContextRole::ToolResult => {
@@ -523,14 +533,19 @@ impl LLMCore for AnthropicCore {
             .collect();
         let system_prompt = system_entries.first().map(|e| e.text()).unwrap_or_default();
 
-        // Extended thinking requires max_tokens > budget_tokens because both
-        // thinking tokens and response tokens count against max_tokens.
-        // We ensure at least 4 096 response-token headroom beyond the thinking budget.
+        let adaptive = uses_adaptive_thinking(&self.model);
+
+        // Legacy extended thinking requires max_tokens > budget_tokens because
+        // both thinking tokens and response tokens count against max_tokens.
+        // We ensure at least 4 096 response-token headroom beyond the thinking
+        // budget. Adaptive thinking has no budget to make room for.
         let mut max_tokens = options.max_tokens.unwrap_or(self.max_tokens);
-        if let Some(budget) = options.thinking_budget_tokens {
-            let minimum = budget.saturating_add(4_096);
-            if max_tokens < minimum {
-                max_tokens = minimum;
+        if !adaptive {
+            if let Some(budget) = options.thinking_budget_tokens {
+                let minimum = budget.saturating_add(4_096);
+                if max_tokens < minimum {
+                    max_tokens = minimum;
+                }
             }
         }
 
@@ -590,14 +605,23 @@ impl LLMCore for AnthropicCore {
             "messages": messages,
         });
 
-        // Extended thinking: inject the thinking block and enable the beta feature.
-        // Only supported on claude-3-7-sonnet and newer models.
+        // Extended thinking. Two incompatible shapes, chosen by model id:
+        // Claude 4.6+ takes `{"type": "adaptive"}` plus `output_config.effort`
+        // and REJECTS `budget_tokens` with a 400 from 4.7 onward; older models
+        // take `{"type": "enabled", "budget_tokens": N}`.
         // NOTE: When thinking is enabled temperature must be 1.0 (Anthropic requirement).
-        if let Some(budget) = options.thinking_budget_tokens {
-            body["thinking"] = json!({
-                "type": "enabled",
-                "budget_tokens": budget
-            });
+        if options.thinking_budget_tokens.is_some() {
+            if adaptive {
+                body["thinking"] = json!({ "type": "adaptive" });
+                if let Some(effort) = &options.thinking_effort {
+                    body["output_config"] = json!({ "effort": effort });
+                }
+            } else if let Some(budget) = options.thinking_budget_tokens {
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                });
+            }
         }
 
         if !anthropic_tools.is_empty() {
@@ -648,8 +672,10 @@ impl LLMCore for AnthropicCore {
         let thinking_enabled = options.thinking_budget_tokens.is_some();
         // Beta features ride a single comma-joined `anthropic-beta` header.
         let mut beta_features: Vec<&str> = Vec::new();
-        if thinking_enabled {
-            // Extended thinking requires the interleaved-thinking beta header.
+        if thinking_enabled && !adaptive {
+            // Legacy extended thinking requires the interleaved-thinking beta
+            // header. Adaptive thinking interleaves on its own and the header
+            // went GA in 4.6, so it is only sent on the legacy path.
             beta_features.push("interleaved-thinking-2025-05-14");
         }
         if options.enable_prompt_caching && options.cache_ttl == PromptCacheTtl::OneHour {
@@ -1406,6 +1432,7 @@ mod tests {
             category: ContextCategory::History,
             is_summary: false,
         });
+        ctx.push(crate::tool_call_turn(&[("toolu_abc123", "file-reader")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1431,15 +1458,15 @@ mod tests {
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
         let messages = adapter.format_messages(&ctx, true);
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         // First message is the user message
         assert_eq!(messages[0]["role"], "user");
         let first_content = messages[0]["content"].as_array().expect("array content");
         assert_eq!(first_content[0]["type"], "text");
         assert_eq!(first_content[0]["text"], "Read the file");
         // Second is the tool result batch (user role with content blocks)
-        assert_eq!(messages[1]["role"], "user");
-        let content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(messages[2]["role"], "user");
+        let content = messages[2]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "toolu_abc123");
@@ -1449,6 +1476,7 @@ mod tests {
     #[test]
     fn test_format_messages_renders_tool_references_for_deferred_tools() {
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("toolu_search", "search-tools")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1475,7 +1503,7 @@ mod tests {
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
         let messages = adapter.format_messages(&ctx, true);
-        let content = messages[0]["content"].as_array().unwrap();
+        let content = messages[1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
         let inner = content[0]["content"]
             .as_array()
@@ -1491,6 +1519,7 @@ mod tests {
         // catalogue (400 fallback / final synthesis / stream path): the
         // reference would name a tool absent from `tools` → must be plain text.
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("toolu_search", "search-tools")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1516,7 +1545,7 @@ mod tests {
             .insert("toolu_search".to_string(), vec!["web-fetch".to_string()]);
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
         let messages = adapter.format_messages(&ctx, false);
-        let content = messages[0]["content"].as_array().unwrap();
+        let content = messages[1]["content"].as_array().unwrap();
         assert!(content[0]["content"].is_string(), "{:?}", content[0]);
     }
 
@@ -1554,6 +1583,10 @@ mod tests {
     fn test_format_messages_consecutive_native_tool_results_batched() {
         let mut ctx = ContextWindow::new(5);
         // Two consecutive native tool results should be batched into one user message
+        ctx.push(crate::tool_call_turn(&[
+            ("toolu_a", "tool-a"),
+            ("toolu_b", "tool-b"),
+        ]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1601,9 +1634,9 @@ mod tests {
         let messages = adapter.format_messages(&ctx, true);
 
         // Both tool results should be in a single user message
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
-        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        let content = messages[1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["tool_use_id"], "toolu_a");
         assert_eq!(content[1]["tool_use_id"], "toolu_b");
@@ -1614,6 +1647,7 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         // Native tool result followed by legacy tool result — must NOT produce
         // consecutive user messages (Anthropic rejects that).
+        ctx.push(crate::tool_call_turn(&[("toolu_a", "tool-a")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1654,9 +1688,9 @@ mod tests {
         let messages = adapter.format_messages(&ctx, true);
 
         // Both should be in a single user message (no consecutive user messages)
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
-        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        let content = messages[1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[1]["type"], "text");
@@ -1900,5 +1934,51 @@ mod kept_index_tests {
             deferral_cache_prefix(kept_index(&kept, Some(3)), kept_index(&kept, Some(3))),
             Some(2)
         );
+    }
+}
+
+#[cfg(test)]
+mod thinking_shape_tests {
+    use super::{model_version, uses_adaptive_thinking};
+
+    #[test]
+    fn model_version_handles_both_id_orderings() {
+        assert_eq!(model_version("claude-opus-4-6"), Some((4, 6)));
+        assert_eq!(model_version("claude-sonnet-4-5-20250929"), Some((4, 5)));
+        assert_eq!(model_version("claude-3-7-sonnet-20250219"), Some((3, 7)));
+        assert_eq!(model_version("claude-opus-5"), Some((5, 0)));
+        assert_eq!(model_version("claude-fable-5-1"), Some((5, 1)));
+        assert_eq!(model_version("some-custom-alias"), None);
+    }
+
+    /// `budget_tokens` is rejected with a 400 from Claude 4.7 on, so sending
+    /// the legacy shape to a current model fails the whole request — and a 400
+    /// is not retried. An unknown id must default to the shape that still
+    /// works on new models.
+    #[test]
+    fn adaptive_starts_at_4_6_and_is_the_default_for_unknown_ids() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "some-future-model",
+        ] {
+            assert!(uses_adaptive_thinking(model), "{model} should be adaptive");
+        }
+        for model in [
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-1-20250805",
+            "claude-3-7-sonnet-20250219",
+        ] {
+            assert!(
+                !uses_adaptive_thinking(model),
+                "{model} still takes budget_tokens"
+            );
+        }
     }
 }

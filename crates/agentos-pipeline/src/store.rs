@@ -91,8 +91,14 @@ impl PipelineStore {
     ) -> Result<(), AgentOSError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let now = chrono::Utc::now().to_rfc3339();
+        // An upsert, not INSERT OR REPLACE: REPLACE deletes the old row, and
+        // `pipeline_runs` cascades on that delete — every reinstall (and every
+        // procedure run, which reinstalls) wiped the run history and aborted
+        // runs still in flight.
         conn.execute(
-            "INSERT OR REPLACE INTO pipelines (name, version, definition, installed_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO pipelines (name, version, definition, installed_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET version = excluded.version,
+                 definition = excluded.definition, installed_at = excluded.installed_at",
             rusqlite::params![name, version, yaml, now],
         )
         .map_err(|e| AgentOSError::StorageError(format!("Failed to install pipeline: {e}")))?;
@@ -527,6 +533,15 @@ mod tests {
         assert_eq!(retrieved.pipeline_name, "pipe");
         assert_eq!(retrieved.input, "test input");
         assert_eq!(retrieved.status, PipelineRunStatus::Running);
+
+        // Reinstalling (every procedure run does) must not cascade-delete runs.
+        store
+            .install_pipeline("pipe", "2.0.0", "name: pipe\nversion: \"2.0.0\"\nsteps: []")
+            .unwrap();
+        assert!(
+            store.get_run(&run_id).is_ok(),
+            "reinstall wiped the run history"
+        );
     }
 
     #[test]

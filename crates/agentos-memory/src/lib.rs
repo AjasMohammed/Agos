@@ -61,6 +61,6 @@ pub use episodic::{EpisodeRecordInput, EpisodicStore};
 pub use procedural::{CurateReport, ProceduralStore};
 pub use semantic::SemanticStore;
 pub use types::{
-    EpisodeType, EpisodicEntry, MemoryChunk, MemoryEntry, MemoryStatus, Procedure,
+    EpisodeType, EpisodicEntry, MemoryChunk, MemoryEntry, MemoryStatus, Procedure, ProcedureInput,
     ProcedureSearchResult, ProcedureStep, RecallQuery, RecallResult,
 };

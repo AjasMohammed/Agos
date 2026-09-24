@@ -145,6 +145,7 @@ impl Kernel {
     pub(crate) async fn cmd_add_approval_policy(
         &self,
         tool_name: String,
+        action: Option<String>,
         path_glob: Option<String>,
         agent_name: Option<String>,
     ) -> KernelResponse {
@@ -171,6 +172,7 @@ impl Kernel {
         };
         match matcher.add(
             &tool_name,
+            action.as_deref(),
             path_glob.as_deref(),
             agent_id,
             "local-cli",
@@ -193,6 +195,7 @@ impl Kernel {
                         "setting": "approval.policy.added",
                         "id": entry.id,
                         "tool_name": entry.tool_name,
+                        "action": entry.action,
                         "path_glob": entry.path_glob,
                         "agent_id": entry.agent_id.map(|a| a.to_string()),
                         "source": entry.source,
@@ -205,6 +208,7 @@ impl Kernel {
                 KernelResponse::ApprovalPolicyAdded {
                     id: entry.id,
                     tool_name: entry.tool_name,
+                    action: entry.action,
                     path_glob: entry.path_glob,
                     agent_name,
                 }

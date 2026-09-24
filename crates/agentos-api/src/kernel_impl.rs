@@ -457,6 +457,7 @@ fn approval_policy_to_api(
     ApiApprovalPolicy {
         id: e.id,
         tool_name: e.tool_name,
+        action: e.action,
         path_glob: e.path_glob,
         agent_id: e.agent_id.map(|a| a.to_string()),
         granted_at: e.granted_at,
@@ -560,6 +561,27 @@ fn is_secret_key(k: &str) -> bool {
     k.contains("token") || k.contains("secret") || k.contains("password") || k.contains("api_key")
 }
 
+/// Read one dotted key from the config file, secrets redacted.
+fn read_config_key(path: &std::path::Path, key: &str) -> Result<serde_json::Value, ApiError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        ApiError::Internal(format!("Cannot read config at {}: {e}", path.display()))
+    })?;
+    let doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| ApiError::Internal(format!("Config parse error: {e}")))?;
+    let mut value = resolve_dotted_key(&doc, key)?;
+    // Redact nested secret-bearing leaves when the key resolves to a table.
+    redact_secrets(&mut value);
+    // A scalar secret (e.g. `api.operator_token`) resolves to a bare value
+    // with no key context for `redact_secrets` to match, so redact it here
+    // based on the requested key's own leaf name. Without this, a low-privilege
+    // `system:r` caller could read `operator_token` and escalate via /auth/login.
+    if key.rsplit('.').next().is_some_and(is_secret_key) && !value.is_null() {
+        value = serde_json::Value::String("***REDACTED***".to_string());
+    }
+    Ok(value)
+}
+
 /// Recursively redact leaves whose key name looks secret-bearing.
 fn redact_secrets(value: &mut serde_json::Value) {
     match value {
@@ -597,7 +619,31 @@ fn resolve_dotted_key(
 }
 
 fn toml_item_to_json(item: &toml_edit::Item) -> serde_json::Value {
-    if let Some(s) = item.as_str() {
+    // Tables must become objects, not their TOML text: `redact_secrets` walks
+    // object keys, so a stringified `[api]` table carried `operator_token` out
+    // in cleartext.
+    if let Some(table) = item.as_table_like() {
+        serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(k, v)| (k.to_string(), toml_item_to_json(v)))
+                .collect(),
+        )
+    } else if let Some(tables) = item.as_array_of_tables() {
+        serde_json::Value::Array(
+            tables
+                .iter()
+                .map(|t| toml_item_to_json(&toml_edit::Item::Table(t.clone())))
+                .collect(),
+        )
+    } else if let Some(array) = item.as_array() {
+        serde_json::Value::Array(
+            array
+                .iter()
+                .map(|v| toml_item_to_json(&toml_edit::Item::Value(v.clone())))
+                .collect(),
+        )
+    } else if let Some(s) = item.as_str() {
         serde_json::Value::String(s.to_string())
     } else if let Some(b) = item.as_bool() {
         serde_json::Value::Bool(b)
@@ -981,6 +1027,37 @@ fn strip_ansi(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod config_redaction_tests {
+    use super::*;
+
+    /// 2026-07-20 C1: a `system:r` key read `api.operator_token` through the
+    /// single-key getter and escalated via /auth/login.
+    #[test]
+    fn single_key_read_never_returns_a_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[api]\noperator_token = \"hunter2\"\nport = 8080\n\
+             [[hooks]]\nname = \"a\"\nsecret = \"hunter2\"\n",
+        )
+        .unwrap();
+
+        let scalar = read_config_key(&path, "api.operator_token").unwrap();
+        assert_eq!(scalar, serde_json::json!("***REDACTED***"));
+        let table = read_config_key(&path, "api").unwrap();
+        assert_eq!(table["operator_token"], "***REDACTED***");
+        assert!(!table.to_string().contains("hunter2"));
+        // Arrays of tables are walked too, not stringified.
+        let hooks = read_config_key(&path, "hooks").unwrap();
+        assert_eq!(hooks[0]["name"], "a");
+        assert!(!hooks.to_string().contains("hunter2"));
+        // Non-secret siblings still read normally.
+        assert_eq!(read_config_key(&path, "api.port").unwrap(), 8080);
+    }
 }
 
 #[cfg(test)]
@@ -1457,6 +1534,7 @@ fn api_convo_summary_from(c: agentos_kernel::convo_store::AgentConvo) -> ApiConv
         participants: c.participants,
         status: c.status,
         updated_at: c.updated_at,
+        kind: c.kind,
     }
 }
 
@@ -1524,6 +1602,7 @@ async fn expand_chat_user_turn(
         owner_principal,
         Some(session_id),
         supports_images,
+        Some(&kernel.config.transcription),
     )
     .await
 }
@@ -1834,11 +1913,19 @@ impl KernelService for Kernel {
     }
 
     async fn cancel_task(&self, id: TaskID) -> Result<(), ApiError> {
-        self.scheduler
-            .update_state(&id, TaskState::Cancelled)
-            .await
-            .map_err(ApiError::from)?;
-        Ok(())
+        // Through the kernel's cancel path, not a bare state flip: that left the
+        // task's approval card live (approving it then ran the tool for a
+        // cancelled task), its parent waiting out a full timeout, and its
+        // children running.
+        if self.scheduler.get_task(&id).await.is_none() {
+            return Err(ApiError::from(agentos_types::AgentOSError::TaskNotFound(
+                id,
+            )));
+        }
+        match self.cmd_cancel_task(id).await {
+            agentos_bus::KernelResponse::Error { message } => Err(ApiError::Conflict(message)),
+            _ => Ok(()),
+        }
     }
 
     async fn get_task_trace(
@@ -2372,6 +2459,163 @@ impl KernelService for Kernel {
         Ok(inbox.count_unread().await as u64)
     }
 
+    async fn get_notification_routes(&self) -> Result<ApiNotificationRoutes, ApiError> {
+        use agentos_types::NotificationEvent;
+
+        let events = NotificationEvent::ALL
+            .iter()
+            .map(|e| ApiNotificationEvent {
+                key: e.as_str().to_string(),
+                label: e.label().to_string(),
+                description: e.description().to_string(),
+            })
+            .collect();
+
+        // Two outbound stacks own the channels between them: the notification
+        // router (Telegram/Ntfy/Email + the builtin desktop/cli/web/webhook/
+        // slack adapters) and the ChannelManager (Discord/Slack/WhatsApp/
+        // Teams/Matrix/…). A column axis built from the router alone would
+        // leave every manager-stack channel unmutable from the panel — while
+        // the escalation sink still DMs it — so the registry's active channels
+        // are unioned in.
+        let registered = self
+            .channel_registry
+            .list_active()
+            .await
+            .map_err(|e| ApiError::Internal(format!("Channel registry error: {e}")))?;
+        let names: std::collections::HashMap<String, String> = registered
+            .iter()
+            .map(|ch| (ch.id.to_string(), ch.display_name.clone()))
+            .collect();
+
+        let mut channels: Vec<ApiRouteChannel> = self
+            .notification_router
+            .adapter_targets()
+            .await
+            .into_iter()
+            .map(|(key, kind, available)| ApiRouteChannel {
+                label: names.get(&key).cloned().unwrap_or_else(|| kind.clone()),
+                key,
+                kind,
+                available,
+            })
+            .collect();
+
+        let health = self.channel_manager.health().await;
+        for ch in &registered {
+            let key = ch.id.to_string();
+            if channels.iter().any(|c| c.key == key) {
+                continue;
+            }
+            channels.push(ApiRouteChannel {
+                // A manager-stack channel is reachable when the manager holds a
+                // live adapter for it; an unknown id means it was never built.
+                available: health.contains_key(&key),
+                key,
+                kind: ch.kind.to_string(),
+                label: ch.display_name.clone(),
+            });
+        }
+        channels.sort_by(|a, b| a.label.cmp(&b.label));
+
+        let rules = self
+            .notification_routes
+            .rules()
+            .into_iter()
+            .map(|(event, channel, mode)| ApiRouteRule {
+                event: event.as_str().to_string(),
+                channel,
+                mode: mode.as_str().to_string(),
+            })
+            .collect();
+
+        Ok(ApiNotificationRoutes {
+            events,
+            channels,
+            rules,
+            panel_connected: self.notification_routes.panel_connected(),
+        })
+    }
+
+    async fn set_notification_routes(
+        &self,
+        rules: Vec<ApiRouteRule>,
+    ) -> Result<ApiNotificationRoutes, ApiError> {
+        use agentos_kernel::RouteMode;
+        use agentos_types::NotificationEvent;
+
+        // Bounds before work: this write lands in one transaction on the state
+        // DB mutex, which the scheduler, escalation store and cost tracker all
+        // share. An unbounded batch would park them for its duration.
+        const MAX_RULES: usize = 512;
+        const MAX_CHANNEL_LEN: usize = 128;
+        if rules.len() > MAX_RULES {
+            return Err(ApiError::BadRequest(format!(
+                "Too many rules: {} (max {MAX_RULES} per request)",
+                rules.len()
+            )));
+        }
+
+        let mut parsed = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let event = NotificationEvent::parse(&rule.event).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Unknown notification event '{}' — expected one of: {}",
+                    rule.event,
+                    NotificationEvent::ALL
+                        .iter()
+                        .map(|e| e.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+            let mode = RouteMode::parse(&rule.mode).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Unknown route mode '{}' — expected always, never, or when_away",
+                    rule.mode
+                ))
+            })?;
+            let channel = rule.channel.trim();
+            if channel.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "Route rule 'channel' must not be empty".to_string(),
+                ));
+            }
+            if channel.len() > MAX_CHANNEL_LEN {
+                return Err(ApiError::BadRequest(format!(
+                    "Route rule 'channel' is too long ({} chars, max {MAX_CHANNEL_LEN})",
+                    channel.len()
+                )));
+            }
+            let rule = ApiRouteRule {
+                channel: channel.to_string(),
+                ..rule
+            };
+            parsed.push((event, rule.channel, mode));
+        }
+
+        let count = parsed.len();
+        self.notification_routes
+            .set_many(parsed)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to save notification routes: {e}")))?;
+
+        let _ = self.audit.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: agentos_types::TraceID::new(),
+            event_type: AuditEventType::KernelConfigChanged,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "source": "notification_routes", "rules": count }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        self.get_notification_routes().await
+    }
+
     // ── Dashboard ───────────────────────────────────────────────────────
 
     async fn get_dashboard_summary(&self) -> Result<DashboardSummary, ApiError> {
@@ -2709,6 +2953,7 @@ impl KernelService for Kernel {
         let entry = matcher
             .add(
                 &req.tool_name,
+                req.action.as_deref(),
                 req.path_glob.as_deref(),
                 agent_id,
                 "operator-api",
@@ -3130,27 +3375,9 @@ impl KernelService for Kernel {
     async fn get_config_key(&self, key: &str) -> Result<serde_json::Value, ApiError> {
         let path = self.config_path().to_path_buf();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                ApiError::Internal(format!("Cannot read config at {}: {e}", path.display()))
-            })?;
-            let doc: toml_edit::DocumentMut = content
-                .parse()
-                .map_err(|e| ApiError::Internal(format!("Config parse error: {e}")))?;
-            let mut value = resolve_dotted_key(&doc, &key)?;
-            // Redact nested secret-bearing leaves when the key resolves to a table.
-            redact_secrets(&mut value);
-            // A scalar secret (e.g. `api.operator_token`) resolves to a bare value
-            // with no key context for `redact_secrets` to match, so redact it here
-            // based on the requested key's own leaf name. Without this, a low-privilege
-            // `system:r` caller could read `operator_token` and escalate via /auth/login.
-            if key.rsplit('.').next().is_some_and(is_secret_key) && !value.is_null() {
-                value = serde_json::Value::String("***REDACTED***".to_string());
-            }
-            Ok(value)
-        })
-        .await
-        .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+        tokio::task::spawn_blocking(move || read_config_key(&path, &key))
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
     }
 
     async fn set_config_key(&self, key: &str, value: serde_json::Value) -> Result<(), ApiError> {
@@ -3749,14 +3976,20 @@ impl KernelService for Kernel {
     }
 
     async fn disconnect_channel(&self, id: &str) -> Result<(), ApiError> {
-        self.channel_manager.deregister(id).await;
         let cid: agentos_types::ChannelInstanceID = id
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("Invalid channel ID: {id}")))?;
-        self.channel_registry
-            .deregister(&cid)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Channel deregister failed: {e}")))
+        if !matches!(self.channel_registry.get_by_id(&cid).await, Ok(Some(_))) {
+            return Err(ApiError::NotFound(format!("Channel '{id}' not found")));
+        }
+        // The kernel command stops the listener, deletes a Telegram webhook and
+        // its secret, and drops routes. Deregistering only the registry row left
+        // the webhook verifying — and, with the pinned chat id gone, accepting
+        // messages from ANY chat.
+        match self.cmd_disconnect_channel(id.to_string()).await {
+            agentos_bus::KernelResponse::Error { message } => Err(ApiError::Internal(message)),
+            _ => Ok(()),
+        }
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<ApiMcpServer>, ApiError> {
@@ -4830,6 +5063,9 @@ impl KernelService for Kernel {
                 Some(t.to_string())
             }
         });
+        if let Some(f) = payload_filter.as_deref() {
+            agentos_kernel::event_bus::validate_filter(f).map_err(ApiError::BadRequest)?;
+        }
 
         let sub = agentos_types::EventSubscription {
             id: agentos_types::SubscriptionID::new(),
@@ -5784,9 +6020,10 @@ impl KernelService for Kernel {
 
     // ── Agent conversations (read-only) ──────────────────────────────────────
 
-    async fn list_convos(&self) -> Result<Vec<ApiConvoSummary>, ApiError> {
+    async fn list_convos(&self, kind: Option<&str>) -> Result<Vec<ApiConvoSummary>, ApiError> {
         let store = self.convo_store.clone();
-        let convos = tokio::task::spawn_blocking(move || store.list_convos())
+        let kind = kind.map(str::to_string);
+        let convos = tokio::task::spawn_blocking(move || store.list_convos(kind.as_deref()))
             .await
             .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -5855,6 +6092,9 @@ impl KernelService for Kernel {
             // documented status enum (running|complete|stopped|error).
             status: "running".to_string(),
             updated_at: chrono::Utc::now().to_rfc3339(),
+            // This endpoint only ever creates operator-started conversations;
+            // `dm` rows are opened by `agent-message` inside the kernel.
+            kind: "operator".to_string(),
         })
     }
 
@@ -5872,7 +6112,7 @@ impl KernelService for Kernel {
         // they arrive. Every turn is still persisted; a missed frame costs a
         // repaint, never a turn.
         let (tx, rx) = mpsc::channel(64);
-        let relay = tokio::spawn(relay_convo_events(
+        let relay = tokio::spawn(agentos_kernel::convo_runner::relay_convo_events(
             rx,
             self.realtime_event_sender.clone(),
             format!("agent-chat:{id}"),
@@ -5968,119 +6208,9 @@ impl KernelService for Kernel {
     }
 }
 
-/// Streamed text is coalesced to at most one frame per interval: the realtime
-/// broadcast is shared and lossy (capacity 512), so a frame per token from a
-/// fast model would evict other channels' events for a lagging subscriber.
-const CONVO_TEXT_FLUSH: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Translate a conversation's runner events into `agent-chat:<id>` frames:
-/// `turn.start`, `turn.text` (a coalesced delta), `turn.tool` (`tool_name` null
-/// once the call returns), `turn.end`, `convo.done`. Every turn frame carries
-/// `agent` + `turn`, so a subscriber that joins mid-turn still knows who speaks.
-async fn relay_convo_events(
-    mut rx: mpsc::Receiver<agentos_kernel::convo_runner::ConvoEvent>,
-    realtime: tokio::sync::broadcast::Sender<agentos_types::RealtimeEvent>,
-    channel: String,
-) {
-    use agentos_kernel::convo_runner::ConvoEvent;
-    use tokio::time::Instant;
-
-    // `Err` = no subscriber connected; the transcript is in the store anyway.
-    let send = |event: &str, data: serde_json::Value| {
-        let _ = realtime.send(agentos_types::RealtimeEvent {
-            channel: channel.clone(),
-            event: event.to_string(),
-            data,
-        });
-    };
-    // Text not yet sent, and whose turn it belongs to.
-    let mut pending = String::new();
-    let mut speaker = (String::new(), 0u32);
-    let mut last_flush = Instant::now();
-    let flush = |pending: &mut String, speaker: &(String, u32), last_flush: &mut Instant| {
-        if !pending.is_empty() {
-            let text = std::mem::take(pending);
-            send(
-                "turn.text",
-                serde_json::json!({ "agent": speaker.0, "turn": speaker.1, "text": text }),
-            );
-        }
-        *last_flush = Instant::now();
-    };
-
-    loop {
-        let next = if pending.is_empty() {
-            rx.recv().await
-        } else {
-            // `recv` is cancel-safe, so a timeout loses nothing.
-            match tokio::time::timeout_at(last_flush + CONVO_TEXT_FLUSH, rx.recv()).await {
-                Ok(ev) => ev,
-                Err(_) => {
-                    flush(&mut pending, &speaker, &mut last_flush);
-                    continue;
-                }
-            }
-        };
-        let Some(ev) = next else { break };
-        match ev {
-            ConvoEvent::Chat {
-                agent,
-                turn,
-                event: ChatStreamEvent::TextChunk { text },
-            } => {
-                if speaker.0 != agent || speaker.1 != turn {
-                    flush(&mut pending, &speaker, &mut last_flush);
-                    speaker = (agent, turn);
-                }
-                pending.push_str(&text);
-                if last_flush.elapsed() >= CONVO_TEXT_FLUSH {
-                    flush(&mut pending, &speaker, &mut last_flush);
-                }
-            }
-            ConvoEvent::Chat { agent, turn, event } => {
-                let tool_name = match event {
-                    ChatStreamEvent::ToolStart { tool_name, .. } => Some(tool_name),
-                    ChatStreamEvent::ToolResult { .. } => None,
-                    _ => continue,
-                };
-                flush(&mut pending, &speaker, &mut last_flush);
-                send(
-                    "turn.tool",
-                    serde_json::json!({ "agent": agent, "turn": turn, "tool_name": tool_name }),
-                );
-            }
-            ConvoEvent::TurnStart { agent, turn } => {
-                flush(&mut pending, &speaker, &mut last_flush);
-                send(
-                    "turn.start",
-                    serde_json::json!({ "agent": agent, "turn": turn }),
-                );
-            }
-            ConvoEvent::TurnEnd { agent, turn, .. } => {
-                flush(&mut pending, &speaker, &mut last_flush);
-                send(
-                    "turn.end",
-                    serde_json::json!({ "agent": agent, "turn": turn }),
-                );
-            }
-            // A failed turn is persisted as a transcript row and followed by `Done`.
-            ConvoEvent::Error { .. } => {}
-            ConvoEvent::Done { total_turns } => {
-                flush(&mut pending, &speaker, &mut last_flush);
-                send(
-                    "convo.done",
-                    serde_json::json!({ "total_turns": total_turns }),
-                );
-            }
-        }
-    }
-    // Sender gone without a `Done` (runner panicked mid-turn): send what's left.
-    flush(&mut pending, &speaker, &mut last_flush);
-}
-
 #[cfg(test)]
 mod convo_relay_tests {
-    use super::relay_convo_events;
+    use agentos_kernel::convo_runner::relay_convo_events;
     use agentos_kernel::convo_runner::ConvoEvent;
     use agentos_kernel::ChatStreamEvent;
 
@@ -6332,6 +6462,7 @@ fn convo_summary_with_status(
         participants: convo.participants,
         status: status.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
+        kind: convo.kind,
     }
 }
 

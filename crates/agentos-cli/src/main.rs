@@ -57,7 +57,6 @@ use commands::{
     resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
     scratchpad::ScratchpadCommands, secret::SecretCommands, skill::SkillCommands,
     snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands, tool::ToolCommands,
-    web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -231,12 +230,6 @@ pub enum Commands {
     Hal {
         #[command(subcommand)]
         command: HalCommands,
-    },
-
-    /// Web UI server
-    Web {
-        #[command(subcommand)]
-        command: WebCommands,
     },
 
     /// Control runtime logging (log level, format)
@@ -447,18 +440,6 @@ async fn tokio_main() -> anyhow::Result<()> {
                 cmd_start(&cli.config, true).await?;
             }
         },
-
-        Commands::Web { command } => {
-            let config_path = Path::new(&cli.config);
-            if !config_path.exists() {
-                anyhow::bail!("Config file not found: {}", cli.config);
-            }
-            match command {
-                commands::web::WebCommands::Serve { port, host } => {
-                    commands::web::handle_serve(config_path, &host, port).await?;
-                }
-            }
-        }
 
         // Offline tool subcommands run without a kernel connection
         Commands::Tool { command } if commands::tool::is_offline(&command) => {
@@ -817,6 +798,7 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
                     .with_writer(non_blocking),
             )
             .with(make_chat_layer!(&cfg.log_dir))
+            .with(agentos_kernel::logging::LevelCounterLayer)
             .init();
     } else {
         tracing_subscriber::registry()
@@ -838,6 +820,7 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
                     .with_writer(non_blocking),
             )
             .with(make_chat_layer!(&cfg.log_dir))
+            .with(agentos_kernel::logging::LevelCounterLayer)
             .init();
     }
 }
@@ -950,6 +933,7 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         tool_categories: None,
+        shared_dir: None,
     };
 
     let result = tool
@@ -1050,17 +1034,45 @@ async fn cmd_start(config_str: &str, gateway: bool) -> anyhow::Result<()> {
 
         println!("   API: http://{api_addr}");
         println!();
-        println!("╔══════════════════════════════════════════════════════════════════════╗");
-        println!("║  Bootstrap API key (full admin access — store securely):             ║");
-        println!("║  {bootstrap_key}  ║");
-        println!("╚══════════════════════════════════════════════════════════════════════╝");
-        println!();
-        println!(
-            "  Example: curl -H \"Authorization: Bearer {bootstrap_key}\" http://{api_addr}/v1/status"
-        );
+        // The bootstrap key is full-admin. Only show it on an interactive
+        // terminal: under systemd/Docker stdout is journald / `docker logs`,
+        // where a fresh admin key would be persisted in plaintext on every boot.
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            println!("╔══════════════════════════════════════════════════════════════════════╗");
+            println!("║  Bootstrap API key (full admin access — store securely):             ║");
+            println!("║  {bootstrap_key}  ║");
+            println!("╚══════════════════════════════════════════════════════════════════════╝");
+            println!();
+            println!(
+                "  Example: curl -H \"Authorization: Bearer {bootstrap_key}\" http://{api_addr}/v1/status"
+            );
+        } else {
+            let key_file = api_keys_db.with_file_name("bootstrap_api_key");
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let written = opts
+                .open(&key_file)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, bootstrap_key.as_bytes()));
+            match written {
+                Ok(()) => println!(
+                    "  Bootstrap API key (full admin) written to {} (mode 0600)",
+                    key_file.display()
+                ),
+                Err(e) => eprintln!(
+                    "  Could not write bootstrap API key to {}: {e}. Run `agentos start` on a terminal to see it.",
+                    key_file.display()
+                ),
+            }
+        }
 
         let service: Arc<dyn agentos_api::KernelService> = kernel.clone();
-        let broadcaster = agentos_api::ws::broadcaster::WsBroadcaster::new();
+        // The broadcaster counts live panel WS connections into the kernel's
+        // shared counter, which is what `when_away` notification routing rules
+        // resolve against.
+        let broadcaster = agentos_api::ws::broadcaster::WsBroadcaster::new()
+            .with_panel_sessions(kernel.panel_sessions.clone());
         // Wire kernel task-status updates into the WS broadcaster. Without this
         // relay, the `tasks` / `tasks:{id}` WebSocket channels broadcast nothing
         // (the relay task is spawned internally and runs for the process lifetime).
@@ -1474,39 +1486,6 @@ mod tests {
             } => {
                 assert_eq!(device, "gpu:0");
                 assert_eq!(agent, "worker");
-            }
-            _ => panic!("Wrong command parsed"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parses_web_serve() {
-        let cli = Cli::try_parse_from([
-            "agentos", "web", "serve", "--port", "9090", "--host", "0.0.0.0",
-        ])
-        .unwrap();
-
-        match cli.command {
-            Commands::Web {
-                command: WebCommands::Serve { port, host, .. },
-            } => {
-                assert_eq!(port, 9090);
-                assert_eq!(host, "0.0.0.0");
-            }
-            _ => panic!("Wrong command parsed"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parses_web_serve_defaults() {
-        let cli = Cli::try_parse_from(["agentos", "web", "serve"]).unwrap();
-
-        match cli.command {
-            Commands::Web {
-                command: WebCommands::Serve { port, host, .. },
-            } => {
-                assert_eq!(port, 8080);
-                assert_eq!(host, "127.0.0.1");
             }
             _ => panic!("Wrong command parsed"),
         }

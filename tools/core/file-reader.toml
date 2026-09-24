@@ -63,7 +63,7 @@ use_for = [
   "listing a directory before reading individual files",
 ]
 prefer_over = ["shell-exec for cat/ls — typed errors and pagination"]
-related_tools = ["file-writer", "file-edit", "directory-list"]
+related_tools = ["file-writer", "file-editor", "file-glob"]
 
 [[examples]]
 description = "Read the first 100 lines of a config file"

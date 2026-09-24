@@ -103,8 +103,12 @@ impl AgentTool for FileWriter {
         let resolved = crate::traits::resolve_tool_path(
             path_str,
             &agent_root,
-            &context.workspace_paths_writable,
-        )?;
+            // Writable grants AND read-write storage zones — the conversation's
+            // shared workspace is a zone, and the resolver rejects an unknown
+            // absolute path before the zone check further down ever runs.
+            &context.write_roots(),
+        )
+        .map_err(|e| context.with_path_hint(e))?;
 
         // Normalize lexically (can't use canonicalize — file may not exist yet).
         let normalized = normalize_path(&resolved);
@@ -128,10 +132,7 @@ impl AgentTool for FileWriter {
             .unwrap_or(false);
         if !normalized.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-writer: path traversal blocked");
-            return Err(AgentOSError::PermissionDenied {
-                resource: "fs.user_data".into(),
-                operation: format!("Path traversal denied: {}", path_str),
-            });
+            return Err(context.deny_path(path_str));
         }
         // KMC: enforce read-only zones — deny writes to ReadOnly storage zones.
         if in_storage_zone {
@@ -205,10 +206,7 @@ impl AgentTool for FileWriter {
                 && !parent_in_workspace
                 && !parent_in_storage_zone
             {
-                return Err(AgentOSError::PermissionDenied {
-                    resource: "fs.user_data".into(),
-                    operation: format!("Path traversal denied: {}", path_str),
-                });
+                return Err(context.deny_path(path_str));
             }
             canonical_parent.join(
                 normalized
@@ -219,6 +217,7 @@ impl AgentTool for FileWriter {
             normalized.clone()
         };
 
+        let mut backup = None;
         match mode.as_str() {
             "create_only" => {
                 // Fail if the file already exists.
@@ -229,10 +228,23 @@ impl AgentTool for FileWriter {
                     });
                 }
                 // Atomic write: write to .tmp then rename.
-                atomic_write(&final_path, content).await?;
+                crate::workspace::atomic_write("file-writer", &final_path, content).await?;
             }
             "append" => {
                 use tokio::io::AsyncWriteExt;
+                // SECURITY: append opens the path in place, so a symlink leaf
+                // (only the parent is canonicalized above) would be written
+                // through to wherever it points. Overwrite is immune: rename
+                // replaces the link itself.
+                if tokio::fs::symlink_metadata(&final_path)
+                    .await
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    return Err(AgentOSError::PermissionDenied {
+                        resource: "fs.user_data".into(),
+                        operation: format!("Refusing to append through a symlink: {}", path_str),
+                    });
+                }
                 let mut file = tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -251,7 +263,8 @@ impl AgentTool for FileWriter {
             }
             _ => {
                 // "overwrite" — atomic write via tmp + rename.
-                atomic_write(&final_path, content).await?;
+                backup = crate::workspace::backup(&canonical_agent_root, &final_path).await;
+                crate::workspace::atomic_write("file-writer", &final_path, content).await?;
             }
         }
 
@@ -266,27 +279,10 @@ impl AgentTool for FileWriter {
             "path": path_str,
             "bytes_written": content_bytes,
             "mode": mode,
+            "backup": backup,
             "success": true,
         }))
     }
-}
-
-/// Write content to a `.tmp` sibling file then atomically rename it to `target`.
-/// This ensures readers never observe a partial write.
-async fn atomic_write(target: &PathBuf, content: &str) -> Result<(), AgentOSError> {
-    let tmp = target.with_extension("tmp");
-    tokio::fs::write(&tmp, content)
-        .await
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "file-writer".into(),
-            reason: format!("Temp write failed: {}", e),
-        })?;
-    tokio::fs::rename(&tmp, target)
-        .await
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "file-writer".into(),
-            reason: format!("Atomic rename failed: {}", e),
-        })
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

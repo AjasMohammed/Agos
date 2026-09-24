@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 02 — Research Report: tool steps, agent steps, and passing values between them.
+#
+#   agentos pipeline install ~/.agentos/pipelines/core/02-research-report.yaml
+#   agentos pipeline run research-report --agent <your-agent> --input "state of WASM in 2026"
+#
+# Teaches the two step types:
+#   tool  — calls a tool directly with a JSON payload, no LLM involved
+#   agent — sends a prompt to an agent and waits for its answer
+#
+# Every step runs under the permissions of the --agent you name. `web-search`
+# needs network.outbound:x and `file-writer` needs fs.user_data:w — grant them
+# with `agentos perm grant <agent> network.outbound:x` if a step is denied.
+#
+# A tool step's output is the tool's whole result JSON as a string, so
+# {{results}} below is a JSON blob, not prose. Agent steps handle that fine.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: research-report
+version: "1.0.0"
+description: "Search the web on a topic, write it up, save the report to a file."
+
+steps:
+  # ── Tool step: `tool` + `input` (a JSON object matching that tool's schema).
+  #    Each tool's payload schema lives in ~/.agentos/tools/core/<tool>.toml.
+  - id: search
+    tool: web-search
+    input:
+      query: "{{input}}"
+      limit: 8
+    output_var: results
+    timeout_minutes: 2
+    # 2 retries, so 3 attempts total. Backoff doubles each attempt from
+    # retry_backoff_ms (default 500), with jitter.
+    retry_on_failure: 2
+
+  # ── Agent step. `depends_on` is what orders the pipeline: this cannot start
+  #    until `search` has completed, which is also what makes {{results}} exist.
+  - id: write
+    agent: "{{agent}}"
+    task: |
+      Write a short research brief on: {{input}}
+
+      Use only these search results. Cite the URL after each claim, and say so
+      explicitly where the results do not answer something.
+
+      {{results}}
+    output_var: brief
+    depends_on: [search]
+    timeout_minutes: 10
+
+  # ── Tool step again, this time writing the result to disk. A relative path
+  #    needs no folder grant. Careful: a pipeline step runs without an agent
+  #    registry snapshot, so it lands in <data_dir>/agents/<agent-UUID>/ — NOT
+  #    the named home the same agent's ordinary tasks write to.
+  #    {{date}} and {{run_id}} are built-ins — see the README for the full list.
+  - id: save
+    tool: file-writer
+    input:
+      path: "reports/{{date}}-research.md"
+      content: "{{brief}}"
+      mode: overwrite
+    depends_on: [write]
+
+output: brief

@@ -329,6 +329,10 @@ fn distill_with_steps(group: &[EpisodicEntry], tools: Vec<String>) -> Option<Pro
             action: format!("Call '{}'", tool),
             tool: Some(tool),
             expected_outcome: Some("Step completed".to_string()),
+            // Distilled from history: the tool name is known, the payload is
+            // not, so the procedure stays prose (not executable).
+            input: None,
+            output_var: None,
         })
         .collect();
     if steps.is_empty() {
@@ -360,6 +364,7 @@ fn distill_with_steps(group: &[EpisodicEntry], tools: Vec<String>) -> Option<Pro
         description,
         preconditions: Vec::new(),
         steps,
+        inputs: Vec::new(),
         postconditions: vec!["Successful task completion".to_string()],
         success_count: group.len() as u32,
         failure_count: 0,

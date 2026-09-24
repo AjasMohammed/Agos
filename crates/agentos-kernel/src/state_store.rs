@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const LATEST_MIGRATION_VERSION: i64 = 4;
+const LATEST_MIGRATION_VERSION: i64 = 6;
 
 /// Persisted usage counters for an agent.
 #[derive(Debug, Clone)]
@@ -18,6 +18,23 @@ pub struct PersistedCostSnapshot {
     pub tool_calls: u64,
     pub period_start: chrono::DateTime<chrono::Utc>,
     pub version: u64,
+}
+
+/// Durable index row for a filesystem/context snapshot.
+///
+/// The JSON blob at `blob_path` remains the payload; this row is what makes a
+/// `rollback_ref` in the audit log resolvable after a kernel restart.
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    pub snap_id: String,
+    pub task_id: TaskID,
+    pub agent_id: String,
+    pub action_type: String,
+    pub taken_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub restored: bool,
+    pub blob_path: PathBuf,
+    pub size_bytes: u64,
 }
 
 /// SQLite-backed persistence layer for kernel runtime state.
@@ -862,6 +879,96 @@ impl KernelStateStore {
         Ok(())
     }
 
+    // ── Notification routing matrix ─────────────────────────────────────────
+
+    /// Every persisted `(event, channel, mode)` rule.
+    pub async fn load_notification_routes(&self) -> anyhow::Result<Vec<(String, String, String)>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let mut stmt = guard
+                .prepare("SELECT event, channel, mode FROM notification_routes")
+                .context("Failed to prepare notification route query")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .context("Failed to query notification routes")?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.context("Failed to read notification route row")?);
+            }
+            Ok(out)
+        })
+        .await
+        .context("Notification route load task failed")?
+    }
+
+    /// Insert-or-update a batch of rules in one transaction.
+    pub async fn upsert_notification_routes(
+        &self,
+        rows: Vec<(String, String, String)>,
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let tx = guard
+                .transaction()
+                .context("Failed to begin notification route transaction")?;
+            for (event, channel, mode) in &rows {
+                tx.execute(
+                    "INSERT INTO notification_routes (event, channel, mode, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(event, channel) DO UPDATE SET
+                        mode = excluded.mode,
+                        updated_at = excluded.updated_at",
+                    params![event, channel, mode, now],
+                )
+                .context("Failed to upsert notification route")?;
+            }
+            tx.commit()
+                .context("Failed to commit notification route transaction")?;
+            Ok(())
+        })
+        .await
+        .context("Notification route write task failed")?
+    }
+
+    /// Drop every rule for one channel — called when the channel is disconnected
+    /// so the matrix does not accumulate rows for targets that no longer exist.
+    pub async fn delete_notification_routes_for_channel(
+        &self,
+        channel: String,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let n = guard
+                .execute(
+                    "DELETE FROM notification_routes WHERE channel = ?1",
+                    params![channel],
+                )
+                .context("Failed to delete notification routes for channel")?;
+            Ok(n)
+        })
+        .await
+        .context("Notification route delete task failed")?
+    }
+
     fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute_batch(
             "
@@ -954,6 +1061,38 @@ impl KernelStateStore {
                 ON event_subscriptions(agent_id);
             ",
             ),
+            (
+                5,
+                "
+            CREATE TABLE IF NOT EXISTS notification_routes (
+                event      TEXT NOT NULL,
+                channel    TEXT NOT NULL,
+                mode       TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (event, channel)
+            );
+            ",
+            ),
+            (
+                6,
+                "
+            CREATE TABLE IF NOT EXISTS snapshots (
+                snap_id     TEXT PRIMARY KEY,
+                task_id     TEXT NOT NULL,
+                agent_id    TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                taken_at    TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                restored    INTEGER NOT NULL DEFAULT 0,
+                blob_path   TEXT NOT NULL,
+                size_bytes  INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_snapshots_task
+                ON snapshots(task_id);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_expires
+                ON snapshots(expires_at);
+            ",
+            ),
         ];
 
         for (version, ddl) in migrations {
@@ -1012,6 +1151,225 @@ impl KernelStateStore {
         }
 
         Ok(())
+    }
+
+    // ---- Snapshots -------------------------------------------------------
+    //
+    // The durable index behind `AuditEntry.rollback_ref`. A snapshot id that
+    // reaches the audit log must resolve from here, not from process memory,
+    // or "reversible" stops being true across a restart.
+
+    fn snapshot_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRow> {
+        let snap_id: String = row.get(0)?;
+        let task_id_s: String = row.get(1)?;
+        let taken_at_s: String = row.get(4)?;
+        let expires_at_s: String = row.get(5)?;
+        let blob_path_s: String = row.get(7)?;
+        let size_bytes: i64 = row.get(8)?;
+        Ok(SnapshotRow {
+            snap_id,
+            task_id: task_id_s.parse::<TaskID>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            agent_id: row.get(2)?,
+            action_type: row.get(3)?,
+            taken_at: chrono::DateTime::parse_from_rfc3339(&taken_at_s)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+            expires_at: chrono::DateTime::parse_from_rfc3339(&expires_at_s)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+            restored: row.get::<_, i64>(6)? != 0,
+            blob_path: PathBuf::from(blob_path_s),
+            size_bytes: size_bytes.max(0) as u64,
+        })
+    }
+
+    const SNAPSHOT_COLS: &'static str =
+        "snap_id, task_id, agent_id, action_type, taken_at, expires_at, restored, blob_path, size_bytes";
+
+    pub async fn insert_snapshot(&self, row: SnapshotRow) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            guard
+                .execute(
+                    "INSERT INTO snapshots (
+                        snap_id, task_id, agent_id, action_type,
+                        taken_at, expires_at, restored, blob_path, size_bytes
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(snap_id) DO UPDATE SET
+                        task_id = excluded.task_id,
+                        agent_id = excluded.agent_id,
+                        action_type = excluded.action_type,
+                        taken_at = excluded.taken_at,
+                        expires_at = excluded.expires_at,
+                        restored = excluded.restored,
+                        blob_path = excluded.blob_path,
+                        size_bytes = excluded.size_bytes",
+                    params![
+                        row.snap_id,
+                        row.task_id.to_string(),
+                        row.agent_id,
+                        row.action_type,
+                        row.taken_at.to_rfc3339(),
+                        row.expires_at.to_rfc3339(),
+                        if row.restored { 1_i64 } else { 0_i64 },
+                        row.blob_path.to_string_lossy().to_string(),
+                        clamp_u64_to_i64(row.size_bytes),
+                    ],
+                )
+                .context("Failed to insert snapshot row")?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking insert_snapshot")?
+    }
+
+    pub async fn get_snapshot(&self, snap_id: &str) -> anyhow::Result<Option<SnapshotRow>> {
+        let conn = self.conn.clone();
+        let snap_id = snap_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<SnapshotRow>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let sql = format!(
+                "SELECT {} FROM snapshots WHERE snap_id = ?1",
+                Self::SNAPSHOT_COLS
+            );
+            guard
+                .query_row(&sql, params![snap_id], Self::snapshot_row_from)
+                .optional()
+                .context("Failed to read snapshot row")
+        })
+        .await
+        .context("spawn_blocking get_snapshot")?
+    }
+
+    pub async fn list_snapshots_for_task(
+        &self,
+        task_id: &TaskID,
+    ) -> anyhow::Result<Vec<SnapshotRow>> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SnapshotRow>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let sql = format!(
+                "SELECT {} FROM snapshots WHERE task_id = ?1 ORDER BY taken_at ASC",
+                Self::SNAPSHOT_COLS
+            );
+            let mut stmt = guard.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![task_id], Self::snapshot_row_from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("Failed to read snapshots for task")?;
+            Ok(rows)
+        })
+        .await
+        .context("spawn_blocking list_snapshots_for_task")?
+    }
+
+    /// Marks a snapshot restored. Returns `true` if this call performed the
+    /// transition (the row existed and was not already restored), so callers
+    /// can use it as a single-winner guard.
+    pub async fn mark_snapshot_restored(&self, snap_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.clone();
+        let snap_id = snap_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let n = guard
+                .execute(
+                    "UPDATE snapshots SET restored = 1 WHERE snap_id = ?1 AND restored = 0",
+                    params![snap_id],
+                )
+                .context("Failed to mark snapshot restored")?;
+            Ok(n > 0)
+        })
+        .await
+        .context("spawn_blocking mark_snapshot_restored")?
+    }
+
+    /// Rows whose `expires_at` is in the past, oldest first.
+    pub async fn list_expired_snapshots(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Vec<SnapshotRow>> {
+        let conn = self.conn.clone();
+        let cutoff = now.to_rfc3339();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SnapshotRow>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let sql = format!(
+                "SELECT {} FROM snapshots WHERE expires_at < ?1 ORDER BY expires_at ASC",
+                Self::SNAPSHOT_COLS
+            );
+            let mut stmt = guard.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![cutoff], Self::snapshot_row_from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("Failed to read expired snapshots")?;
+            Ok(rows)
+        })
+        .await
+        .context("spawn_blocking list_expired_snapshots")?
+    }
+
+    pub async fn delete_snapshot(&self, snap_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.clone();
+        let snap_id = snap_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let n = guard
+                .execute("DELETE FROM snapshots WHERE snap_id = ?1", params![snap_id])
+                .context("Failed to delete snapshot row")?;
+            Ok(n > 0)
+        })
+        .await
+        .context("spawn_blocking delete_snapshot")?
+    }
+
+    /// Every indexed snapshot — used by boot reconciliation.
+    pub async fn list_all_snapshots(&self) -> anyhow::Result<Vec<SnapshotRow>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SnapshotRow>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let sql = format!("SELECT {} FROM snapshots", Self::SNAPSHOT_COLS);
+            let mut stmt = guard.prepare(&sql)?;
+            let rows = stmt
+                .query_map([], Self::snapshot_row_from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("Failed to list snapshots")?;
+            Ok(rows)
+        })
+        .await
+        .context("spawn_blocking list_all_snapshots")?
     }
 }
 

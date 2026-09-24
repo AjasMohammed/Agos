@@ -23,7 +23,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now agentos
 ```
 
-The unit runs `agentos web serve --host 0.0.0.0 --port 8080`.
+The unit runs `agentos start`. The REST API is served only when the host config sets
+`[api] enabled = true` (`config/production.toml` does, on `0.0.0.0:8080`).
 
 ## Vault passphrase
 

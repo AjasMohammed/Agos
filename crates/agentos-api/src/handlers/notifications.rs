@@ -241,3 +241,49 @@ pub async fn mark_all_read(
         serde_json::json!({ "updated": updated }),
     )))
 }
+
+/// `GET /api/v1/notifications/routes` — The notification routing matrix.
+#[utoipa::path(
+    get,
+    path = "/api/v1/notifications/routes",
+    tag = "notifications",
+    operation_id = "notifications_get_routes",
+    responses(
+        (status = 200, description = "Routing matrix", body = crate::response::Envelope<crate::types::ApiNotificationRoutes>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_routes(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+) -> Result<Json<Envelope<crate::types::ApiNotificationRoutes>>, ApiError> {
+    require_permission(&key, "notifications:r")?;
+    Ok(Json(Envelope::new(svc.get_notification_routes().await?)))
+}
+
+/// `PUT /api/v1/notifications/routes` — Update matrix cells. Partial: cells
+/// not listed in the request are left untouched.
+#[utoipa::path(
+    put,
+    path = "/api/v1/notifications/routes",
+    tag = "notifications",
+    operation_id = "notifications_set_routes",
+    request_body = crate::types::SetRoutesRequest,
+    responses(
+        (status = 200, description = "Updated routing matrix", body = crate::response::Envelope<crate::types::ApiNotificationRoutes>),
+        (status = 400, description = "Unknown event or mode", body = crate::error::ApiErrorBody),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn set_routes(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Json(req): Json<crate::types::SetRoutesRequest>,
+) -> Result<Json<Envelope<crate::types::ApiNotificationRoutes>>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    Ok(Json(Envelope::new(
+        svc.set_notification_routes(req.rules).await?,
+    )))
+}

@@ -22,7 +22,7 @@ The audit log is an append-only SQLite database stored at the path configured by
 Key properties:
 
 - **Append-only** — entries are never deleted by normal operation (only pruned by retention policy)
-- **146 event types** across 37 categories, covering the full agent lifecycle including channels, MCP, OAuth, containers, IoT device twins, and checkpoint recovery
+- **173 event types**, covering the full agent lifecycle including channels, MCP, OAuth, containers, IoT device twins, and checkpoint recovery
 - **Merkle chain** — tamper-evident via `prev_hash` / `entry_hash` columns
 - **WAL journal mode** — concurrent reads during writes
 
@@ -315,6 +315,27 @@ Selected event types, grouped by category (the complete set is defined in `crate
 | `ContainerDestroyed` | A container is destroyed |
 | `ContainerQuotaExceeded` | A container provision is rejected due to quota limits |
 
+### Later Additions
+
+| Group | Event Types | Covers |
+|---|---|---|
+| REST API auth | `ApiLoginSucceeded`, `ApiLoginFailed`, `ApiKeyIssued`, `ApiKeyRevoked` | Operator login and API key lifecycle |
+| Tool discovery | `ManualQuery`, `ToolSuggested`, `ToolCallRecovered`, `ToolIntentLeakedFromText` | `agent-manual` queries, ToolNotFound suggestions, recovered malformed calls, tool-intent text stripped from output |
+| Escalations | `EscalationCreated`, `EscalationResolved`, `EscalationExpired`, `EscalationBroadcastSuppressed` | Approval request lifecycle, including fan-out suppression |
+| Privileged host operations | `HostPackageInstalled`, `HostPackageInstallDenied`, `HostPackageInstallTimeout` | `host-package-install` outcomes |
+| Scheduling and timers | `ScheduledToolFired`, `ScheduledToolFailed`, `TimerCreated`, `TimerFired`, `TimerCancelled`, `TimerActionFailed` | Tool-mode schedules and `set-timer` |
+| Task dispatch | `TaskCheckedOut`, `TaskCheckoutReclaimed`, `AgentHeartbeatFired`, `AgentRemoved` | Single-owner dispatch claims, heartbeat wakeups, agent removal |
+| Channels | `ChannelMessageSent` | Outbound `channel-send` delivery |
+| Memory lifecycle | `MemoryReinforced`, `BackgroundReviewApplied` | Reinforcement on retrieval; post-task background review writes |
+| Plugins and connectors | `PluginInstalled`, `PluginRemoved`, `ConnectorRegistered`, `ConnectorRemoved` | Operator-driven lifecycle |
+| Kernel-mediated capabilities | `CapabilityRequested`, `CapabilityGranted`, `CapabilityDenied`, `CapabilityExecuted`, `CapabilityFailed` | Broker decisions and execution |
+| KMC — environments | `EnvironmentCreated`, `PackageInstalled`, `PackageRemoved`, `EnvironmentDestroyed` | `env-*` tools |
+| KMC — processes | `ManagedProcessSpawned`, `ManagedProcessSignaled`, `ManagedProcessTerminated` | `proc-*` tools |
+| KMC — network, storage, builds | `NetworkRequestExecuted`, `NetworkDestinationBlocked`, `StorageZoneCreated`, `StorageZoneRevoked`, `BuildExecuted`, `BuildFailed` | `net-*`, `storage-zone-*`, `build-*` tools |
+| Host folder grants | `WorkspaceGranted`, `WorkspaceRevoked` | `agentos workspace grant` / `revoke` |
+| Preference proposals | `ProposalCreated`, `ProposalAccepted`, `ProposalRejected`, `ProposalExpired` | `agentos prefs` queue |
+| Personalization | `ProfileEntryAdded`, `ProfileEntryUpdated`, `ProfileEntryRemoved`, `PersonalizationReinforced`, `PersonalizationDecayed`, `PersonalizationArchived`, `RecommendationGenerated`, `RecommendationDelivered`, `RecommendationSkipped`, `PersonalizationDataExported`, `PersonalizationDataForgotten` | User profile, feedback loop, recommendations, export and right-to-forget |
+
 ---
 
 ## Severity Levels
@@ -423,7 +444,7 @@ Each audit record contains the following fields:
 |---|---|---|
 | `timestamp` | `DateTime<Utc>` | RFC 3339 timestamp of the event |
 | `trace_id` | `TraceID` | UUID linking related events in a single trace |
-| `event_type` | `AuditEventType` | One of the 146 event type variants |
+| `event_type` | `AuditEventType` | One of the 173 event type variants |
 | `agent_id` | `Option<AgentID>` | The agent that triggered the event |
 | `task_id` | `Option<TaskID>` | The task context for the event |
 | `tool_id` | `Option<ToolID>` | The tool involved, if any |

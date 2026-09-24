@@ -259,6 +259,25 @@ fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Permission resource gating one installed skill: `skill:<name>/`.
+///
+/// Mirrors `mcp:<server>/` (see `agentos_mcp::adapter::server_permission_resource`):
+/// a skill is granted per skill, with `PermissionOp::Execute`. The trailing `/`
+/// is load-bearing — `PermissionSet::check` prefix-matches, so without a
+/// terminator a grant for `researcher` would also open `researcher-pro`.
+///
+/// The broad grant `skill:` (no name) is the default every agent carries and
+/// covers every installed skill, including ones installed later. An operator
+/// scopes one out by revoking `skill:<name>/:x`, which records a deny entry —
+/// and `check()` honours denies ahead of any grant.
+///
+/// Skill names are already restricted to `[a-z0-9-]` by `skill-create` and by
+/// the `SKILL.toml` loader; the lowercase here is defensive so a manually
+/// installed `Researcher` still lands on the resource its grant names.
+pub fn skill_permission_resource(skill_name: &str) -> String {
+    format!("skill:{}/", skill_name.to_ascii_lowercase())
+}
+
 /// True if `resource` contains a `..` path segment. Such a resource can
 /// prefix-match a grant while escaping its scope (e.g.
 /// `fs:/home/user/../../etc/passwd` starts with the grant `fs:/home/user/`),
@@ -285,6 +304,18 @@ impl PermissionSet {
         if !self.deny_entries.contains(&resource_pattern) {
             self.deny_entries.push(resource_pattern);
         }
+    }
+
+    /// Remove a deny rule recorded by [`PermissionSet::deny`].
+    ///
+    /// Returns `true` when a rule was removed. Matching is exact — a deny is
+    /// a pattern, and clearing `skill:a/` must not clear `skill:ab/`. Without
+    /// this, a deny was unremovable: `grant` adds an entry that `check()`
+    /// never reaches, because denies take absolute precedence.
+    pub fn clear_deny(&mut self, resource_pattern: &str) -> bool {
+        let before = self.deny_entries.len();
+        self.deny_entries.retain(|p| p != resource_pattern);
+        self.deny_entries.len() != before
     }
 
     /// Check if a resource is explicitly denied.
@@ -465,27 +496,48 @@ impl PermissionSet {
         execute: bool,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) {
-        // Upsert: if resource exists, update bits; otherwise add new entry
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
-            entry.read |= read;
-            entry.write |= write;
-            entry.execute |= execute;
-            // Update expiry: keep the one that expires later, or None if either has no expiry
-            entry.expires_at = match (entry.expires_at, expires_at) {
-                (Some(e1), Some(e2)) => Some(e1.max(e2)),
-                _ => None,
-            };
-        } else {
-            self.entries.push(PermissionEntry {
-                resource,
-                read,
-                write,
-                execute,
-                query: false,
-                observe: false,
-                expires_at,
-            });
-        }
+        let entry = self.entry_mut(resource, expires_at);
+        entry.read |= read;
+        entry.write |= write;
+        entry.execute |= execute;
+    }
+
+    /// Find-or-create the entry for exactly this `(resource, expiry)` pair.
+    ///
+    /// Grants with different expiries on one resource stay separate entries:
+    /// each entry has a single `expires_at` covering all of its bits, so
+    /// merging a 10-minute write approval into a permanent read grant used to
+    /// make the write permanent too (`(Some, None) => None`). `check()` already
+    /// ORs across every matching, unexpired entry, so nothing else changes.
+    /// Expired entries confer nothing and are dropped here so they don't pile up.
+    fn entry_mut(
+        &mut self,
+        resource: String,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> &mut PermissionEntry {
+        let now = chrono::Utc::now();
+        self.entries
+            .retain(|e| e.expires_at.is_none_or(|exp| now < exp));
+        let idx = match self
+            .entries
+            .iter()
+            .position(|e| e.resource == resource && e.expires_at == expires_at)
+        {
+            Some(i) => i,
+            None => {
+                self.entries.push(PermissionEntry {
+                    resource,
+                    read: false,
+                    write: false,
+                    execute: false,
+                    query: false,
+                    observe: false,
+                    expires_at,
+                });
+                self.entries.len() - 1
+            }
+        };
+        &mut self.entries[idx]
     }
 
     /// Copy all permission bits from an existing `PermissionEntry` into this set.
@@ -494,24 +546,12 @@ impl PermissionSet {
     /// entry-copying patterns (e.g. in `compute_effective_permissions`) do not
     /// silently drop the newer op flags.
     pub fn grant_entry(&mut self, entry: &PermissionEntry) {
-        if let Some(e) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.resource == entry.resource)
-        {
-            e.read |= entry.read;
-            e.write |= entry.write;
-            e.execute |= entry.execute;
-            e.query |= entry.query;
-            e.observe |= entry.observe;
-            // Keep the expiry that allows the longest window, or None if either is permanent.
-            e.expires_at = match (e.expires_at, entry.expires_at) {
-                (Some(e1), Some(e2)) => Some(e1.max(e2)),
-                _ => None,
-            };
-        } else {
-            self.entries.push(entry.clone());
-        }
+        let e = self.entry_mut(entry.resource.clone(), entry.expires_at);
+        e.read |= entry.read;
+        e.write |= entry.write;
+        e.execute |= entry.execute;
+        e.query |= entry.query;
+        e.observe |= entry.observe;
     }
 
     /// Grant a single `PermissionOp` for a resource.
@@ -523,34 +563,19 @@ impl PermissionSet {
         op: PermissionOp,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.resource == resource) {
-            match op {
-                PermissionOp::Read => e.read = true,
-                PermissionOp::Write => e.write = true,
-                PermissionOp::Execute => e.execute = true,
-                PermissionOp::Query => e.query = true,
-                PermissionOp::Observe => e.observe = true,
-            }
-            e.expires_at = match (e.expires_at, expires_at) {
-                (Some(e1), Some(e2)) => Some(e1.max(e2)),
-                _ => None,
-            };
-        } else {
-            self.entries.push(PermissionEntry {
-                resource,
-                read: op == PermissionOp::Read,
-                write: op == PermissionOp::Write,
-                execute: op == PermissionOp::Execute,
-                query: op == PermissionOp::Query,
-                observe: op == PermissionOp::Observe,
-                expires_at,
-            });
+        let e = self.entry_mut(resource, expires_at);
+        match op {
+            PermissionOp::Read => e.read = true,
+            PermissionOp::Write => e.write = true,
+            PermissionOp::Execute => e.execute = true,
+            PermissionOp::Query => e.query = true,
+            PermissionOp::Observe => e.observe = true,
         }
     }
 
     /// Revoke a single `PermissionOp` for a resource.
     pub fn revoke_op(&mut self, resource: &str, op: PermissionOp) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
+        for entry in self.entries.iter_mut().filter(|e| e.resource == resource) {
             match op {
                 PermissionOp::Read => entry.read = false,
                 PermissionOp::Write => entry.write = false,
@@ -574,7 +599,7 @@ impl PermissionSet {
     /// **Note:** This method only handles the `Read`/`Write`/`Execute` ops.
     /// To revoke `Query` or `Observe` permissions, use [`revoke_op`](Self::revoke_op).
     pub fn revoke(&mut self, resource: &str, read: bool, write: bool, execute: bool) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
+        for entry in self.entries.iter_mut().filter(|e| e.resource == resource) {
             if read {
                 entry.read = false;
             }
@@ -596,7 +621,8 @@ impl PermissionSet {
     pub fn intersect(&self, other: &PermissionSet) -> Self {
         let mut intersected = Self::new();
         for e in &self.entries {
-            if let Some(other_e) = other.entries.iter().find(|o| o.resource == e.resource) {
+            // A resource can carry several entries (one per expiry) — pair with each.
+            for other_e in other.entries.iter().filter(|o| o.resource == e.resource) {
                 let r = e.read && other_e.read;
                 let w = e.write && other_e.write;
                 let x = e.execute && other_e.execute;
@@ -730,6 +756,35 @@ mod tests {
         perms.grant("fs:/tmp/".into(), true, false, false, Some(past));
         // Should NOT grant access — entry is expired
         assert!(!perms.check("fs:/tmp/file.txt", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_temporary_grant_stays_temporary_next_to_permanent_grant() {
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // Permanent read first, then a (now lapsed) time-boxed write.
+        let mut a = PermissionSet::new();
+        a.grant("fs:/data".into(), true, false, false, None);
+        a.grant("fs:/data".into(), false, true, false, Some(past));
+        assert!(a.check("fs:/data", PermissionOp::Read));
+        assert!(!a.check("fs:/data", PermissionOp::Write));
+
+        // Reverse order, via grant_op — the path `autonomous` tasks use.
+        let mut b = PermissionSet::new();
+        b.grant_op("process.exec".into(), PermissionOp::Execute, Some(future));
+        b.grant_op("process.exec".into(), PermissionOp::Read, None);
+        let exec = b
+            .entries()
+            .iter()
+            .find(|e| e.execute)
+            .expect("execute entry");
+        assert_eq!(exec.expires_at, Some(future));
+
+        // Revoke clears the bit on every entry of the resource.
+        b.revoke_op("process.exec", PermissionOp::Execute);
+        assert!(!b.check("process.exec", PermissionOp::Execute));
+        assert!(b.check("process.exec", PermissionOp::Read));
     }
 
     #[test]
@@ -1084,5 +1139,81 @@ mod tests {
         let mut child = PermissionSet::new();
         child.grant("fs:/anywhere/".into(), true, true, true, None);
         assert!(child.is_subset_of(&root));
+    }
+
+    #[test]
+    fn skill_resource_is_terminated_and_lowercased() {
+        assert_eq!(skill_permission_resource("researcher"), "skill:researcher/");
+        assert_eq!(skill_permission_resource("Researcher"), "skill:researcher/");
+
+        // The trailing `/` is what stops a grant from bleeding into a
+        // longer-named sibling skill.
+        let mut perms = PermissionSet::new();
+        perms.grant_op(
+            skill_permission_resource("researcher"),
+            PermissionOp::Execute,
+            None,
+        );
+        assert!(perms.check(
+            &skill_permission_resource("researcher"),
+            PermissionOp::Execute
+        ));
+        assert!(!perms.check(
+            &skill_permission_resource("researcher-pro"),
+            PermissionOp::Execute
+        ));
+    }
+
+    #[test]
+    fn broad_skill_grant_covers_all_skills_until_one_is_denied() {
+        // The shape every agent carries: one broad grant, per-skill opt-out.
+        let mut perms = PermissionSet::new();
+        perms.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        assert!(perms.check(
+            &skill_permission_resource("researcher"),
+            PermissionOp::Execute
+        ));
+        assert!(perms.check(
+            &skill_permission_resource("secops-monitor"),
+            PermissionOp::Execute
+        ));
+
+        perms.deny(skill_permission_resource("researcher"));
+        assert!(!perms.check(
+            &skill_permission_resource("researcher"),
+            PermissionOp::Execute
+        ));
+        assert!(perms.check(
+            &skill_permission_resource("secops-monitor"),
+            PermissionOp::Execute
+        ));
+
+        // Toggling back on has to clear the deny — a bare grant would be
+        // outranked by it forever.
+        perms.grant_op(
+            skill_permission_resource("researcher"),
+            PermissionOp::Execute,
+            None,
+        );
+        assert!(!perms.check(
+            &skill_permission_resource("researcher"),
+            PermissionOp::Execute
+        ));
+        assert!(perms.clear_deny(&skill_permission_resource("researcher")));
+        assert!(perms.check(
+            &skill_permission_resource("researcher"),
+            PermissionOp::Execute
+        ));
+    }
+
+    #[test]
+    fn clear_deny_is_exact_not_prefix() {
+        let mut perms = PermissionSet::new();
+        perms.grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        perms.deny("skill:alert-builder/".to_string());
+        assert!(!perms.clear_deny("skill:alert/"));
+        assert!(!perms.check("skill:alert-builder/", PermissionOp::Execute));
+        assert!(perms.clear_deny("skill:alert-builder/"));
+        assert!(perms.check("skill:alert-builder/", PermissionOp::Execute));
     }
 }

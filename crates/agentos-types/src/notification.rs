@@ -269,3 +269,246 @@ impl std::fmt::Display for TaskOutcome {
         }
     }
 }
+
+/// Routing category of a [`UserMessage`], used as the row axis of the
+/// operator's notification routing matrix.
+///
+/// Derived from existing fields by [`NotificationEvent::classify`] — never
+/// stored on the message itself, because `UserInbox` persists messages
+/// columnar and a new column would buy nothing the derivation doesn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationEvent {
+    /// A blocking approval prompt from the escalation manager.
+    Approval,
+    /// A root task finished successfully.
+    TaskComplete,
+    /// A root task failed, was cancelled, or timed out.
+    TaskFailed,
+    /// A non-blocking question to the user (`ask-user`).
+    Question,
+    /// Fire-and-forget message from an agent (`notify-user`).
+    AgentMessage,
+    /// Kernel/system alert: health monitor, restart notice, recommendation.
+    SystemAlert,
+    /// Task state transition.
+    StatusUpdate,
+}
+
+impl NotificationEvent {
+    /// Every variant, in the order the control panel renders its rows.
+    pub const ALL: [NotificationEvent; 7] = [
+        NotificationEvent::Approval,
+        NotificationEvent::TaskComplete,
+        NotificationEvent::TaskFailed,
+        NotificationEvent::Question,
+        NotificationEvent::AgentMessage,
+        NotificationEvent::SystemAlert,
+        NotificationEvent::StatusUpdate,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotificationEvent::Approval => "approval",
+            NotificationEvent::TaskComplete => "task_complete",
+            NotificationEvent::TaskFailed => "task_failed",
+            NotificationEvent::Question => "question",
+            NotificationEvent::AgentMessage => "agent_message",
+            NotificationEvent::SystemAlert => "system_alert",
+            NotificationEvent::StatusUpdate => "status_update",
+        }
+    }
+
+    /// Operator-facing label for the panel's row header.
+    pub fn label(&self) -> &'static str {
+        match self {
+            NotificationEvent::Approval => "Approval requests",
+            NotificationEvent::TaskComplete => "Task finished",
+            NotificationEvent::TaskFailed => "Task failed",
+            NotificationEvent::Question => "Questions",
+            NotificationEvent::AgentMessage => "Agent messages",
+            NotificationEvent::SystemAlert => "System alerts",
+            NotificationEvent::StatusUpdate => "Status updates",
+        }
+    }
+
+    /// One line explaining what produces this event.
+    pub fn description(&self) -> &'static str {
+        match self {
+            NotificationEvent::Approval => {
+                "An agent is parked waiting for you to approve or deny a tool call."
+            }
+            NotificationEvent::TaskComplete => "A root task completed successfully.",
+            NotificationEvent::TaskFailed => "A root task failed, timed out, or was cancelled.",
+            NotificationEvent::Question => "An agent asked you a question it can continue without.",
+            NotificationEvent::AgentMessage => "An agent sent you a message via notify-user.",
+            NotificationEvent::SystemAlert => {
+                "Kernel alerts: health monitor warnings, restart notices, recommendations."
+            }
+            NotificationEvent::StatusUpdate => "A task changed state.",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.as_str() == s)
+    }
+
+    /// Classify a message for routing.
+    ///
+    /// Order matters: the escalation sink builds its prompt with
+    /// `kind: Notification` and `thread_id: "escalation:<id>"`, so the
+    /// thread-id check runs before the kind match — otherwise every approval
+    /// would be classified as a plain system alert.
+    pub fn classify(msg: &UserMessage) -> Self {
+        if msg
+            .thread_id
+            .as_deref()
+            .is_some_and(|t| t.starts_with("escalation:"))
+        {
+            return NotificationEvent::Approval;
+        }
+        match &msg.kind {
+            UserMessageKind::TaskComplete { outcome, .. } => match outcome {
+                TaskOutcome::Success => NotificationEvent::TaskComplete,
+                _ => NotificationEvent::TaskFailed,
+            },
+            UserMessageKind::StatusUpdate { .. } => NotificationEvent::StatusUpdate,
+            UserMessageKind::Question { .. } => NotificationEvent::Question,
+            UserMessageKind::Notification => match msg.from {
+                NotificationSource::Agent(_) => NotificationEvent::AgentMessage,
+                NotificationSource::Kernel | NotificationSource::System => {
+                    NotificationEvent::SystemAlert
+                }
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for NotificationEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod notification_event_tests {
+    use super::*;
+    use crate::ids::{AgentID, NotificationID, TaskID, TraceID};
+
+    fn msg(kind: UserMessageKind, from: NotificationSource) -> UserMessage {
+        UserMessage {
+            id: NotificationID::new(),
+            from,
+            task_id: None,
+            trace_id: TraceID::new(),
+            kind,
+            priority: NotificationPriority::Info,
+            subject: "s".into(),
+            body: "b".into(),
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: None,
+            reply_to_external_id: None,
+            attachment: None,
+            actions: Vec::new(),
+        }
+    }
+
+    fn completion(outcome: TaskOutcome) -> UserMessageKind {
+        UserMessageKind::TaskComplete {
+            task_id: TaskID::new(),
+            outcome,
+            summary: "done".into(),
+            duration_ms: 1,
+            iterations: 1,
+            cost_usd: None,
+            tool_calls: 0,
+        }
+    }
+
+    /// The escalation sink sends approvals as `kind: Notification` from the
+    /// kernel — only `thread_id` tells them apart from a health alert.
+    #[test]
+    fn escalation_thread_id_classifies_as_approval() {
+        let mut m = msg(UserMessageKind::Notification, NotificationSource::Kernel);
+        m.thread_id = Some("escalation:42".into());
+        assert_eq!(NotificationEvent::classify(&m), NotificationEvent::Approval);
+    }
+
+    #[test]
+    fn task_outcome_splits_complete_and_failed() {
+        let ok = msg(completion(TaskOutcome::Success), NotificationSource::Kernel);
+        assert_eq!(
+            NotificationEvent::classify(&ok),
+            NotificationEvent::TaskComplete
+        );
+        for bad in [
+            TaskOutcome::Failed,
+            TaskOutcome::Cancelled,
+            TaskOutcome::TimedOut,
+        ] {
+            let m = msg(completion(bad), NotificationSource::Kernel);
+            assert_eq!(
+                NotificationEvent::classify(&m),
+                NotificationEvent::TaskFailed,
+                "outcome {bad} must classify as task_failed"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_notification_vs_kernel_alert() {
+        let agent = msg(
+            UserMessageKind::Notification,
+            NotificationSource::Agent(AgentID::new()),
+        );
+        assert_eq!(
+            NotificationEvent::classify(&agent),
+            NotificationEvent::AgentMessage
+        );
+        let kernel = msg(UserMessageKind::Notification, NotificationSource::Kernel);
+        assert_eq!(
+            NotificationEvent::classify(&kernel),
+            NotificationEvent::SystemAlert
+        );
+    }
+
+    #[test]
+    fn question_and_status_update_classify_by_kind() {
+        let q = msg(
+            UserMessageKind::Question {
+                question: "?".into(),
+                options: None,
+                free_text_allowed: true,
+            },
+            NotificationSource::Kernel,
+        );
+        assert_eq!(NotificationEvent::classify(&q), NotificationEvent::Question);
+
+        let s = msg(
+            UserMessageKind::StatusUpdate {
+                task_id: TaskID::new(),
+                old_state: crate::task::TaskState::Queued,
+                new_state: crate::task::TaskState::Running,
+                detail: None,
+            },
+            NotificationSource::Kernel,
+        );
+        assert_eq!(
+            NotificationEvent::classify(&s),
+            NotificationEvent::StatusUpdate
+        );
+    }
+
+    #[test]
+    fn parse_roundtrips_every_variant() {
+        for e in NotificationEvent::ALL {
+            assert_eq!(NotificationEvent::parse(e.as_str()), Some(e));
+        }
+        assert_eq!(NotificationEvent::parse("nope"), None);
+    }
+}

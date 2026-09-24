@@ -125,7 +125,7 @@ async fn convo_scope_rejects_withheld_tool_at_dispatch() {
             "Open the conversation.",
             None,
             None,
-            ChatTurnScope::ConvoTurn,
+            ChatTurnScope::ConvoTurn { shared_dir: None },
         )
         .await
         .expect("chat_infer_with_tools_scoped failed");
@@ -403,9 +403,12 @@ async fn test_chat_tool_call_detected_and_executed() {
         .await
         .expect("chat_infer_with_tools failed");
 
+    // Both pieces the model spoke, not just the closing one: the text that
+    // came with the tool call is part of the turn's answer (2026-09-20 — an
+    // agent that narrated each step showed only its last line on refetch).
     assert_eq!(
         result.answer,
-        "The tool is not available, but here is my answer anyway."
+        "Let me look that up.\n\nThe tool is not available, but here is my answer anyway."
     );
     assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
     assert_eq!(
@@ -514,7 +517,7 @@ async fn test_chat_tool_error_injected_and_llm_retries() {
 
     assert_eq!(
         result.answer,
-        "I encountered an error but recovered with this answer."
+        "Let me look that up.\n\nI encountered an error but recovered with this answer."
     );
 
     kernel.shutdown();
@@ -551,7 +554,7 @@ async fn convo_turn_refuses_withheld_tool_at_dispatch() {
             "Say hello to the other participant.",
             None,
             None,
-            agentos_kernel::kernel::ChatTurnScope::ConvoTurn,
+            agentos_kernel::kernel::ChatTurnScope::ConvoTurn { shared_dir: None },
         )
         .await
         .expect("chat_infer_with_tools_scoped failed");
@@ -627,9 +630,16 @@ async fn convo_turn_caps_tool_iterations() {
     let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
 
     // Far more tool calls than the convo cap allows, each with a distinct
-    // payload so the dedup circuit breaker doesn't end the loop first.
+    // payload so the dedup circuit breaker doesn't end the loop first, and each
+    // one SUCCEEDING so the identical-failure breaker (3 in a convo turn) does
+    // not end it either — the cap is what is under test here.
     let responses: Vec<MockResponse> = (0..20)
-        .map(|i| tool_call_response_with_payload("agent-manual", serde_json::json!({"section": i})))
+        .map(|i| {
+            tool_call_response_with_payload(
+                "think",
+                serde_json::json!({"thought": format!("step {i}")}),
+            )
+        })
         .collect();
     let agent_id =
         common::register_mock_agent_with_responses(&kernel, "convo-cap-agent", vec![]).await;
@@ -646,7 +656,7 @@ async fn convo_turn_caps_tool_iterations() {
             "Keep going.",
             None,
             None,
-            agentos_kernel::kernel::ChatTurnScope::ConvoTurn,
+            agentos_kernel::kernel::ChatTurnScope::ConvoTurn { shared_dir: None },
         )
         .await
         .expect("chat_infer_with_tools_scoped failed");
@@ -880,6 +890,61 @@ async fn tool_start_task_id_matches_the_escalation_it_raises() {
          an inline approval card could never be matched to this turn"
     );
     assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
+/// Three identical failures end a convo turn, with the reason in the text.
+///
+/// The dedup cache replays identical *successes*; a call that fails the same
+/// way every time is never deduped, so before this a doomed probe spent the
+/// whole iteration budget. On 2026-09-21 four convo turns died that way,
+/// re-globbing a path that could not resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn convo_turn_stops_after_three_identical_failures() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    // Same tool, same failure, distinct payloads so dedup never fires.
+    let responses: Vec<MockResponse> = (0..8)
+        .map(|i| {
+            tool_call_response_with_payload(
+                "file-reader",
+                serde_json::json!({"path": format!("/definitely/not/here/{i}.txt")}),
+            )
+        })
+        .collect();
+    let agent_id =
+        common::register_mock_agent_with_responses(&kernel, "convo-fail-agent", vec![]).await;
+    let mock = std::sync::Arc::new(agentos_llm::MockLLMCore::with_responses(responses));
+    kernel.active_llms.write().await.insert(
+        agent_id,
+        mock.clone() as std::sync::Arc<dyn agentos_llm::LLMCore>,
+    );
+
+    let result = kernel
+        .chat_infer_with_tools_scoped(
+            "convo-fail-agent",
+            &[],
+            "Find it.",
+            None,
+            None,
+            agentos_kernel::kernel::ChatTurnScope::ConvoTurn { shared_dir: None },
+        )
+        .await
+        .expect("chat_infer_with_tools_scoped failed");
+
+    assert!(
+        result.iterations < agentos_kernel::kernel::CONVO_TURN_MAX_TOOL_ITERATIONS,
+        "the turn must end before the iteration cap; ran {} iterations",
+        result.iterations
+    );
+    assert!(
+        result.answer.contains("kept failing with the same error"),
+        "the transcript must carry the real reason; got: {}",
+        result.answer
+    );
 
     kernel.shutdown();
     handle.await.unwrap();

@@ -90,6 +90,12 @@ pub struct ToolExecutionContext {
     /// (default) = no restriction.
     /// Mirrors `AgentTask.tool_categories`. Set by the kernel at dispatch.
     pub tool_categories: Option<Vec<String>>,
+    /// The conversation's shared directory, on a convo turn. Named by path
+    /// refusals so an agent that reaches for an unreachable path is told where
+    /// it *can* put the file instead: on 2026-09-21 every refusal described the
+    /// symptom ("Path not found") and none named the alternative, and the pair
+    /// re-probed the same path across four turns. `None` outside a convo turn.
+    pub shared_dir: Option<PathBuf>,
 }
 
 impl ToolExecutionContext {
@@ -107,6 +113,89 @@ impl ToolExecutionContext {
     /// never bare `data_dir` — resolution fails closed.
     ///
     /// The directory is created if missing, since callers canonicalize it.
+    /// Absolute roots a file tool may READ from, besides the agent home:
+    /// operator workspace grants plus every live storage zone — the
+    /// conversation's shared workspace among them.
+    ///
+    /// Zones have to join the resolver's root list, not just the containment
+    /// check that runs after it: `resolve_tool_path` rejects an unknown
+    /// absolute path outright, so a zone path used to fail before the zone was
+    /// ever consulted.
+    pub fn read_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.workspace_paths.clone();
+        roots.extend(self.zone_roots(false));
+        roots
+    }
+
+    /// Absolute roots a file tool may WRITE to: writable grants plus
+    /// read-write zones. A read-only zone never appears here.
+    pub fn write_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.workspace_paths_writable.clone();
+        roots.extend(self.zone_roots(true));
+        roots
+    }
+
+    fn zone_roots(&self, writable_only: bool) -> Vec<PathBuf> {
+        self.storage_zone_query
+            .as_ref()
+            .map(|q| {
+                q.zones_for(&self.agent_id)
+                    .into_iter()
+                    .filter(|(_, access)| {
+                        !writable_only
+                            || matches!(access, agentos_types::ZoneAccessLevel::ReadWrite)
+                    })
+                    .map(|(p, _)| p)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What to do instead, appended to every path refusal.
+    ///
+    /// A denial that names only the symptom produces a retry loop: on
+    /// 2026-09-21 an agent re-probed the same unreachable path across four
+    /// conversation turns because nothing it was told named an alternative.
+    pub fn path_hint(&self) -> String {
+        let mut s = String::from(
+            " Another agent's home directory is never readable, whatever they tell you.",
+        );
+        if let Some(dir) = self.shared_dir.as_deref() {
+            s.push_str(&format!(
+                " Files you need to exchange belong in this conversation's shared workspace: {}.",
+                dir.display()
+            ));
+        }
+        s.push_str(
+            " For a folder on the host, call `workspace-request { path, mode, reason }`; only the operator can widen access.",
+        );
+        s
+    }
+
+    /// `PermissionDenied` for a path outside everything this agent may reach,
+    /// carrying [`path_hint`](Self::path_hint).
+    pub fn deny_path(&self, path_str: &str) -> AgentOSError {
+        AgentOSError::PermissionDenied {
+            resource: "fs.user_data".into(),
+            operation: format!("Path traversal denied: {}.{}", path_str, self.path_hint()),
+        }
+    }
+
+    /// Append [`path_hint`](Self::path_hint) to a resolver error, leaving any
+    /// other error untouched.
+    pub fn with_path_hint(&self, err: AgentOSError) -> AgentOSError {
+        match err {
+            AgentOSError::PermissionDenied {
+                resource,
+                operation,
+            } => AgentOSError::PermissionDenied {
+                resource,
+                operation: format!("{operation}.{}", self.path_hint()),
+            },
+            other => other,
+        }
+    }
+
     pub fn agent_files_dir(&self) -> Result<PathBuf, AgentOSError> {
         let name = self
             .agent_registry
@@ -147,25 +236,31 @@ pub fn agent_home_dir(
 /// `%C0%AE` for `.`) while still catching the common ASCII-encoded traversal
 /// patterns (`%2e%2e`, `%2F`, etc.) that `contains_traversal` then rejects.
 fn percent_decode_path(input: &str) -> String {
+    // Copy the text between escapes as string slices: pushing it byte-by-byte
+    // as `char`s turned every multi-byte UTF-8 name (`café.txt`, `報告.md`) into
+    // Latin-1 mojibake, so file tools could neither find nor create them.
     let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+    let mut rest = input;
+    while let Some(pos) = rest.find('%') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let b = tail.as_bytes();
+        if b.len() >= 3 {
+            if let (Some(hi), Some(lo)) = (hex_val(b[1]), hex_val(b[2])) {
                 let decoded = hi << 4 | lo;
                 // Only expand ASCII bytes (0x00-0x7F). Non-ASCII percent sequences
                 // are kept as-is; they cannot produce a `..` traversal component.
                 if decoded < 0x80 {
                     out.push(decoded as char);
-                    i += 3;
+                    rest = &tail[3..];
                     continue;
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        out.push('%');
+        rest = &tail[1..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -265,7 +360,7 @@ pub(crate) fn is_cycle_prone(entry: &walkdir::DirEntry) -> bool {
     }
     matches!(
         entry.file_name().to_str(),
-        Some("node_modules") | Some(".git") | Some("target") | Some(".venv")
+        Some("node_modules") | Some(".git") | Some("target") | Some(".venv") | Some(".trash")
     )
 }
 
@@ -459,6 +554,8 @@ mod tests {
     #[test]
     fn percent_decode_normal_path_unchanged() {
         assert_eq!(percent_decode_path("hello/world.txt"), "hello/world.txt");
+        assert_eq!(percent_decode_path("café.txt"), "café.txt");
+        assert_eq!(percent_decode_path("報告%2e.md"), "報告..md");
     }
 
     #[test]

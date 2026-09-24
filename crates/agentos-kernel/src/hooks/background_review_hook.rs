@@ -500,6 +500,8 @@ impl ReviewProcedure {
                     .filter(|t| !t.is_empty())
                     .map(str::to_string),
                 expected_outcome: None,
+                input: None,
+                output_var: None,
             })
             .collect();
         if steps.is_empty() {
@@ -515,6 +517,7 @@ impl ReviewProcedure {
             },
             preconditions: Vec::new(),
             steps,
+            inputs: Vec::new(),
             postconditions: Vec::new(),
             success_count: 1,
             failure_count: 0,

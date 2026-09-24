@@ -26,6 +26,29 @@ status: complete
 
 ---
 
+## Installing a Release Binary
+
+From the first tagged release onward, the quickest install is the signed binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | bash
+
+# Lite build: no ONNX/MiniLM vector search, FTS5 lexical search only (linux-amd64)
+curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | AGENTOS_FLAVOR=lite bash
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `AGENTOS_VERSION` | `latest` | Release tag, e.g. `v1.0.0` |
+| `AGENTOS_INSTALL_DIR` | `~/.local/bin` | Where the `agentos` binary goes |
+| `AGENTOS_FLAVOR` | _(full)_ | `lite` for the no-embeddings build |
+
+| `AGENTOS_SKIP_SIG_VERIFY` | _(unset)_ | `1` installs on the checksum alone when no verifier is present |
+
+The script always verifies the SHA-256 checksum, requires the `.sig` asset, and verifies the signature against a public key pinned inside the script. It needs `minisign` (`apt install minisign`, `brew install minisign`, `dnf install minisign`) or `rsign` (`cargo install rsign2`) to do that, and **fails the install if neither is present** — the checksum ships from the same server as the binary, so it proves integrity but not authenticity. `AGENTOS_SKIP_SIG_VERIFY=1` downgrades that to a warning. Windows users have `scripts/install.ps1`.
+
+---
+
 ## Building from Source
 
 Clone the repository and build the entire workspace:
@@ -33,7 +56,7 @@ Clone the repository and build the entire workspace:
 ```bash
 # Clone
 git clone https://github.com/AjasMohammed/Agos.git
-cd agentos
+cd Agos
 
 # Build all 28 workspace crates (debug mode)
 cargo build --workspace
@@ -46,6 +69,18 @@ cargo build --workspace --release
 ```
 
 The CLI binary is at `target/debug/agentos` (or `target/release/agentos` for release builds).
+
+Two more build shapes matter for deployment:
+
+```bash
+# What releases ship: thin-LTO `dist` profile (~108 MiB vs ~177 MiB for `release`)
+cargo build --profile dist -p agentos-cli
+
+# Lite: no ONNX Runtime / MiniLM. ~87 MiB binary, ~134 MB idle RSS, boots in ~0.3 s
+cargo build --profile dist -p agentos-cli --no-default-features
+```
+
+The embedder is most of the footprint — roughly 200 MB of idle RSS and the one-time ~23 MB model download on first boot. A full build can also skip it at runtime with `disable_embedder = true` under `[memory]`. In either case semantic (vector) retrieval is off and FTS5 lexical search keeps working. Measured numbers: `docs/guide/benchmarks.md`.
 
 > [!tip] Lint and Format
 > CI enforces these checks. Run them locally before committing:
@@ -340,7 +375,7 @@ $ ./target/debug/agentos start
 Enter vault passphrase: ********
 [INFO] Audit log initialized at /tmp/agentos/audit.db
 [INFO] Secrets vault opened
-[INFO] Loaded 132 core tools
+[INFO] Loaded 136 core tools
 [INFO] Bus server listening on /tmp/agentos/agentos.sock
 [INFO] Kernel started successfully
 

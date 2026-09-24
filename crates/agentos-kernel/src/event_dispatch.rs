@@ -746,7 +746,9 @@ impl Kernel {
         // agent-message", and every reply would fan out again. Bystanders are
         // dropped outright: a DM addressed to someone else is not their business,
         // so it does not go to their inbox either. Fails open if the payload has
-        // no parseable `to_agent`.
+        // no parseable `to_agent`. Since the DM-session reroute, this reaction
+        // is the *fallback* path — a DM that opened a thread is answered by its
+        // conversation runner and skipped just below. Do not "fix" that skip.
         if event.event_type == EventType::DirectMessageReceived {
             if let Some(to) = event
                 .payload
@@ -755,6 +757,37 @@ impl Kernel {
                 .and_then(|s| s.parse::<AgentID>().ok())
             {
                 matching_subs.retain(|sub| sub.agent_id == to);
+            }
+        }
+
+        // A DM that reached a conversation thread is being answered there, with
+        // the whole transcript in context. Spawning the old one-shot reaction
+        // task on top would answer the same message a second time from a blank
+        // context window — and that reply would re-enter `agent-message`. The
+        // event itself still flows (audit, realtime tee, deliberate
+        // subscribers); only the reaction is dropped. A DM with no `convo_id` —
+        // offline recipient, or a thread that failed to open — still takes the
+        // reaction path, which is what keeps this change reversible.
+        if event.event_type == EventType::DirectMessageReceived {
+            if let Some(convo_id) = event.payload.get("convo_id").and_then(|v| v.as_str()) {
+                for sub in &matching_subs {
+                    // Passive record only — `write_event` is a plain insert with
+                    // no kernel events, so it carries no loop risk.
+                    self.agent_inbox_writer
+                        .write_event(
+                            sub.agent_id,
+                            sub.id.to_string(),
+                            event.id.to_string(),
+                            "DirectMessageReceived",
+                            event.payload.clone(),
+                        )
+                        .await;
+                }
+                tracing::debug!(
+                    convo_id,
+                    "DM answered in a conversation thread — no reaction task"
+                );
+                matching_subs.clear();
             }
         }
 

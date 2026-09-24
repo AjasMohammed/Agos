@@ -70,7 +70,7 @@ pub struct ToolExecutionContext {
 
 All built-in tools ship as `trust_tier = "core"` manifests in `tools/core/`. They are compiled into the kernel as Rust code — no external binary or WASM module is loaded.
 
-The kernel registers **132 built-in tools** spanning sixteen domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, and host introspection. Use the `list-tools` tool to enumerate all tools at runtime, `search-tools` for keyword search, and `describe-tool` for the full input schema of any individual tool.
+The kernel registers **136 built-in tools** (one manifest each under `tools/core/`) spanning these domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, host introspection, event self-subscription, scheduling, channels & artifacts, user files, containers, and IoT. Use the `list-tools` tool to enumerate all tools at runtime, `search-tools` for keyword search, and `describe-tool` for the full input schema of any individual tool.
 
 ### `file-reader`
 
@@ -78,7 +78,7 @@ Read files from the agent's data directory with line-based pagination and direct
 
 | | |
 |---|---|
-| **Permission** | `fs.user_data:r` |
+| **Permission** | `fs.user_data:r` (own home); plus `fs.workspace:r` and a folder grant for absolute host paths |
 | **Network** | No |
 | **fs_write** | No |
 
@@ -125,7 +125,7 @@ Write files to the agent's data directory.
 
 | | |
 |---|---|
-| **Permission** | `fs.user_data:w` |
+| **Permission** | `fs.user_data:w` (own home); plus `fs.workspace:w` and a folder grant for absolute host paths |
 | **Network** | No |
 | **fs_write** | Yes |
 
@@ -251,7 +251,7 @@ Execute a shell command inside a bwrap namespace sandbox.
 
 | | |
 |---|---|
-| **Permission** | `process.exec:x`, `fs.user_data:w` |
+| **Permission** | `process.exec:x`, `fs.user_data:rw` |
 | **Network** | No (opt-in) |
 | **fs_write** | Yes (data dir only) |
 
@@ -299,7 +299,7 @@ Delegate a subtask to another agent.
 
 | | |
 |---|---|
-| **Permission** | `agent.delegate:x` |
+| **Permission** | `agent.message:x` |
 | **Network** | No |
 | **fs_write** | No |
 
@@ -669,21 +669,21 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `file-editor` | `fs.user_data:w` | Apply line-range edits (insert, replace, delete) to existing files |
-| `file-delete` | `fs.user_data:w` | Delete a file from the data directory |
-| `file-move` | `fs.user_data:w` | Move or rename a file within the data directory |
-| `file-diff` | `fs.user_data:r` | Compute unified diff between two files or between a file and a string |
-| `file-glob` | `fs.user_data:r` | Find files matching a glob pattern |
-| `file-grep` | `fs.user_data:r` | Search file contents by regex pattern |
+| `file-editor` | `fs.user_data:w`, `fs.workspace:w` | Apply line-range edits (insert, replace, delete) to existing files |
+| `file-delete` | `fs.user_data:w`, `fs.workspace:w` | Delete a file from the data directory |
+| `file-move` | `fs.user_data:w`, `fs.workspace:w` | Move or rename a file within the data directory |
+| `file-diff` | `fs.user_data:r`, `fs.workspace:r` | Compute unified diff between two files or between a file and a string |
+| `file-glob` | `fs.user_data:r`, `fs.workspace:r` | Find files matching a glob pattern |
+| `file-grep` | `fs.user_data:r`, `fs.workspace:r` | Search file contents by regex pattern |
 
 #### Memory & Procedural
 
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `memory-read` | `memory.semantic:r` | Read a specific memory entry by key |
-| `memory-delete` | `memory.semantic:w` | Delete a memory entry by key |
-| `memory-stats` | `memory.semantic:r` | Memory usage statistics (counts, sizes per tier) |
-| `episodic-list` | `memory.episodic:r` | List episodic memory entries for a task |
+| `memory-read` | `memory.semantic:r`, `memory.episodic:r` | Read a specific memory entry by key |
+| `memory-delete` | `memory.semantic:w`, `memory.episodic:w` | Delete a memory entry by key |
+| `memory-stats` | none | Memory usage statistics (counts, sizes per tier) |
+| `episodic-list` | none | List episodic memory entries for a task |
 | `procedure-create` | `memory.procedural:w` | Record a reusable step-by-step procedure |
 | `procedure-search` | `memory.procedural:r` | Search procedures by natural language query |
 | `procedure-list` | `memory.procedural:r` | List all recorded procedures |
@@ -700,22 +700,22 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `scratch-read` | `agent.scratch:r` | Read a scratchpad page |
-| `scratch-write` | `agent.scratch:w` | Write/update a scratchpad page |
-| `scratch-search` | `agent.scratch:r` | Search scratchpad pages |
-| `scratch-delete` | `agent.scratch:w` | Delete a scratchpad page |
-| `scratch-links` | `agent.scratch:r` | List wikilinks for a page |
-| `scratch-graph` | `agent.scratch:r` | Show wikilink graph traversal |
+| `scratch-read` | `scratchpad:r` | Read a scratchpad page |
+| `scratch-write` | `scratchpad:w` | Write/update a scratchpad page |
+| `scratch-search` | `scratchpad:r` | Search scratchpad pages |
+| `scratch-delete` | `scratchpad:w` | Delete a scratchpad page |
+| `scratch-links` | `scratchpad:r` | List wikilinks for a page |
+| `scratch-graph` | `scratchpad:r` | Show wikilink graph traversal |
 
 #### Agent Coordination
 
 | Tool | Permission | Description |
 |------|------------|-------------|
 | `agent-list` | `agent.registry:r` | List registered agents and their status |
-| `agent-call` | `agent.rpc:x` | Invoke another agent via RPC |
+| `agent-call` | `agent.call:x` | Invoke another agent via RPC |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
-| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent and block until it finishes (use `spawn-async` for fire-and-forget) |
+| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent and block until it finishes (use `task-spawn-async` for fire-and-forget) |
 | `spawn-agent` | `agent.spawn:x` | Spawn a child sub-agent task with scoped permissions and context handoff |
 | `await-agents` | `agent.spawn:x` | Wait for one or more sub-agent tasks and collect their results |
 | `verify-output` | `agent.spawn:x` | Spawn a critic agent to validate an output against criteria |
@@ -733,14 +733,14 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `context-memory-read` | `agent.context:r` | Read agent's context memory |
-| `context-memory-update` | `agent.context:w` | Update agent's context memory |
+| `context-memory-read` | `memory.context:r` | Read agent's context memory |
+| `context-memory-update` | `memory.context:w` | Update agent's context memory |
 
 #### Escalation
 
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `escalation-status` | `escalation.pending:rq` | Query pending escalation status |
+| `escalation-status` | `escalation.query:q` | Query pending escalation status |
 
 #### Hardware
 
@@ -749,14 +749,14 @@ These tools wrap the HAL drivers — each one runs through the device approval w
 | Tool | Permission | Description |
 |------|------------|-------------|
 | `hardware-info` | `hardware.system:r` | Cross-driver overview: CPU, memory, disk, GPU, sensors |
-| `audio` | `hardware.audio:x` | Capture and playback via PipeWire/PulseAudio |
-| `bluetooth` | `hardware.bluetooth:x` | Scan, pair, and connect to Bluetooth devices |
-| `display-config` | `hardware.display:x` | Apply / revert display output configuration |
+| `audio` | `hardware.audio.list:r`, `hardware.audio.capture:rx`, `hardware.audio.playback:x`, `hardware.audio.volume:rw` | Capture and playback via PipeWire/PulseAudio |
+| `bluetooth` | `hardware.bluetooth.list:r`, `hardware.bluetooth.power:x`, `hardware.bluetooth.scan:o`, `hardware.bluetooth.pair:x`, `hardware.bluetooth.connection:x`, `hardware.bluetooth.gatt:rw` | Scan, pair, and connect to Bluetooth devices |
+| `display-config` | `hardware.display:rq`, `hardware.display.config:w` | Apply / revert display output configuration |
 | `printer` | `hardware.printer:x` | Submit and cancel CUPS print jobs |
-| `raw-usb` | `hardware.raw-usb:x` | Open USB devices and run bulk/interrupt/control transfers |
-| `usb-storage` | `hardware.usb:rx` | Mount, unmount, and eject USB mass storage |
-| `webcam` | `hardware.webcam:x` | Single-frame capture and burst capture via Video4Linux |
-| `wifi` | `hardware.wifi.*` | Radio/interface status, AP scan, connect/disconnect, radio toggle |
+| `raw-usb` | `hardware.raw-usb.list:r`, `hardware.raw-usb.session:x`, `hardware.raw-usb.transfer:rw`, `hardware.raw-usb.control:rw` | Open USB devices and run bulk/interrupt/control transfers |
+| `usb-storage` | `hardware.usb-storage:x` | Mount, unmount, and eject USB mass storage |
+| `webcam` | `hardware.webcam.list:r`, `hardware.webcam.capture:rx` | Single-frame capture and burst capture via Video4Linux |
+| `wifi` | `hardware.wifi.list:r`, `hardware.wifi.scan:o`, `hardware.wifi.connection:x`, `hardware.wifi.radio:x` | Radio/interface status, AP scan, connect/disconnect, radio toggle |
 | `sys-monitor` | `hardware.system:r` | Streaming system metrics (CPU, memory, disk I/O) |
 
 #### Utilities
@@ -1084,12 +1084,14 @@ Six tools for reading and managing the agent's async notification inbox. Notific
 
 | Tool | Description | Permissions |
 |---|---|---|
-| `agent-inbox-list` | List unread and recent notifications with title and kind | `agent.inbox:r` |
-| `agent-inbox-read` | Mark a notification as read and return its full body | `agent.inbox:r` |
-| `agent-inbox-dismiss` | Permanently delete a notification from the inbox | `agent.inbox:rw` |
-| `agent-messages-list` | List unread messages from other agents, grouped by sender | `agent.message:r` |
-| `agent-messages-read` | Mark an agent-to-agent message as read and return its body | `agent.message:r` |
-| `agent-messages-dismiss` | Delete an agent-to-agent message from the inbox | `agent.message:rw` |
+| `agent-inbox-list` | List unread and recent notifications with title and kind | none |
+| `agent-inbox-read` | Mark a notification as read and return its full body | none |
+| `agent-inbox-dismiss` | Permanently delete a notification from the inbox | none |
+| `agent-messages-list` | List unread messages from other agents, grouped by sender | none |
+| `agent-messages-read` | Mark an agent-to-agent message as read and return its body | none |
+| `agent-messages-dismiss` | Delete an agent-to-agent message from the inbox | none |
+
+The inbox tools declare no permissions — each is hard-scoped to the calling agent's own inbox, so there is nothing to grant.
 
 The agent's system prompt includes a compact awareness segment when either inbox is non-empty:
 
@@ -1105,22 +1107,83 @@ The segment renders nothing when both inboxes are empty — zero prompt overhead
 
 ---
 
-## Schedule Inspection Tools
+## Scheduling Tools
 
-Four tools for agents to introspect their own scheduled tasks and run history.
+Agents create and inspect their own deferred work. Each schedule fires in one of three modes: `notify` (no LLM — just a message), `tool` (one tool call), or `task` (an LLM task at fire time).
 
-| Tool | Description |
-|---|---|
-| `list-my-schedules` | List all cron, once, and timer schedules owned by this agent |
-| `get-schedule-runs` | Retrieve per-fire run history for a specific schedule ID |
-| `get-task-logs` | Fetch execution logs for a task spawned by a schedule |
-| `schedule-once` | Schedule a task to run exactly once at a specified ISO-8601 time |
+| Tool | Description | Permissions |
+|---|---|---|
+| `schedule-once` | Run exactly once at a specified ISO-8601 time | `schedule.job:w` |
+| `schedule-recurring` | Create a cron-scheduled recurring job | `schedule.job:w` |
+| `schedule-control` | Pause, resume, or delete a schedule by name | `schedule.job:w` |
+| `cancel-once-job` / `list-once-jobs` | Cancel / list one-shot jobs | `schedule.job:w` / `:r` |
+| `set-timer` | Short relative delay ("in 10 minutes") | `schedule.timer:w` |
+| `cancel-timer` / `list-timers` | Cancel / list timers | `schedule.timer:w` / `:r` |
+| `list-my-schedules` | List all cron, once, and timer schedules owned by this agent | `schedule.self:r` |
+| `get-schedule-runs` | Per-fire run history for a schedule, once-job, or timer the agent owns | `schedule.self:r` |
+| `get-task-logs` | Result + audit trail of one scheduled run, keyed by `run_id` | `schedule.self:r` |
+
+---
+
+## Event Self-Subscription Tools
+
+Agents subscribe themselves to kernel events from inside the tool loop; a matching event dispatches a new task to the subscriber. All four need the coarse gate `events.stream:o`, and subscribing additionally needs `events.<category>:o` for the category involved. See [[12-Event System]].
+
+| Tool | Description | Risk class |
+|---|---|---|
+| `event-list-available` | Categories, event types, and which ones this agent may subscribe to | `readonly_scoped` |
+| `event-subscribe` | Create a subscription (`event_filter`, optional `payload_filter`, `throttle`, `priority`) | `control_plane` |
+| `event-list-subscriptions` | List the agent's own subscriptions | `readonly_scoped` |
+| `event-unsubscribe` | Cancel one of the agent's own subscriptions | `write_scoped` |
+
+---
+
+## Channels, Artifacts, and User Files
+
+| Tool | Description | Permissions |
+|---|---|---|
+| `channel-send` | Send text and/or one media item to **one** connected channel, by display name or ID. Media: `file_path` (the agent's own file), `file_id` (a file the user sent), `image_url` / `document_url` / `image_urls` (public URLs). File uploads are Telegram-only. | `channel.send:w` |
+| `speak` | Text-to-speech. Posts `text` (max 4000 chars, optional `voice`) to the operator's `[tts]` endpoint and saves the mp3 under `speech/` in the agent's files; returns the path. Does not play or send — follow with `audio` playback or `channel-send` `file_path`. Errors clearly when `[tts].enabled = false`. | `fs.user_data:w` |
+| `artifact-write` | Publish a rendered document — `kind` = `markdown` (default), `slides`, or `html` — and get back a `/artifacts/<id>` viewer URL. Pass the returned `artifact_id` to revise in place. Content cap 2 MiB. | `fs.artifacts:w` |
+| `file-publish` | Show the user a file from the agent's workspace (image, audio, video, PDF): copies it into the file registry and returns a `/artifacts/<id>` URL plus a markdown snippet the chat renders inline. MIME comes from the file's bytes, never its extension; `warning` flags a mismatch. Cap 50 MiB. | `fs.artifacts:w`, `fs.user_data:r` |
+| `user-file-list` | List files the user uploaded or sent over a channel, newest first | `fs.user_data:r` |
+| `user-file-reader` | Read one of those files by `file_id` (preferred) or `file_name` | `fs.user_data:r` |
+| `chat-search` | Full-text search the agent's own past chat sessions | `memory.episodic:r` |
+
+`channel-send` targets one channel; `notify-user` fans out to every delivery adapter plus the inbox. HTML artifacts render under a sandbox CSP: no external scripts, styles, fonts, or images, no network, no form submission, no new windows — everything must be inline. A blocked load fails silently (blank artifact, no error).
+
+---
+
+## Container and IoT Tools
+
+| Tool | Description | Permissions |
+|---|---|---|
+| `container-create` / `container-exec` / `container-destroy` | Provision a short-lived container, run a command in it, tear it down | `container.create:x` / `container.exec:x` / `container.destroy:x` |
+| `container-list` / `container-logs` | List active containers; read a container's logs | `container.list:r` / `container.logs:r` |
+| `hardware-get-twin` / `hardware-set-desired` | Read a device twin; set its desired state (checked by the safety engine) | `hardware.iot:r` / `:w` |
+| `iot-ha-state` / `iot-ha-call-service` | Read a Home Assistant entity; call a service | `hardware.homeassistant:r` / `:w` |
+| `iot-mqtt-subscribe` / `iot-mqtt-publish` | Read from / publish to an MQTT topic | `hardware.mqtt:r` / `:w` |
+
+Every state-changing IoT tool is `control_plane`, so it always raises an operator approval.
+
+---
+
+## More Coordination and Skill Tools
+
+| Tool | Description | Permissions |
+|---|---|---|
+| `task-spawn-async` | Start a task on another agent **without** blocking; poll with `task-status`. (`task-delegate` blocks until the child finishes.) | `agent.spawn:x` |
+| `start-conversation` | Start a live turn-taking conversation between two or more registered agents | `agent.spawn:x` |
+| `a2a-delegate` | Delegate a task to an external A2A-compliant agent | `network.outbound:x`, `a2a.delegate:x` |
+| `skill-prompt` | Fetch an installed skill's system prompt, tool allowlist, and budget | none |
+| `skill-create` | Author a new skill at runtime — trust tier forced to `community`, gated by `control_plane` approval | none |
+| `host-package-install` | Install a host OS package outside the sandbox. Disabled unless `[tools.host_package].enabled = true`; package must be allowlisted; always needs operator approval | `system.package:x`, `net.outbound:x` |
 
 ---
 
 ## Tool Discovery and Pagination
 
-Four tools for agents to navigate the full 132-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.
+Four tools for agents to navigate the full 136-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.
 
 | Tool | Description |
 |---|---|
@@ -1137,10 +1200,10 @@ Four HAL-backed tools for Linux host introspection. All are read-only and degrad
 
 | Tool | Description | Permissions |
 |---|---|---|
-| `network-sockets` | List open TCP/UDP sockets from `/proc/net/{tcp,udp}`; maps inodes to PIDs | `hardware.network:r` |
-| `system-mounts` | Enumerate mounted filesystems from `/proc/mounts` with `statvfs` capacity | `hardware.storage:r` |
-| `system-open-files` | Walk per-process `/proc/<pid>/fd` to list open file descriptors | `hardware.sensors:r` |
-| `system-services` | List and query systemd service units via D-Bus (read-only: list, status, logs) | `hardware.sensors:r` |
+| `network-sockets` | List open TCP/UDP sockets from `/proc/net/{tcp,udp}`; maps inodes to PIDs | `network.sockets:r` |
+| `system-mounts` | Enumerate mounted filesystems from `/proc/mounts` with `statvfs` capacity | `system.mounts:r` |
+| `system-open-files` | Walk per-process `/proc/<pid>/fd` to list open file descriptors | `system.open_files:r` |
+| `system-services` | List and query systemd service units via D-Bus (read-only: list, status, logs) | `system.services:r` |
 
 ---
 

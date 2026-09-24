@@ -64,7 +64,7 @@ agentos channel pair approve ABC123
 
 Now send "hi". The first time the agent wants to run something with side effects, the bot asks you to approve or deny in the chat. Nothing else on Telegram can talk to it: unpaired senders are ignored.
 
-No Telegram? `agentos task run --agent assistant "Summarise the files in my workspace"` works from the terminal, and `agentos web serve` gives a local web UI.
+No Telegram? `agentos task run --agent assistant "Summarise the files in my workspace"` works from the terminal, and `agentos start` with `[api] enabled = true` in config serves the REST API the React panel talks to.
 
 ## Security: what we test against
 

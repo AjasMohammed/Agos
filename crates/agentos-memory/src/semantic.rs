@@ -767,7 +767,7 @@ impl SemanticStore {
     /// Delete memory entries older than `max_age` and return the number deleted.
     ///
     /// This is the archival sweep for Tier 3 persistent memory (Spec §11).
-    /// Entries whose `updated_at` timestamp is older than `max_age` ago are removed.
+    /// Entries neither used nor updated within `max_age` are removed.
     /// Offloads SQLite work to the blocking thread pool.
     pub async fn sweep_old_entries(
         &self,
@@ -788,7 +788,7 @@ impl SemanticStore {
 
             // Delete chunks first (FK cascade should handle this, but be explicit)
             tx.execute(
-                "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE updated_at < ?1)",
+                "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE COALESCE(last_used_at, updated_at) < ?1)",
                 params![cutoff],
             )
             .map_err(|e| {
@@ -797,7 +797,10 @@ impl SemanticStore {
 
             let deleted = tx
                 .execute(
-                    "DELETE FROM semantic_memory WHERE updated_at < ?1",
+                    // `updated_at` never moves (writes insert new rows), so aging on
+                    // it alone deleted every fact 90 days after it was learned no
+                    // matter how often it was recalled. Age on last use instead.
+                    "DELETE FROM semantic_memory WHERE COALESCE(last_used_at, updated_at) < ?1",
                     params![cutoff],
                 )
                 .map_err(|e| {
@@ -966,6 +969,46 @@ impl SemanticStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Writes insert rows, so `updated_at` never moves: the sweep used to delete
+    /// every learned fact 90 days after it was written, however often recalled.
+    #[tokio::test]
+    async fn sweep_spares_a_fact_that_is_still_recalled() {
+        let dir = TempDir::new().unwrap();
+        let store =
+            SemanticStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap();
+        let used = store
+            .write("name", "user is Ajas", None, &[])
+            .await
+            .unwrap();
+        let stale = store.write("old", "stale fact", None, &[]).await.unwrap();
+        let old = (Utc::now() - chrono::Duration::days(200)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE semantic_memory SET updated_at = ?1", params![old])
+            .unwrap();
+        store.touch(std::slice::from_ref(&used)).await.unwrap();
+
+        let deleted = store
+            .sweep_old_entries(std::time::Duration::from_secs(90 * 86_400))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let left: Vec<String> = store
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT id FROM semantic_memory")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec![used]);
+        assert!(!left.contains(&stale));
+    }
 
     // This test exercises true semantic similarity ranking, which requires a
     // real embedder. Marked `#[ignore]` because ONNX graph optimization

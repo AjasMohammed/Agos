@@ -30,6 +30,9 @@ mod chat_manifest_selection;
 #[path = "e2e/convo_runner_e2e.rs"]
 mod convo_runner_e2e;
 
+#[path = "e2e/convo_collaboration.rs"]
+mod convo_collaboration;
+
 #[path = "e2e/native_tool_call_round_trip.rs"]
 mod native_tool_call_round_trip;
 
@@ -56,3 +59,6 @@ mod runaway_containment_e2e;
 
 #[path = "e2e/agent_inbox_e2e.rs"]
 mod agent_inbox_e2e;
+
+#[path = "e2e/procedure_run_e2e.rs"]
+mod procedure_run_e2e;

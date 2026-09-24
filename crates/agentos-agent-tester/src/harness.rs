@@ -74,6 +74,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
             events: Default::default(),
+            convo: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
             context_compaction: Default::default(),
@@ -149,6 +150,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
+        resource_guard: Default::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
         // Tests must never reach the host notification daemon: the desktop
@@ -172,7 +174,6 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         approval: Default::default(),
         context: Default::default(),
         api: Default::default(),
-        web: Default::default(),
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
@@ -180,6 +181,8 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         storage: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        tts: Default::default(),
+        procedures: Default::default(),
         agent_heartbeat: Default::default(),
         agent_budget: Default::default(),
         hal: Default::default(),
@@ -236,21 +239,7 @@ fn create_llm_adapter(
 /// Exact model match takes priority over a provider-level wildcard `"*"` entry.
 /// Falls back to zero-cost pricing if neither is found.
 fn find_pricing(provider: &str, model: &str) -> ModelPricing {
-    let table = default_pricing_table();
-    let exact = table
-        .iter()
-        .find(|p| p.provider == provider && p.model == model)
-        .cloned();
-    let wildcard = table
-        .iter()
-        .find(|p| p.provider == provider && p.model == "*")
-        .cloned();
-    exact.or(wildcard).unwrap_or(ModelPricing {
-        provider: provider.to_string(),
-        model: model.to_string(),
-        input_per_1k: 0.0,
-        output_per_1k: 0.0,
-    })
+    agentos_llm::lookup_pricing(&default_pricing_table(), provider, model)
 }
 
 /// Push the assistant's response text into the context window and return whether
@@ -788,6 +777,7 @@ Your agent name is: {}"#,
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         self.kernel

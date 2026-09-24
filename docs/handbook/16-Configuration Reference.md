@@ -38,6 +38,12 @@ Core kernel operational limits.
 | `health_port` | integer | _(absent)_ | `9091` | HTTP port for the health check endpoint (production only) |
 | `state_db_path` | string | `/tmp/agentos/data/kernel_state.db` | `/var/lib/agentos/data/kernel_state.db` | SQLite DB for persisted runtime state (tasks, escalations, cost snapshots) |
 | `sandbox_policy` | string | `trust_aware` | `trust_aware` | Sandbox enforcement mode: `trust_aware` (Core tools in-process, Community/Verified sandboxed), `always` (all sandbox-eligible tools sandboxed), `never` (no sandboxing — development only, NOT for production) |
+| `health_bind` | string | `127.0.0.1` | `127.0.0.1` | Bind address for the health/metrics server. Loopback by default — `/metrics` exposes operational internals. |
+| `max_queued_per_agent` | integer | `500` | `500` | Max queued (not running) tasks per agent. Past this, enqueues are rejected and marked Failed. |
+| `boot_replay_max_age_hours` | integer | `24` | `24` | Queued tasks older than this are cancelled at boot instead of replayed, so a runaway backlog cannot resurrect itself on every restart. `0` disables. |
+| `task_retention_days` | integer | `7` | `7` | Terminal scheduler rows older than this are deleted by the 10-minute sweep. `0` disables. |
+| `failure_streak_limit` | integer | `25` | `25` | Consecutive failures, each faster than `failure_streak_fast_ms`, before an agent is auto-paused. `0` disables. |
+| `failure_streak_fast_ms` | integer | `5000` | `5000` | What counts as a "fast" failure for the streak above. |
 | `max_concurrent_sandbox_children` | integer | number of CPUs (min 2) | number of CPUs (min 2) | Maximum concurrent sandbox child processes. Defaults to the number of logical CPUs (minimum 2). Increase when running many Community/Verified tools in parallel. |
 
 ---
@@ -90,6 +96,8 @@ Event dispatch channel configuration.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `channel_capacity` | integer | `1024` | Capacity of the internal event broadcast channel. Events dropped when full (with warning logged). Must be > 0. |
+| `reaction_batch_window_secs` | integer | `5` | Per-agent event-reaction batching: matching events are coalesced for this many seconds, then spawn one task carrying a digest. Critical subscriptions and agent-to-agent messages bypass it. `0` = one task per event. |
+| `reaction_batch_max_events` | integer | `200` | Flush an agent's batch early once it holds this many events. |
 
 ---
 
@@ -254,6 +262,8 @@ Remote LLM provider base URLs.
 | `gemini_base_url` | string | `https://generativelanguage.googleapis.com/v1beta` | `https://generativelanguage.googleapis.com/v1beta` | Google Gemini API base URL. |
 | `max_tokens` | integer | `8192` | `8192` | Maximum output tokens for Anthropic requests. Claude 3 supports up to 8192, Claude 3.5 up to 16384. |
 | `ollama_context_window` | integer | `32768` | `32768` | Context window size passed to Ollama as `num_ctx`. Set to match your model's actual context size. |
+| `prompt_cache_ttl` | string | `"5m"` | `"5m"` | Anthropic prompt-cache TTL: `"5m"` or `"1h"`. Agents whose turns are more than 5 minutes apart (scheduled, heartbeat) never get a cache read on `5m`; `1h` keeps the prefix warm, at a higher cache-write rate. |
+| `claude_code_resume` | bool | `false` | `false` | Let the `claude-code` adapter `--resume` the prior CLI session and send only the new turn's delta. Guarded by a prefix fingerprint that falls back to a full send on divergence. |
 
 ---
 
@@ -264,6 +274,8 @@ Embedding model cache location.
 | Key | Type | Dev Default | Prod Default | Description |
 |---|---|---|---|---|
 | `model_cache_dir` | string | `models` | `/var/lib/agentos/data/models` | Directory where embedding model weights are cached |
+| `retention_days` | integer | `90` | `90` | Age after which episodic/semantic/procedural entries are swept. `0` = unbounded. |
+| `embedder_init_timeout_secs` | integer | `120` | `120` | Max seconds for embedding-model init at boot (first boot downloads ~23 MB). On timeout the kernel continues with semantic retrieval off; FTS5 lexical search is unaffected. |
 
 ---
 
@@ -477,6 +489,11 @@ REST API and WebSocket server. When enabled, the kernel starts an HTTP API serve
 | `enabled` | bool | `false` | Start the API server at kernel boot. Disabled by default — must be explicitly enabled. |
 | `host` | string | `"127.0.0.1"` | IP address to bind the API server. Use `"0.0.0.0"` to expose on all interfaces (use a reverse proxy in production). |
 | `port` | integer | `8080` | TCP port for the API server. The WebSocket endpoint (`/api/v1/ws`) is served on the same port. |
+| `docs_enabled` | bool | `true` (prod: `false`) | Serve the interactive API-docs UI at `GET /api/v1/docs`. The OpenAPI contract at `/api/v1/openapi.json` stays public regardless. |
+| `operator_token` | string | _(unset)_ | Operator credential for `POST /api/v1/auth/login`. Unset = login disabled (503). Prefer an env-substituted value. |
+| `cors_allowed_origins` | array | `[]` | Cross-origin allowlist for the REST API (full origins: scheme + host + port). Needed for a browser SPA such as the control panel served from another origin. |
+| `refresh_enabled` | bool | `false` | Enable `POST /api/v1/auth/refresh` (rotate a valid key for a fresh one). |
+| `config_writable` | bool | `false` | Allow `PUT /api/v1/config/{key}` to write the config file at runtime. Enable only on trusted control-plane deployments. |
 
 **Example:**
 
@@ -487,7 +504,7 @@ host = "127.0.0.1"
 port = 8080
 ```
 
-**CORS:** The server automatically allows CORS from the configured `host:port`. Requests from other origins are rejected.
+**CORS:** The server allows its own `host:port` plus any origin listed in `cors_allowed_origins`. Requests from other origins are rejected.
 
 **Rate limiting:** 120-request burst, 2 requests/second per IP.
 
@@ -580,6 +597,138 @@ Per-agent approval mode overrides, keyed by agent display name. Each value is on
 research-bot = "auto"
 writer-bot   = "ask_always"
 ```
+
+---
+
+## `[tools.discovery]`
+
+Deferred tool loading. Sending all 136 tool schemas on every call costs 13–22k tokens, so the kernel admits a *working set* into the native tool array and leaves the rest reachable through `search-tools`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `l0_max_names_per_category` | integer | `5` | Usage-ranked tool names shown per category in the tier-0 index that every system prompt carries. |
+| `l0_max_tokens` | integer | `200` | Soft cap on that index. |
+| `default_scoping` | bool | `true` | Admit a working set instead of every tool. `false` always sends everything. |
+| `scoping_classifier` | string | `"heuristic"` | Only consulted for tasks that pass an explicit `tool_categories` override. |
+| `pinned_tools` | array | `["think", "ask-user", "notify-user", "datetime", "agent-self"]` | Always in the tool array (tier T0), along with meta-tagged discovery tools. |
+| `pinned_usage_top_n` | integer | `3` | The agent's N most-used tools also join T0. |
+| `working_set_size` | integer | `8` | Tier T1: tools picked by hybrid retrieval over the task prompt. |
+| `armed_cap` | integer | `20` | Tier T2: tools armed on demand via `search-tools` / `describe-tool`; oldest evicted past this cap. |
+| `rearm_on_describe` | bool | `true` | Arm a deferred tool's schema mid-task after a successful `describe-tool` or a `search-tools` hit. Costs one tools-block cache bust per armed tool. |
+| `provider_native_deferral` | bool | `true` | On Anthropic, send the whole catalogue with the deferred tail flagged and let the API's tool search expand hits. Falls back to kernel emulation elsewhere. |
+
+---
+
+## `[chat]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enforce_final_tag` | bool | `false` | Require `<final>…</final>` around chat answers. Off = stream everything outside tool-intent blocks. |
+| `max_tool_iterations` | integer | `25` | Hard cap on tool-calling iterations per chat turn. |
+| `nudge_every_turns` | integer | `10` | Every N user turns, inject a one-line nudge asking the agent to persist durable learnings. `0` disables. |
+
+---
+
+## `[memory.background_review]` and `[memory.lifecycle]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `background_review.enabled` | bool | `true` | After a non-trivial task or chat turn, a detached inference pass extracts a reusable procedure, a context-memory patch, and/or durable facts. Never delays the reply. |
+| `background_review.min_tool_calls` | integer | `5` | Review only tasks with at least this many tool calls (a task that recovered from an error always qualifies). |
+| `background_review.max_episodes` | integer | `40` | Episodes fed to one review. |
+| `background_review.max_facts` | integer | `3` | Durable facts written per review. |
+| `lifecycle.reinforcement_enabled` | bool | `true` | Touch retrieved memories on injection; feed task success/failure back into procedure confidence. |
+| `lifecycle.stale_after_days` | integer | `30` | Unused procedures become `stale`. |
+| `lifecycle.archive_after_days` | integer | `90` | …then `archived`. The curator never deletes; only the retention sweep prunes, and only archived rows. Procedures tagged `pinned` are exempt. `0` on either disables the curator. |
+
+---
+
+## `[user_profile]` and `[personalization]`
+
+The profile store collects accepted preference proposals. Nothing is injected into agent context until `[personalization].enabled = true`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `user_profile.enabled` | bool | `true` | Enable the store (harmless when empty). |
+| `user_profile.db_path` | string | `{data_dir}/user_profile.db` | SQLite path override. |
+| `user_profile.max_pinned` | integer | `8` | Maximum pinned entries surfaced to agent context. |
+| `user_profile.min_confidence` | float | `0.30` | Minimum confidence for an entry to be stored. |
+| `personalization.enabled` | bool | `false` | Master switch for injecting a small prompt-cached profile block into agent context. |
+| `personalization.profile_pin_cap` / `profile_token_budget` | integer | `8` / `300` | Bounds on that block. |
+| `personalization.interest_decay_half_life_hours` | float | `336.0` | Interest-score half-life (~2 weeks). |
+| `personalization.interest_min_score` | float | `0.05` | Prune topics below this decayed score. |
+| `personalization.interest_aggregation_trigger_tasks` / `_hours` | integer / float | `25` / `24.0` | Aggregate interests after this many task completions or hours, whichever comes first. |
+| `personalization.proactive_enabled` | bool | `false` | Generate and deliver proactive tips. Separate opt-in. |
+| `personalization.max_recommendations_per_day` | integer | `3` | Daily delivery cap. |
+| `personalization.recommendation_dedup_cooldown_hours` | float | `168.0` | Hours before an identical recommendation may repeat. |
+| `personalization.recommendation_min_confidence` | float | `0.5` | Minimum confidence to deliver. |
+| `personalization.pin_rank_decay_half_life_days` | float | `30.0` | Half-life for profile pin-rank decay. |
+| `personalization.profile_archive_idle_days` | integer | `60` | Archive active entries idle longer than this. |
+| `personalization.dismiss_cooldown_hours` | integer | `168` | Suppress a dismissed recommendation this long. |
+| `personalization.restate_confidence_boost` | float | `0.10` | Confidence bump when the user re-states a preference. |
+
+---
+
+## `[scheduler]`, `[agent_heartbeat]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `scheduler.run_retention_days` | integer | `30` | How long per-fire run history is kept. |
+| `agent_heartbeat.default_interval_secs` | integer | `0` | Seconds between wakeups of idle agents to check their inbox and schedules. `0` disables heartbeats. |
+| `agent_heartbeat.jitter` | float | `0.2` | Lengthens each agent's interval by a deterministic per-agent fraction so a fleet does not wake in lockstep. |
+| `agent_heartbeat.max_wakes_per_tick` | integer | `4` | Cap on agents woken per tick. |
+
+---
+
+## `[transcription]`
+
+Speech-to-text for inbound channel voice notes. The transcript is injected into the message the agent reads, and the recording is then discarded rather than stored. Audio files someone uploads are transcribed and kept. Audio attached in the web or panel chat is transcribed the same way (files up to 25 MiB); the attachment itself stays in the file store. The endpoint can be local — any OpenAI-compatible server such as `speaches` or whisper.cpp works, and servers that ignore auth still need `api_key_env` to name a non-empty variable.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable transcription. |
+| `endpoint` | string | `https://api.openai.com/v1/audio/transcriptions` | Any OpenAI-compatible endpoint. |
+| `model` | string | `whisper-1` | Model name. |
+| `api_key_env` | string | `OPENAI_API_KEY` | Environment variable holding the key — never stored in config. |
+
+---
+
+## `[tts]`
+
+Text-to-speech for the `speak` tool. The agent supplies only the text (and optionally a voice); the kernel posts it to this endpoint and writes the mp3 into the agent's own files. The endpoint is never taken from the agent, so a loopback server is reachable here even though `http-client` and `web-fetch` block loopback.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the `speak` tool. When false it returns a clear error. |
+| `endpoint` | string | `https://api.openai.com/v1/audio/speech` | Any OpenAI-compatible speech endpoint (for example a local `speaches` or Kokoro server). |
+| `model` | string | `tts-1` | Model name sent in the request. |
+| `voice` | string | `alloy` | Voice used when the agent names none. |
+| `api_key_env` | string | `OPENAI_API_KEY` | Environment variable holding the key. Unset or empty sends no `Authorization` header — a local server needs none. |
+
+Text the agent speaks is sent to this endpoint; with a cloud endpoint it leaves the machine.
+
+---
+
+## `[gateway]` and `[[gateway.channels]]`
+
+`agentos gateway run` boots the kernel and connects every channel listed here. Tokens are referenced by vault key, never inline — seed with `agentos secret set <key> <token>`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `gateway.enabled` | bool | `false` | Enable gateway mode. |
+| `channels[].kind` | string | — | `telegram`, `ntfy`, `email`, `discord`, `slack`, `whatsapp`, or `webhook`. |
+| `channels[].display_name` | string | — | Name shown to agents and in `agentos channel list`. |
+| `channels[].credential_key` | string | — | Vault key holding the token. |
+| `channels[].active_agent` | string | — | Default agent for inbound chat. |
+| `channels[].external_id` | string | _(optional)_ | Chat/room id. Omit for Telegram — auto-discovered from the first `/start`. |
+
+---
+
+## `[hal.raw_usb]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `allow` | array | `[]` | Allowlist of `"vid:pid"` hex strings. Fail-closed: an empty list denies every open/read/write/control. Requires the `raw-usb` build feature. |
 
 ---
 

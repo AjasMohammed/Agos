@@ -15,6 +15,7 @@ pub mod intent;
 pub mod notification;
 pub mod path;
 pub mod plugin;
+pub mod pressure;
 pub mod profile;
 pub mod prompt;
 pub mod registry_query;
@@ -24,6 +25,7 @@ pub mod secret;
 pub mod task;
 pub mod tool;
 pub use path::{reject_traversal, PathError};
+pub use pressure::{PressureLevel, WriteClass};
 pub use schedule::*;
 pub mod agent_message;
 pub mod skill;
@@ -34,7 +36,8 @@ pub use agent_inbox::{AgentInboxEntry, AgentInboxKind, AgentMessageEntry};
 pub use agent_message::{AgentMessage, MessageContent, MessageTarget};
 pub use agent_self::{AgentSelfView, BudgetSummary, GrantedFoldersSummary, SubscriptionSummary};
 pub use capability::{
-    CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp, PermissionSet,
+    skill_permission_resource, CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp,
+    PermissionSet,
 };
 pub use channel::{ChannelKind, RegisteredChannel};
 pub use context::{
@@ -59,8 +62,8 @@ pub use intent::{
 };
 pub use notification::{
     AttachmentKind, DeliveryChannel, DeliveryStatus, InlineAttachment, InteractionRequest,
-    MessageAttachment, NotificationPriority, NotificationSource, TaskOutcome, UserMessage,
-    UserMessageKind, UserResponse,
+    MessageAttachment, NotificationEvent, NotificationPriority, NotificationSource, TaskOutcome,
+    UserMessage, UserMessageKind, UserResponse,
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
 pub use profile::{ProfileCategory, ProfileEntry, ProfileEntryStatus, ProfilePatch, ProfileSource};

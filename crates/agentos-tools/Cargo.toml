@@ -10,6 +10,7 @@ agentos-types = { path = "../agentos-types" }
 agentos-bus = { path = "../agentos-bus" }
 agentos-capability = { path = "../agentos-capability" }
 agentos-hal = { path = "../agentos-hal" }
+agentos-pipeline = { path = "../agentos-pipeline" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

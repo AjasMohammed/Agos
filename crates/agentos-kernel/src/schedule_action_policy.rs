@@ -5,37 +5,16 @@
 //! belt-and-braces measure on top of the RiskClass check that lives in the
 //! schedule tool surface.
 
-const SCHEDULE_TOOL_DENYLIST: &[&str] = &[
-    // Recursive scheduling primitives.
-    "schedule-once",
-    "cancel-once-job",
-    "list-once-jobs",
-    "set-timer",
-    "cancel-timer",
-    "list-timers",
-    "set-cron",
-    "cancel-cron",
-    "list-crons",
-    // Spawning primitives.
-    "spawn-agent",
-    "spawn-async",
-    "agent-call",
-    "await-agents",
-    "cancel-agent",
-    "a2a-delegate",
-    // Interactive — would deadlock or escalate without a user loop.
-    "ask-user",
-];
+pub use agentos_tools::automation_policy::is_tool_blocked_for_automation;
 
 /// True if `tool_name` may NOT be invoked from a `RunTool` schedule action.
 ///
-/// The name is normalized to the hyphenated spelling first. `ToolRunner::execute`
-/// auto-corrects `_` → `-` at dispatch, so an exact match against the raw name
-/// would let `spawn_agent` past the denylist and then run it as `spawn-agent`.
-/// Normalizing here (rather than at the call site) keeps every present and
-/// future caller covered.
+/// Thin alias over [`is_tool_blocked_for_automation`]. The list moved into
+/// `agentos-tools` when stored procedures gained executable steps: a procedure
+/// is a bag of tools fired by one call, so `procedure-create` has to consult
+/// the same list, and it cannot depend on this crate.
 pub fn is_tool_blocked_for_schedule(tool_name: &str) -> bool {
-    SCHEDULE_TOOL_DENYLIST.contains(&tool_name.replace('_', "-").as_str())
+    is_tool_blocked_for_automation(tool_name)
 }
 
 /// Maximum size of a `tool_args` JSON payload.
@@ -57,6 +36,12 @@ mod tests {
         assert!(is_tool_blocked_for_schedule("schedule-once"));
         assert!(is_tool_blocked_for_schedule("set-timer"));
         assert!(is_tool_blocked_for_schedule("spawn-agent"));
+        // Regression: the list named `spawn-async`, which is not a tool, so the
+        // real `task-spawn-async` passed.
+        assert!(is_tool_blocked_for_schedule("task-spawn-async"));
+        assert!(is_tool_blocked_for_schedule("task-delegate"));
+        assert!(is_tool_blocked_for_schedule("start-conversation"));
+        assert!(is_tool_blocked_for_schedule("schedule-recurring"));
         assert!(is_tool_blocked_for_schedule("ask-user"));
     }
 

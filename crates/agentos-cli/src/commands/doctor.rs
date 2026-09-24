@@ -106,8 +106,37 @@ async fn run_checks(fix: bool) -> Vec<(String, CheckResult)> {
         check_bus_socket_dir(&socket_path, fix),
     ));
     checks.push(("Core tool manifests".to_string(), check_tools_dir()));
+    checks.push(("Hardware peripherals".to_string(), check_peripherals()));
 
     checks
+}
+
+/// What the kernel's boot-time peripheral probe will find on this host.
+/// Missing hardware is not a fault, so this always passes.
+fn check_peripherals() -> CheckResult {
+    let probes = agentos_hal::probe_peripherals();
+    let found: Vec<_> = probes
+        .iter()
+        .filter(|p| p.present)
+        .map(|p| p.driver)
+        .collect();
+    let missing: Vec<_> = probes
+        .iter()
+        .filter(|p| !p.present)
+        .map(|p| format!("{} ({})", p.driver, p.reason))
+        .collect();
+    let list = |v: Vec<String>| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    CheckResult::Pass(format!(
+        "detected: {}; not detected: {}",
+        list(found.iter().map(|d| d.to_string()).collect()),
+        list(missing),
+    ))
 }
 
 fn check_config_file(path: &Path, fix: bool) -> CheckResult {

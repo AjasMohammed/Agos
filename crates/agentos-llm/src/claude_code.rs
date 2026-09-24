@@ -415,13 +415,13 @@ impl ClaudeCodeCore {
     /// load the attached image files — the only way the CLI accepts images.
     fn base_command(
         &self,
-        prompt: &str,
         system: &str,
         image_dir: Option<&std::path::Path>,
         resume_session_id: Option<&str>,
     ) -> Command {
         let mut cmd = Command::new(&self.binary);
-        cmd.arg("-p").arg(prompt).arg("--model").arg(&self.model);
+        // The prompt goes on stdin (see `spawn_with_prompt`), never argv.
+        cmd.arg("-p").arg("--model").arg(&self.model);
         // Opt-in resume: continue the prior CLI session and send only the delta
         // turn (the caller passes the delta as `prompt` and an empty `system`).
         if let Some(sid) = resume_session_id {
@@ -472,10 +472,36 @@ impl ClaudeCodeCore {
         if !system.is_empty() {
             cmd.arg("--system-prompt").arg(system);
         }
-        cmd.stdin(Stdio::null())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
+    }
+
+    /// Spawn a `base_command` and feed it the prompt on stdin. The prompt is the
+    /// whole flattened conversation: as an argv string it hit Linux's 128 KiB
+    /// per-argument limit ("Argument list too long") once a chat grew past
+    /// ~32k tokens — and every later turn of that session failed the same way —
+    /// and it was readable by any local user through /proc/<pid>/cmdline.
+    /// Written from its own task so a large prompt cannot deadlock against the
+    /// child filling its stdout pipe.
+    // ponytail: the system prompt stays on argv; it is budget-capped (~10k tokens).
+    // Move it to --system-prompt-file if that cap is ever lifted.
+    fn spawn_with_prompt(
+        cmd: &mut Command,
+        prompt: &str,
+    ) -> std::io::Result<tokio::process::Child> {
+        let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt = prompt.to_owned();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                // A write error means the child already exited; its exit status
+                // and stderr report why. Dropping `stdin` closes it (EOF).
+                let _ = stdin.write_all(prompt.as_bytes()).await;
+            });
+        }
+        Ok(child)
     }
 
     /// Flatten the context to a `(system, prompt)` pair and, if the context
@@ -606,15 +632,19 @@ impl ClaudeCodeCore {
         inv: Invocation,
     ) -> Result<InferenceResult, AgentOSError> {
         let mut cmd = self.base_command(
-            &inv.prompt,
             &inv.system,
             inv.image_dir.as_ref().map(|d| d.path()),
             inv.resume_session_id.as_deref(),
         );
         cmd.arg("--output-format").arg("json");
+        // On timeout the child future is dropped; without this the CLI keeps
+        // running (and billing) after we gave up on it.
+        cmd.kill_on_drop(true);
 
         let start = Instant::now();
-        let output = tokio::time::timeout(self.timeout, cmd.output())
+        let child = Self::spawn_with_prompt(&mut cmd, &inv.prompt)
+            .map_err(|e| self.err(format!("failed to spawn '{}': {e}", self.binary)))?;
+        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await
             .map_err(|_| {
                 self.err(format!(
@@ -622,7 +652,7 @@ impl ClaudeCodeCore {
                     self.timeout.as_secs()
                 ))
             })?
-            .map_err(|e| self.err(format!("failed to spawn '{}': {e}", self.binary)))?;
+            .map_err(|e| self.err(format!("waiting for '{}' failed: {e}", self.binary)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -663,7 +693,6 @@ impl ClaudeCodeCore {
         tx: &mpsc::Sender<InferenceEvent>,
     ) -> Result<(InferenceResult, Option<String>), (AgentOSError, bool)> {
         let mut cmd = self.base_command(
-            &inv.prompt,
             &inv.system,
             inv.image_dir.as_ref().map(|d| d.path()),
             inv.resume_session_id.as_deref(),
@@ -680,7 +709,7 @@ impl ClaudeCodeCore {
         // burning subscription quota on an answer nobody will read.
         cmd.kill_on_drop(true);
 
-        let mut child = match cmd.spawn() {
+        let mut child = match Self::spawn_with_prompt(&mut cmd, &inv.prompt) {
             Ok(c) => c,
             Err(e) => {
                 return Err((
@@ -1072,10 +1101,29 @@ mod tests {
         assert!(sid2.is_none());
     }
 
+    /// A 145 KB pasted log failed to spawn the CLI ("Argument list too long") and
+    /// bricked the session while the prompt rode on argv; stdin has no such cap.
+    #[tokio::test]
+    async fn spawn_with_prompt_delivers_a_prompt_past_the_argv_limit() {
+        let mut cmd = Command::new("wc");
+        cmd.arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let prompt = "x".repeat(200 * 1024);
+        let out = ClaudeCodeCore::spawn_with_prompt(&mut cmd, &prompt)
+            .unwrap()
+            .wait_with_output()
+            .await
+            .unwrap();
+        let n: usize = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert_eq!(n, prompt.len());
+    }
+
     #[test]
     fn base_command_adds_resume_when_session_present() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("delta", "", None, Some("sess-1")));
+        let args = cmd_args(&core.base_command("", None, Some("sess-1")));
         assert!(args.iter().any(|a| a == "--resume"));
         assert!(args.iter().any(|a| a == "sess-1"));
     }
@@ -1083,7 +1131,7 @@ mod tests {
     #[test]
     fn base_command_omits_resume_when_none() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("full", "sys", None, None));
+        let args = cmd_args(&core.base_command("sys", None, None));
         assert!(!args.iter().any(|a| a == "--resume"));
     }
 
@@ -1216,7 +1264,7 @@ mod tests {
     #[test]
     fn base_command_denies_all_builtins_without_images() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("hi", "", None, None));
+        let args = cmd_args(&core.base_command("", None, None));
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
         // No additive allowlist (it doesn't restrict in the default mode).
         assert!(!args.iter().any(|a| a == "--allowed-tools"));
@@ -1229,7 +1277,7 @@ mod tests {
     #[test]
     fn base_command_keeps_read_only_for_images() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("hi", "", Some(std::path::Path::new("/tmp")), None));
+        let args = cmd_args(&core.base_command("", Some(std::path::Path::new("/tmp")), None));
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
         assert!(args.iter().any(|a| a == "--add-dir"));
         // Read stays available for image loading; everything else stays denied.
@@ -1242,7 +1290,7 @@ mod tests {
     fn base_command_with_mcp_config_adds_flags() {
         use std::path::PathBuf;
         let core = ClaudeCodeCore::new("default").with_mcp_config(PathBuf::from("/tmp/x.json"));
-        let args = cmd_args(&core.base_command("hi", "", None, None));
+        let args = cmd_args(&core.base_command("", None, None));
         // MCP config + the 4 allowed meta-tools are present.
         assert!(args.iter().any(|a| a == "--mcp-config"));
         assert!(args.iter().any(|a| a == "/tmp/x.json"));
@@ -1255,7 +1303,7 @@ mod tests {
     #[test]
     fn base_command_raises_mcp_tool_timeout_for_blocking_gateway_calls() {
         let core = ClaudeCodeCore::new("default");
-        let cmd = core.base_command("hi", "", None, None);
+        let cmd = core.base_command("", None, None);
         let envs: Vec<(String, String)> = cmd
             .as_std()
             .get_envs()

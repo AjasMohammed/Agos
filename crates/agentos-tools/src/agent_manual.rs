@@ -415,8 +415,8 @@ impl ManualSection {
             ("tool-detail", "tool schema input output example describe specific"),
             ("permissions", "permission grant deny capability token allowlist scope rwxqo"),
             ("memory", "memory remember recall context-memory semantic episodic procedural archival blocks read write search"),
-            ("events", "event subscribe unsubscribe trigger emit listener stream"),
-            ("commands", "command cli slash /tasks /stop /help /agent /chat"),
+            ("events", "event subscribe unsubscribe trigger emit listener stream chat schedule delivered"),
+            ("commands", "command tool name domain catalog kernel-only operator cli which tool"),
             ("errors", "error failure recovery retry fallback degradation reason"),
             ("feedback", "feedback bug report category severity component issue"),
             ("agents", "agent peer remote spawn delegate connect disconnect"),
@@ -454,14 +454,14 @@ impl ManualSection {
             "permissions" => Some("Permission grants/denies, the `resource:rwxqo` flag grammar, and capability-token scopes."),
             "memory" => Some("Read-first memory tiers: context-memory, semantic, episodic, procedural, archival, blocks."),
             "events" => Some("Subscribe/unsubscribe to event streams, list available event types, fire triggers."),
-            "commands" => Some("Slash commands accepted on connected channels (/tasks, /stop, /approve, /pair, /chat, …)."),
+            "commands" => Some("Tool names grouped by domain, plus kernel-only operator commands you cannot call. Live catalogue: section `tools`."),
             "errors" => Some("Common error patterns and recovery recipes (retry, fallback, escalation, denial)."),
             "feedback" => Some("How to emit `[FEEDBACK]` blocks reporting bugs, UX, performance, and suggestions."),
             "agents" => Some("Spawn child agents, message peers, list online agents, delegate work."),
             "tasks" => Some("Task lifecycle states, iteration limits, and how to query/cancel running tasks."),
             "procedural" => Some("Search and create reusable multi-step procedures from prior solved tasks."),
             "escalation" => Some("Escalate to human approval. control_plane tools (e.g. host-package-install) ALWAYS escalate; reply path is `/approve <id>`."),
-            "coordination" => Some("spawn-agent, await-agents, parallel children. Max spawn depth 5; spawn narrow not broad."),
+            "coordination" => Some("spawn-agent, await-agents, parallel children. Max spawn depth 5. Also: the conversation shared workspace and workspace-request."),
             "suggest" => Some("Free-text query → ranked tool suggestions when you don't know the exact tool name."),
             "scratchpad" => Some("Persistent agent notebook with wikilinks and backlink graph for working memory."),
             "artifacts" => Some("Publish a document the user will look at — report, deck, dashboard. Returns a shareable url; sandboxed rendering, no external assets."),
@@ -1275,7 +1275,7 @@ impl AgentManualTool {
     fn section_permissions(&self) -> Result<serde_json::Value, AgentOSError> {
         Ok(serde_json::json!({
             "section": "permissions",
-            "model": "resource:rwx — each permission grants read (r), write (w), and/or execute (x) on a resource class.",
+            "model": "resource:rwxqo — each permission grants read (r), write (w), execute (x), query (q), and/or observe (o) on a resource class. Your live grants: agent-self.",
             "resource_classes": [
                 {"resource": "fs.user_data", "description": "Read/write files in the agent's own home dir (relative paths)", "typical_ops": "r, w"},
                 {"resource": "memory.semantic", "description": "Search and write to long-term semantic memory", "typical_ops": "r, w"},
@@ -1284,8 +1284,14 @@ impl AgentManualTool {
                 {"resource": "network.outbound", "description": "Make outbound HTTP requests (SSRF protection blocks private IPs)", "typical_ops": "x"},
                 {"resource": "process.exec", "description": "Execute shell commands via shell-exec tool", "typical_ops": "x"},
                 {"resource": "vault.secrets", "description": "Read secrets from the encrypted vault", "typical_ops": "r"},
-                {"resource": "hal.devices", "description": "Access hardware devices via HAL", "typical_ops": "r, x"},
-                {"resource": "audit.read", "description": "Read the audit log", "typical_ops": "r"},
+                {"resource": "hardware.<device>[.<action>]", "description": "HAL devices, one resource per device/action (hardware.system, hardware.audio.capture, hardware.wifi.scan, hardware.webcam.capture, …). Exact strings: section hal", "typical_ops": "r, w, x, o"},
+                {"resource": "events.<category>", "description": "Subscribe to one event category (events.task_lifecycle, events.chat, …). events.stream gates the event-* tools themselves", "typical_ops": "o"},
+                {"resource": "mcp:<server>/", "description": "Every tool of one attached MCP server. Granted per server, not per tool", "typical_ops": "x"},
+                {"resource": "skill:<name>/", "description": "One installed skill. Agents carry a broad `skill:` grant by default; the operator scopes individual skills out per agent", "typical_ops": "x"},
+                {"resource": "agent.spawn / agent.message / agent.registry", "description": "Spawn sub-agents, message or delegate to peers, list agents", "typical_ops": "x, x, r"},
+                {"resource": "channel.send / user.notify / user.interact", "description": "channel-send, notify-user, ask-user", "typical_ops": "w"},
+                {"resource": "schedule.self / schedule.job / schedule.timer", "description": "Create and inspect your own schedules and timers", "typical_ops": "r, w"},
+                {"resource": "scratchpad", "description": "Read/write scratchpad pages", "typical_ops": "r, w"},
                 {"resource": "memory.procedural", "description": "Read/write reusable step-by-step procedures", "typical_ops": "r, w"},
                 {"resource": "fs.workspace", "description": "Use absolute paths inside operator-granted host folders (Folder access / `agentos workspace grant`). Needs BOTH this permission and a grant; see agent-self granted_folders", "typical_ops": "r, w"},
             ],
@@ -1403,12 +1409,18 @@ impl AgentManualTool {
                 {
                     "category": "ScheduleEvents",
                     "permission": "events.schedule:observe",
-                    "events": ["CronJobFired", "ScheduledTaskMissed", "ScheduledTaskCompleted", "ScheduledTaskFailed"]
+                    "events": ["CronJobFired", "ScheduledTaskMissed", "ScheduledTaskCompleted", "ScheduledTaskFailed", "ScheduledTaskDelivered", "ScheduledTaskDeliveryFailed"]
                 },
                 {
                     "category": "ExternalEvents",
                     "permission": "events.external:observe",
                     "events": ["WebhookReceived", "ExternalFileChanged", "ExternalAPIEvent", "ExternalAlertReceived"]
+                },
+                {
+                    "category": "ChatEvents",
+                    "permission": "events.chat:observe",
+                    "events": ["ChatMessageAdded"],
+                    "note": "Operator chat traffic. Separate from AgentCommunication on purpose: your own reply is another chat turn, so reacting to every one loops. Subscribe only with a payload_filter or throttle."
                 }
             ],
             "filter_examples": [
@@ -1423,12 +1435,13 @@ impl AgentManualTool {
     fn section_commands(&self) -> Result<serde_json::Value, AgentOSError> {
         Ok(serde_json::json!({
             "section": "commands",
-            "description": "Commands available in AgentOS. Each entry has a 'kernel_only' field. When kernel_only=false, invoke the command by passing the value of its 'tool' field as the tool name in your tool call. When kernel_only=true, the command is an internal kernel operation that agents cannot invoke directly.",
+            "description": "Commands available in AgentOS. Each entry has a 'kernel_only' field. When kernel_only=false, invoke the command by passing the value of its 'tool' field as the tool name in your tool call. When kernel_only=true, the command is an internal kernel operation that agents cannot invoke directly. This list is curated, not exhaustive — section `tools` is the live catalogue, and `hal` / `capabilities` / `scheduling` / `mcp` list those families.",
             "domains": [
                 {
                     "domain": "Task Management",
                     "commands": [
-                        {"name": "task-delegate", "description": "Delegate a sub-task to another agent", "tool": "task-delegate", "kernel_only": false},
+                        {"name": "task-delegate", "description": "Delegate a sub-task to another agent and block until it finishes", "tool": "task-delegate", "kernel_only": false},
+                        {"name": "task-spawn-async", "description": "Start a task on another agent without blocking; poll with task-status", "tool": "task-spawn-async", "kernel_only": false},
                         {"name": "task-list", "description": "List active and recent tasks", "tool": "task-list", "kernel_only": false},
                         {"name": "task-status", "description": "Inspect status of a specific task by ID", "tool": "task-status", "kernel_only": false},
                         {"name": "RunTask", "description": "Start a new task on a specific or auto-routed agent", "kernel_only": true},
@@ -1441,6 +1454,10 @@ impl AgentManualTool {
                     "commands": [
                         {"name": "agent-message", "description": "Send a direct message to another agent", "tool": "agent-message", "kernel_only": false},
                         {"name": "agent-list", "description": "List registered agents and their status", "tool": "agent-list", "kernel_only": false},
+                        {"name": "agent-messages-list", "description": "Your agent-to-agent message inbox (also agent-messages-read / agent-messages-dismiss)", "tool": "agent-messages-list", "kernel_only": false},
+                        {"name": "agent-inbox-list", "description": "Your async notification inbox (also agent-inbox-read / agent-inbox-dismiss)", "tool": "agent-inbox-list", "kernel_only": false},
+                        {"name": "start-conversation", "description": "Start a live turn-taking conversation between two or more registered agents on a topic", "tool": "start-conversation", "kernel_only": false},
+                        {"name": "a2a-delegate", "description": "Delegate a task to a remote agent over the A2A protocol", "tool": "a2a-delegate", "kernel_only": false},
                         {"name": "BroadcastToGroup", "description": "Broadcast a message to all agents in a group", "kernel_only": true},
                         {"name": "CreateAgentGroup", "description": "Create a named group of agents", "kernel_only": true}
                     ]
@@ -1459,7 +1476,10 @@ impl AgentManualTool {
                         {"name": "memory-read", "description": "Read a specific memory entry by key", "tool": "memory-read", "kernel_only": false},
                         {"name": "memory-delete", "description": "Delete a memory entry by key", "tool": "memory-delete", "kernel_only": false},
                         {"name": "memory-stats", "description": "Get memory usage statistics (counts, sizes per tier)", "tool": "memory-stats", "kernel_only": false},
-                        {"name": "episodic-list", "description": "List episodic memory entries for a task", "tool": "episodic-list", "kernel_only": false}
+                        {"name": "episodic-list", "description": "List episodic memory entries for a task", "tool": "episodic-list", "kernel_only": false},
+                        {"name": "context-memory-read", "description": "Read your always-in-context memory document", "tool": "context-memory-read", "kernel_only": false},
+                        {"name": "context-memory-update", "description": "Rewrite your always-in-context memory document", "tool": "context-memory-update", "kernel_only": false},
+                        {"name": "chat-search", "description": "Search past chat conversations", "tool": "chat-search", "kernel_only": false}
                     ]
                 },
                 {
@@ -1468,18 +1488,21 @@ impl AgentManualTool {
                         {"name": "file-reader", "description": "Read files, list directories, with pagination", "tool": "file-reader", "kernel_only": false},
                         {"name": "file-writer", "description": "Write files with create_only/overwrite modes and size guards", "tool": "file-writer", "kernel_only": false},
                         {"name": "file-editor", "description": "Apply line-range edits (insert, replace, delete) to existing files", "tool": "file-editor", "kernel_only": false},
-                        {"name": "file-delete", "description": "Delete a file (home dir or write-granted folder)", "tool": "file-delete", "kernel_only": false},
-                        {"name": "file-move", "description": "Move or rename a file (home dir or write-granted folder)", "tool": "file-move", "kernel_only": false},
+                        {"name": "file-delete", "description": "Delete a file, or a directory with recursive=true; recoverable from .trash/ for ~72h", "tool": "file-delete", "kernel_only": false},
+                        {"name": "file-move", "description": "Move, rename, or copy (copy=true) a file; restores from .trash/", "tool": "file-move", "kernel_only": false},
                         {"name": "file-diff", "description": "Compute unified diff between two files or between file and string", "tool": "file-diff", "kernel_only": false},
                         {"name": "file-glob", "description": "Find files matching a glob pattern (home dir or granted folder; absolute base path allowed)", "tool": "file-glob", "kernel_only": false},
-                        {"name": "file-grep", "description": "Search file contents by regex pattern", "tool": "file-grep", "kernel_only": false}
+                        {"name": "file-grep", "description": "Search file contents by regex pattern", "tool": "file-grep", "kernel_only": false},
+                        {"name": "user-file-list", "description": "List files the user uploaded or sent over a channel (returns file_id)", "tool": "user-file-list", "kernel_only": false},
+                        {"name": "user-file-reader", "description": "Read one user-provided file by file_id", "tool": "user-file-reader", "kernel_only": false}
                     ]
                 },
                 {
                     "domain": "Network",
                     "commands": [
                         {"name": "http-client", "description": "HTTP requests with secret injection and SSRF protection", "tool": "http-client", "kernel_only": false},
-                        {"name": "web-fetch", "description": "Fetch a web page and extract text content (HTML stripped)", "tool": "web-fetch", "kernel_only": false}
+                        {"name": "web-fetch", "description": "Fetch a web page and extract text content (HTML stripped)", "tool": "web-fetch", "kernel_only": false},
+                        {"name": "web-search", "description": "Search the web (Brave → Tavily → Serper → DuckDuckGo fallback)", "tool": "web-search", "kernel_only": false}
                     ]
                 },
                 {
@@ -1503,6 +1526,7 @@ impl AgentManualTool {
                 {
                     "domain": "Procedural Memory",
                     "commands": [
+                        {"name": "procedure-run", "description": "Run a stored executable procedure: every step fires directly, no LLM per step, so the sequence is the same every time. Each step still runs under your own permissions", "tool": "procedure-run", "kernel_only": false},
                         {"name": "procedure-create", "description": "Record a reusable step-by-step procedure", "tool": "procedure-create", "kernel_only": false},
                         {"name": "procedure-search", "description": "Search procedures by natural language query", "tool": "procedure-search", "kernel_only": false},
                         {"name": "procedure-list", "description": "List all recorded procedures", "tool": "procedure-list", "kernel_only": false},
@@ -1513,21 +1537,28 @@ impl AgentManualTool {
                     "domain": "Agent Introspection",
                     "commands": [
                         {"name": "agent-manual", "description": "Query structured AgentOS documentation (this tool)", "tool": "agent-manual", "kernel_only": false},
-                        {"name": "agent-self", "description": "View own agent state: permissions, budget, tools, subscriptions", "tool": "agent-self", "kernel_only": false}
+                        {"name": "agent-self", "description": "View own agent state: permissions, budget, tools, subscriptions", "tool": "agent-self", "kernel_only": false},
+                        {"name": "list-tools", "description": "Paginated tool catalogue, filter by category/tag", "tool": "list-tools", "kernel_only": false},
+                        {"name": "search-tools", "description": "Find tools by intent when you do not know the name", "tool": "search-tools", "kernel_only": false},
+                        {"name": "describe-tool", "description": "Full input schema + examples for one tool", "tool": "describe-tool", "kernel_only": false},
+                        {"name": "tool-result-page", "description": "Fetch the next page of a truncated tool result", "tool": "tool-result-page", "kernel_only": false}
                     ]
                 },
                 {
                     "domain": "Events & Scheduling",
                     "commands": [
-                        {"name": "EventSubscribe", "description": "Subscribe to OS events (filter by type or category)", "kernel_only": true},
-                        {"name": "EventUnsubscribe", "description": "Remove an event subscription", "kernel_only": true},
-                        {"name": "CreateSchedule", "description": "Create a cron-scheduled recurring task", "kernel_only": true},
+                        {"name": "event-subscribe", "description": "Subscribe yourself to OS events (also event-list-available / event-list-subscriptions / event-unsubscribe). See section events", "tool": "event-subscribe", "kernel_only": false},
+                        {"name": "schedule-once", "description": "Run something once at a future time (cancel-once-job / list-once-jobs)", "tool": "schedule-once", "kernel_only": false},
+                        {"name": "schedule-recurring", "description": "Create a cron-scheduled recurring job (schedule-control to pause/resume/delete)", "tool": "schedule-recurring", "kernel_only": false},
+                        {"name": "set-timer", "description": "Short relative delay (cancel-timer / list-timers)", "tool": "set-timer", "kernel_only": false},
+                        {"name": "list-my-schedules", "description": "Everything you have scheduled; get-schedule-runs for run history. See section scheduling", "tool": "list-my-schedules", "kernel_only": false},
                         {"name": "RunBackground", "description": "Run a task in the background pool", "kernel_only": true}
                     ]
                 },
                 {
                     "domain": "Security & Escalation",
                     "commands": [
+                        {"name": "escalation-status", "description": "Inspect your own pending/resolved escalations", "tool": "escalation-status", "kernel_only": false},
                         {"name": "ListEscalations", "description": "List pending and resolved escalation requests", "kernel_only": true},
                         {"name": "ResolveEscalation", "description": "Approve or deny a pending escalation", "kernel_only": true},
                         {"name": "RollbackTask", "description": "Rollback a task to a previous checkpoint", "kernel_only": true}
@@ -1562,6 +1593,8 @@ impl AgentManualTool {
                     "commands": [
                         {"name": "notify-user", "description": "Send a notification to the operator inbox (and connected channels)", "tool": "notify-user", "kernel_only": false},
                         {"name": "ask-user", "description": "Ask the user an interactive question; pause until answered or auto-actioned", "tool": "ask-user", "kernel_only": false},
+                        {"name": "artifact-write", "description": "Publish a rendered document (markdown/slides/html) and get a viewer url. See section artifacts", "tool": "artifact-write", "kernel_only": false},
+                        {"name": "file-publish", "description": "Show the user a file from your workspace (image/audio/video/PDF) as an inline chat preview. See section artifacts", "tool": "file-publish", "kernel_only": false},
                         {"name": "SendUserNotification", "description": "Kernel API used by notify-user/ask-user to enqueue", "kernel_only": true},
                         {"name": "ListNotifications", "description": "List notifications in the inbox", "kernel_only": true},
                         {"name": "GetNotification", "description": "Inspect a single notification by ID", "kernel_only": true},
@@ -1572,6 +1605,9 @@ impl AgentManualTool {
                 {
                     "domain": "Channels",
                     "commands": [
+                        {"name": "channel-send", "description": "Send text and/or one media item to ONE connected channel. See section channels", "tool": "channel-send", "kernel_only": false},
+                        {"name": "speak", "description": "Text-to-speech: writes an mp3 of your text under speech/ in your files, to send with channel-send file_path. To speak on the HOST SPEAKERS use audio action=speak instead — one call, no file to hand around", "tool": "speak", "kernel_only": false},
+                        {"name": "audio action=speak", "description": "Say text aloud on the host speakers: synthesises and plays in one call, returns a playback_id you can pause/stop", "tool": "audio", "kernel_only": false},
                         {"name": "ConnectChannel", "description": "Pair a bidirectional channel adapter (Telegram, Discord, Slack, …)", "kernel_only": true},
                         {"name": "DisconnectChannel", "description": "Disconnect and remove a paired channel", "kernel_only": true},
                         {"name": "ListChannels", "description": "List paired channels and their health state", "kernel_only": true},
@@ -1628,11 +1664,11 @@ impl AgentManualTool {
                 {
                     "domain": "Containers",
                     "commands": [
-                        {"name": "ContainerCreate", "description": "Provision a short-lived container for isolated tool execution", "kernel_only": true},
-                        {"name": "ContainerExec", "description": "Execute a command inside a running container", "kernel_only": true},
-                        {"name": "ContainerLogs", "description": "Read logs from a container", "kernel_only": true},
-                        {"name": "ContainerDestroy", "description": "Destroy a container and reclaim its resources", "kernel_only": true},
-                        {"name": "ContainerList", "description": "List containers managed by the kernel", "kernel_only": true}
+                        {"name": "container-create", "description": "Provision a short-lived container for isolated execution", "tool": "container-create", "kernel_only": false},
+                        {"name": "container-exec", "description": "Execute a command inside a running container", "tool": "container-exec", "kernel_only": false},
+                        {"name": "container-logs", "description": "Read logs from a container", "tool": "container-logs", "kernel_only": false},
+                        {"name": "container-destroy", "description": "Destroy a container and reclaim its resources", "tool": "container-destroy", "kernel_only": false},
+                        {"name": "container-list", "description": "List your containers", "tool": "container-list", "kernel_only": false}
                     ]
                 },
                 {
@@ -1777,11 +1813,11 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Delegate a Task",
-                    "content": "Use 'task-delegate' to hand off a sub-task to another agent. Provide {\"agent\": \"<name>\", \"task\": \"<prompt>\", \"priority\": 1-10}. The delegation BLOCKS: your task is paused until the child finishes and is resumed automatically with the child's output already in your context — you do not need to poll. Use 'spawn-async' when you must keep working while the child runs."
+                    "content": "Use 'task-delegate' to hand off a sub-task to another agent. Provide {\"agent\": \"<name>\", \"task\": \"<prompt>\", \"priority\": 1-10}. The child runs in the BACKGROUND: keep working, and its output is delivered into your context when it finishes — you do not need to poll. If you reach your final answer first, your task is paused and resumed automatically when the child reports. 'task-spawn-async' behaves the same way but is control_plane, so the call itself waits for operator approval before the child starts."
                 },
                 {
                     "title": "Coordination Pattern",
-                    "content": "1. Call 'think' to plan the delegation strategy. 2. Call 'agent-list' to find available agents. 3. Call 'task-delegate' with the selected agent — you are paused here and resumed once the child finishes, with its output in your context. 4. Act on the result. (Use 'spawn-async' + 'task-status' polling only when you must not block.)"
+                    "content": "1. Call 'think' to plan the delegation strategy. 2. Call 'agent-list' to find available agents. 3. Call 'task-delegate' with the selected agent — you are paused here and resumed once the child finishes, with its output in your context. 4. Act on the result. (Use 'task-spawn-async' + 'task-status' polling only when you must not block.)"
                 }
             ]
         }))
@@ -1811,7 +1847,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Best Practices",
-                    "content": "After delegating, store the returned task ID in episodic memory or a memory block. Poll 'task-status' to detect completion. Use 'memory-search' or 'file-reader' to retrieve detailed results written by the delegated task. For long multi-step workflows, set autonomous=true so iteration and timeout limits do not cut the work short mid-way."
+                    "content": "'task-delegate' blocks and resumes you with the child's output — no polling. After 'task-spawn-async', keep the returned task ID (memory block or scratchpad) and poll 'task-status' to detect completion. Use 'memory-search' or 'file-reader' to retrieve detailed results written by the delegated task. For long multi-step workflows, set autonomous=true so iteration and timeout limits do not cut the work short mid-way."
                 }
             ]
         }))
@@ -1828,8 +1864,16 @@ impl AgentManualTool {
                     "content": "Procedural memory stores how-to knowledge: step-by-step procedures, SOPs, and task templates. Unlike semantic memory (facts) or episodic memory (events), procedural memory records *actions* in order. Procedures are shared across agents and survive across restarts."
                 },
                 {
-                    "title": "Record a Procedure",
-                    "content": "Use 'procedure-create' with: {\"name\": \"<short name>\", \"description\": \"<what it does>\", \"steps\": [{\"action\": \"...\", \"tool\": \"<tool-name>\", \"expected_outcome\": \"...\"}], \"preconditions\": [...], \"postconditions\": [...], \"tags\": [...]}. Required permission: memory.procedural:w"
+                    "title": "Record a Procedure (prose)",
+                    "content": "A prose SOP is read back into your context as a reminder; it is never executed. Use 'procedure-create' with: {\"name\": \"<short name>\", \"description\": \"<what it does>\", \"steps\": [{\"action\": \"...\", \"tool\": \"<tool-name>\", \"expected_outcome\": \"...\"}], \"preconditions\": [...], \"postconditions\": [...], \"tags\": [...]}. Required permission: memory.procedural:w"
+                },
+                {
+                    "title": "Record a RUNNABLE Procedure",
+                    "content": "Give EVERY step a 'tool' and an 'input' payload and the procedure becomes executable with 'procedure-run' — one call, no inference per step. Declare parameters in 'inputs' and reference them as {{inputs.<name>}}; bind a step's result with 'output_var' and read into it with dots, e.g. {{clip.path}}. A step may only reference a variable an EARLIER step bound. Example: {\"name\": \"speak-aloud\", \"description\": \"say a line on the speakers\", \"inputs\": [{\"name\": \"text\", \"required\": true}], \"steps\": [{\"action\": \"synthesise\", \"tool\": \"speak\", \"input\": {\"text\": \"{{inputs.text}}\"}, \"output_var\": \"clip\"}, {\"action\": \"play it\", \"tool\": \"audio\", \"input\": {\"action\": \"playback\", \"audio_path\": \"{{clip.path}}\"}}]}. Either ALL steps carry a tool+input or none do — a mix is rejected."
+                },
+                {
+                    "title": "Run a Procedure",
+                    "content": "Use 'procedure-run' with {\"procedure\": \"<name>\", \"inputs\": {\"<name>\": <value>}}. Every step runs under your own permissions, so a step you are not entitled to fails and the run stops there. Your own procedures take precedence over global ones of the same name. Required permission: memory.procedural:r"
                 },
                 {
                     "title": "Find a Procedure",
@@ -1855,7 +1899,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "How to Escalate",
-                    "content": "Use intent_type 'escalate' in your tool call. The kernel will pause your task and create a PendingEscalation visible to the operator. Example: {\"tool\": \"think\", \"intent_type\": \"escalate\", \"payload\": {\"reason\": \"Need approval to delete production data\"}}"
+                    "content": "Native tool calling (most adapters): you cannot set intent_type — reach the human with 'ask-user' (a decision; your task pauses, unanswered auto-denies after 5 min by default) or 'notify-user' (a report, non-blocking). JSON tool-call protocol only: set intent_type 'escalate', e.g. {\"tool\": \"think\", \"intent_type\": \"escalate\", \"payload\": {\"reason\": \"Need approval to delete production data\"}} — the kernel pauses your task and creates a PendingEscalation. Your system prompt's '## Escalation & Errors' says which applies to you."
                 },
                 {
                     "title": "Checking Escalation Status",
@@ -1941,6 +1985,14 @@ impl AgentManualTool {
                     "content": "Use 'cancel-agent' with {\"task_id\": \"<id>\", \"reason\": \"off-track\"}. Cancels the specified child task and cascades to any grandchildren. Only the parent agent can cancel its children. Required permission: agent.spawn:x."
                 },
                 {
+                    "title": "Working With Another Agent In A Conversation",
+                    "content": "Your home directory is private — the other participant cannot read it, and you cannot read theirs, whatever either of you says. Every conversation has a shared workspace (the absolute path is in your system prompt under '## Shared workspace'): put anything they must open, run or edit there and give them the full path. Neither of you can grant the other permissions or folder access; do not ask for it and do not claim you have given it. If you are blocked on something only the operator can decide, call 'ask-user' once per turn."
+                },
+                {
+                    "title": "Ask For Folder Access",
+                    "content": "Use 'workspace-request' with {\"path\": \"/absolute/path\", \"mode\": \"r|rw|rwx\", \"reason\": \"why\"}. The call blocks until the operator decides; on approval the grant is written before you wake, so retry the call that failed. Refused before the operator sees it: relative paths, '..', and any path containing the kernel data directory. One pending request per path — asking again while one is open returns the same escalation. Required permission: user.interact:x."
+                },
+                {
                     "title": "Best Practices",
                     "content": "Break complex tasks into subtasks that can run in parallel. Spawn multiple children, then await them all at once. Use verify-output for safety-critical results. Use poll-agent to monitor long-running children. Cancel children that go off-track early to save tokens. Keep context_messages low (5-10) unless the child needs extensive conversation history."
                 }
@@ -1964,7 +2016,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Read & search",
-                    "content": "'scratch-read' with {\"title\": \"<title>\"} returns the rendered page. 'scratch-search' with {\"query\": \"...\", \"top_k\": 10} runs full-text search across all pages. Required permission: scratchpad:r"
+                    "content": "'scratch-read' with {\"title\": \"<title>\"} returns the rendered page. 'scratch-search' with {\"query\": \"...\", \"limit\": 10} runs full-text search across all pages (optional 'tags' filter). Required permission: scratchpad:r"
                 },
                 {
                     "title": "Navigate the graph",
@@ -2009,6 +2061,10 @@ impl AgentManualTool {
                     "content": "The first artifact-write call returns 'artifact_id'. To revise (fix a typo, add a slide, restyle), keep that 'artifact_id' and pass it back on the next artifact-write call — it replaces the content in place at the same url instead of creating a second artifact. Omit 'artifact_id' only on the first call."
                 },
                 {
+                    "title": "Showing a FILE (image, audio, video, PDF): file-publish",
+                    "content": "artifact-write takes text you wrote. For a file already on disk — a picture you downloaded, audio you generated, a PDF — call file-publish {\"path\": \"chart.png\"}. The user cannot see your workspace, so a bare path in a reply shows them nothing. The result carries a 'markdown' snippet; put it in your reply and the chat renders an inline preview. The type comes from the file's bytes, not its name: read 'mime', and if 'warning' is present the file is not what its extension claims (usually a saved error page) — fetch it again rather than reporting success. Cap 50 MiB."
+                },
+                {
                     "title": "Size limit",
                     "content": "content is capped at 2 MiB. An artifact is a document a human reads, not a data dump — if you're near the cap, summarize or paginate instead of writing a file-writer-sized blob through this tool."
                 }
@@ -2044,13 +2100,7 @@ impl AgentManualTool {
                 "in/out",
                 None,
             ),
-            (
-                "teams",
-                "Incoming Webhook (out) + agentos-web webhook (in)",
-                "webhook secret",
-                "in/out",
-                None,
-            ),
+            ("teams", "Incoming Webhook", "webhook secret", "out", None),
             (
                 "line",
                 "Reply API + HMAC webhook",
@@ -2122,7 +2172,7 @@ impl AgentManualTool {
                 "Channels carry messages to/from external systems. {} channel(s) connected — see system prompt '## Channels' for names. Use `channel-send` to target one. Per-platform features: load `agent-manual section=channel-<kind>`.",
                 list.len()
             ),
-            None => "Channels carry messages between agents and humans on external systems (chat platforms, email, push, webhooks). Outbound goes via 'channel-send' with a channel name/id; inbound is delivered to agents subscribed to ChannelEvents.".to_string(),
+            None => "Channels carry messages between agents and humans on external systems (chat platforms, email, push, webhooks). Outbound goes via 'channel-send' with a channel name/id; inbound arrives as a chat turn.".to_string(),
         };
 
         Ok(serde_json::json!({
@@ -2137,11 +2187,11 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Send a message",
-                    "content": "Use 'notify-user' with {\"channel_id\": \"<id>\", \"text\": \"...\"} or omit channel_id to deliver to the default operator inbox. The kernel routes to the connected adapter."
+                    "content": "One specific channel: 'channel-send' with {\"channel\": \"<display name or id>\", \"text\": \"...\"} (permission channel.send:w). The operator wherever they are: 'notify-user' with {\"subject\": \"...\", \"body\": \"...\"} — fans out to every delivery adapter plus the inbox; pass 'channels': [\"telegram\"] to restrict. Replying inside a chat turn needs neither — your answer is delivered to the channel the message came from."
                 },
                 {
                     "title": "React to incoming",
-                    "content": "Subscribe to InboundMessageReceived (category ChannelEvents). Each event carries the channel ID, sender, and message body. A common pattern is to start a task in response."
+                    "content": "Nothing to subscribe to: an inbound message from a paired user starts a chat turn with you, with the conversation history attached, and your reply goes back on the same channel. Files the user sends land in 'user-file-list'."
                 },
                 {
                     "title": "Health & retry",
@@ -2201,16 +2251,20 @@ impl AgentManualTool {
                 {"syntax": "[label](https://url)", "renders": "<a href=\"…\">label</a> (only http/https/tg/mailto schemes are linked; others are left as text)"}
             ],
             "media": {
-                "summary": "channel-send can attach one media item by URL. Telegram fetches the URL itself and renders it natively.",
+                "summary": "channel-send can attach one media item: one of your own files, a file the user gave you, or a public URL.",
                 "fields": [
+                    {"field": "file_path", "desc": "One of your own files, relative to your files directory (e.g. captures/frame.jpg). Images ≤10 MB go as photos, everything else as a document. Max 20 MB."},
+                    {"field": "file_id", "desc": "Re-send a file the user uploaded or sent — the file_id from user-file-list."},
+                    {"field": "filename", "desc": "Optional display name for file_path / file_id uploads."},
                     {"field": "image_url", "desc": "Public https URL of an image → sent via sendPhoto (inline image)."},
+                    {"field": "image_urls", "desc": "2–10 public image URLs sent as one album."},
                     {"field": "document_url", "desc": "Public https URL of a file → sent via sendDocument (downloadable attachment)."},
                     {"field": "caption", "desc": "Optional short caption (≤1024 chars, markdown-rendered) shown on the media."}
                 ],
                 "rules": [
-                    "image_url and document_url are mutually exclusive — pass at most one.",
+                    "Use exactly one of file_path / file_id / image_url / document_url / image_urls.",
                     "When an attachment is present, 'text' is optional. If both are given, the media is sent first, then 'text' follows as a normal (fully-rendered, un-truncated) message.",
-                    "The URL must be publicly reachable by Telegram's servers; local file paths and file IDs are not yet supported."
+                    "URL media must be publicly reachable by Telegram's servers. file_path / file_id uploads are Telegram-only — other channels return an error."
                 ]
             },
             "limits": {
@@ -2459,7 +2513,7 @@ impl AgentManualTool {
         if skills.is_empty() {
             return Ok(serde_json::json!({
                 "section": "skills",
-                "summary": "No skills currently installed. The operator can install one with 'agentos skill install <path>'.",
+                "summary": "No skills available to you. Either none are installed (the operator installs one with 'agentos skill install <path>'), or none are granted to this agent ('agentos perm grant <agent> skill:<name>/:x').",
                 "skills": [],
                 "total_skills": 0,
             }));
@@ -2490,7 +2544,7 @@ impl AgentManualTool {
                         "max_cost_per_run": s.max_cost_per_run,
                         "max_tokens_per_run": s.max_tokens_per_run,
                     },
-                    "usage": "Run via skill-run with {\"name\": \"<skill>\"}. Required tools above must be available to the agent for the skill to execute correctly. Use tool-detail with {\"name\": \"<tool>\"} for any tool's input schema."
+                    "usage": "Load the recipe with skill-prompt {\"name\": \"<skill>\"}, then follow it. Required tools above must be available to the agent for the skill to execute correctly. Use tool-detail with {\"name\": \"<tool>\"} for any tool's input schema."
                 })),
                 None => {
                     let known: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -2828,7 +2882,24 @@ impl AgentTool for AgentManualTool {
         let channels_snapshot: Option<Vec<ConnectedChannel>> = self.snapshot_channels().await;
         // Same pattern for installed skills — snapshot once so the inventory
         // and drill-down see a consistent state.
-        let skills_snapshot: Option<Vec<SkillSummary>> = self.snapshot_skills().await;
+        //
+        // Filtered by this agent's grants (`skill:<name>/:x`), unlike the
+        // per-domain tool sections below: a skill the operator scoped out of
+        // this agent is not a capability it can ask to be granted, it is a
+        // role decision, and `skill-prompt` refuses it anyway. Filtering here
+        // covers both the inventory and the `{skill: <name>}` drill-down.
+        let skills_snapshot: Option<Vec<SkillSummary>> =
+            self.snapshot_skills().await.map(|skills| {
+                skills
+                    .into_iter()
+                    .filter(|s| {
+                        context.permissions.check(
+                            &agentos_types::skill_permission_resource(&s.name),
+                            PermissionOp::Execute,
+                        )
+                    })
+                    .collect()
+            });
 
         // The tools the agent can actually call right now.
         //
@@ -3250,6 +3321,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -3633,7 +3705,7 @@ mod tests {
         let result = tool.section_events().unwrap();
         let categories = result["categories"].as_array().unwrap();
         // One entry per EventCategory variant in agentos-types::event.
-        assert_eq!(categories.len(), 10);
+        assert_eq!(categories.len(), 11);
         // Each category must declare a permission and a subscribable tools list.
         for cat in categories {
             assert!(cat["permission"].as_str().is_some());

@@ -1,6 +1,6 @@
 # Gateway-first (run as a bot)
 
-Gateway mode runs AgentOS as a long-lived **messaging bot**. Instead of serving a web UI,
+Gateway mode runs AgentOS as a long-lived **messaging bot**. Instead of serving the REST API,
 `agentos gateway run` boots the kernel and connects every channel declared in the
 `[gateway]` config block (Telegram, Discord, Slack, ntfy, email, WhatsApp, webhook), then runs
 until `SIGTERM`. Inbound chat messages become agent tasks; replies flow back over the same

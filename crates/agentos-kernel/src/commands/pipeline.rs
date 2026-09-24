@@ -161,6 +161,7 @@ impl Kernel {
                 context_manager: self.context_manager.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 agent_id,
+                agent_name: agent_name.clone(),
                 capability_engine: self.capability_engine.clone(),
                 tool_registry: self.tool_registry.clone(),
                 token_ttl: Duration::from_secs(
@@ -173,6 +174,8 @@ impl Kernel {
                 escalation_manager: self.escalation_manager.clone(),
                 zone_table: self.zone_table.clone(),
                 cancellation_token: self.cancellation_token.child_token(),
+                // Operator-initiated: no task token to clamp to.
+                permission_ceiling: None,
             };
 
             let engine = self.pipeline_engine.clone();
@@ -203,9 +206,23 @@ impl Kernel {
                     .run(&definition, &input_clone, run_id, &executor)
                     .await
                 {
-                    Ok(run) => {
+                    // `run()` returns Err only for VALIDATION failures; a step
+                    // that failed comes back Ok with `status: Failed`. Marking
+                    // that complete showed a green run in `bg list` for a
+                    // pipeline that did not do its job.
+                    Ok(run) if run.status == agentos_pipeline::PipelineRunStatus::Complete => {
                         let run_json = serde_json::to_value(&run).unwrap_or_default();
                         bg_pool.complete(&task_id, run_json).await;
+                    }
+                    Ok(run) => {
+                        bg_pool
+                            .fail(
+                                &task_id,
+                                run.error
+                                    .clone()
+                                    .unwrap_or_else(|| format!("pipeline {}", run.status)),
+                            )
+                            .await;
                     }
                     Err(e) => {
                         // Detached pipeline runs are background-pool tasks, not
@@ -227,6 +244,7 @@ impl Kernel {
             let executor = KernelPipelineExecutor {
                 kernel: self,
                 agent_id,
+                agent_name: agent_name.clone(),
             };
 
             match self
@@ -506,10 +524,16 @@ pub(crate) fn authorize_synthetic_tool_call(
 pub(crate) struct KernelPipelineExecutor<'a> {
     pub(crate) kernel: &'a Kernel,
     pub(crate) agent_id: AgentID,
+    /// The `--agent` name, bound to `{{agent}}` in step templates.
+    pub(crate) agent_name: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
+    fn governing_agent(&self) -> Option<String> {
+        self.agent_name.clone()
+    }
+
     async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
         // Delegate to cmd_run_task which already has full security:
         // capability token issuance, injection scanning, intent validation, audit logging.
@@ -641,6 +665,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             storage_zone_query: None,
             cancellation_token: self.kernel.cancellation_token.child_token(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         // Audit: tool execution started
@@ -772,6 +797,9 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) context_manager: Arc<ContextManager>,
     pub(crate) cost_tracker: Arc<crate::cost_tracker::CostTracker>,
     pub(crate) agent_id: AgentID,
+    /// The `--agent` name, bound to `{{agent}}` in step templates. `None` on the
+    /// procedure path, which renders its payloads from structured bindings.
+    pub(crate) agent_name: Option<String>,
     // Security subsystems — required for permission enforcement and audit trail.
     pub(crate) capability_engine: Arc<CapabilityEngine>,
     /// Resolves a step's tool name to the `ToolID` its per-step capability
@@ -789,6 +817,19 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) escalation_manager: Arc<crate::escalation::EscalationManager>,
     pub(crate) zone_table: crate::managed_storage::ZoneTable,
     pub(crate) cancellation_token: CancellationToken,
+    /// Upper bound on what any step may be granted, when the run was started
+    /// from inside an already-scoped task.
+    ///
+    /// The registry holds an agent's *full* grants, but a task's capability
+    /// token can be deliberately narrower — `scope_child_task` intersects a
+    /// spawn request with the parent's own token and with the org-node ceiling.
+    /// Resolving permissions from the registry alone would hand a step
+    /// authority the parent removed, so `procedure-run` passes the calling
+    /// task's token here and every step is clamped to it.
+    ///
+    /// `None` for the operator path (`agentos pipeline run`), which has no task
+    /// and is already an operator-authorised action.
+    pub(crate) permission_ceiling: Option<PermissionSet>,
 }
 
 /// System prompt for a pipeline agent step.
@@ -821,6 +862,10 @@ fn output_blocks_pipeline(scan: &crate::injection_scanner::ScanResult) -> bool {
 
 #[async_trait::async_trait]
 impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
+    fn governing_agent(&self) -> Option<String> {
+        self.agent_name.clone()
+    }
+
     async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
         let registry = self.agent_registry.read().await;
         let agent = registry
@@ -1057,6 +1102,13 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         // Same as the inline executor: the registry is the source of truth for
         // an agent's permissions (see the comment on `KernelPipelineExecutor`),
         // and this one value backs both the token and the execution context.
+        //
+        // Then clamped to `permission_ceiling` when the run came from inside a
+        // scoped task. Without that clamp, a sub-agent spawned with a narrowed
+        // token could call `procedure-run` and have its steps minted from the
+        // agent's FULL registry grants — re-widening exactly what the parent
+        // and the org-node ceiling took away. The scheduled path has the same
+        // guard in `clamp_to_schedule_creator`.
         let permissions = {
             let registry = self.agent_registry.read().await;
             if registry.get_by_id(&self.agent_id).is_none() {
@@ -1065,7 +1117,11 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                     operation: format!("Agent {} is not registered", self.agent_id),
                 });
             }
-            registry.compute_effective_permissions(&self.agent_id)
+            let effective = registry.compute_effective_permissions(&self.agent_id);
+            match &self.permission_ceiling {
+                Some(ceiling) => effective.intersect_with(ceiling),
+                None => effective,
+            }
         };
 
         let trace_id = TraceID::new();
@@ -1127,6 +1183,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             storage_zone_query: None,
             cancellation_token: self.cancellation_token.child_token(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         // Audit: tool execution started

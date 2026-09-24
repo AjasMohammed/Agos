@@ -49,6 +49,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
             events: Default::default(),
+            convo: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
             context_compaction: Default::default(),
@@ -124,6 +125,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         context_budget: Default::default(),
         context: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
+        resource_guard: Default::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
         // Tests must never reach the host notification daemon: the desktop
@@ -143,10 +145,10 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         registry: Default::default(),
         scratchpad: Default::default(),
         skills: Default::default(),
+        procedures: Default::default(),
         otel: agentos_kernel::config::OtelConfig::default(),
         approval: Default::default(),
         api: Default::default(),
-        web: Default::default(),
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
@@ -154,6 +156,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         storage: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        tts: Default::default(),
         agent_heartbeat: Default::default(),
         agent_budget: Default::default(),
         hal: Default::default(),
@@ -2522,4 +2525,118 @@ async fn security_no_configured_credentials_means_no_access() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = send(&app, Method::GET, "/api/v1/agents", Some("agos_nope"), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+// ── Notification routing matrix ─────────────────────────────────────────────
+
+/// The seeded defaults must be visible, and every event/channel axis populated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_notification_routes_expose_axes_and_seeded_defaults() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let routes = kernel
+        .get_notification_routes()
+        .await
+        .expect("get_notification_routes");
+
+    assert_eq!(routes.events.len(), 7, "one row per notification event");
+    assert!(
+        routes.events.iter().any(|e| e.key == "approval"),
+        "approval row must exist"
+    );
+    assert!(
+        !routes.channels.is_empty(),
+        "at least the CLI adapter is always registered"
+    );
+    assert!(
+        routes
+            .rules
+            .iter()
+            .any(|r| r.event == "task_complete" && r.channel == "desktop" && r.mode == "never"),
+        "first boot seeds the noisy desktop rows muted: {:?}",
+        routes.rules
+    );
+    kernel.shutdown();
+}
+
+/// A write is partial: it changes the named cell and leaves the rest alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_set_notification_routes_is_partial() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let before = kernel.get_notification_routes().await.unwrap();
+    let seeded_approval = before
+        .rules
+        .iter()
+        .find(|r| r.event == "approval" && r.channel == "desktop")
+        .map(|r| r.mode.clone());
+
+    let after = kernel
+        .set_notification_routes(vec![agentos_api::types::ApiRouteRule {
+            event: "task_failed".to_string(),
+            channel: "telegram-main".to_string(),
+            mode: "never".to_string(),
+        }])
+        .await
+        .expect("set_notification_routes");
+
+    assert!(
+        after
+            .rules
+            .iter()
+            .any(|r| r.event == "task_failed" && r.channel == "telegram-main" && r.mode == "never"),
+        "the written cell must come back"
+    );
+    assert_eq!(
+        after
+            .rules
+            .iter()
+            .find(|r| r.event == "approval" && r.channel == "desktop")
+            .map(|r| r.mode.clone()),
+        seeded_approval,
+        "an unlisted cell must be untouched"
+    );
+    kernel.shutdown();
+}
+
+/// Unknown event/mode strings are a 400 that names the allowed values — never
+/// a silently-ignored rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_set_notification_routes_rejects_unknown_values() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+
+    let bad_mode = kernel
+        .set_notification_routes(vec![agentos_api::types::ApiRouteRule {
+            event: "approval".to_string(),
+            channel: "desktop".to_string(),
+            mode: "sometimes".to_string(),
+        }])
+        .await
+        .expect_err("unknown mode must be rejected");
+    assert!(
+        bad_mode.to_string().contains("when_away"),
+        "error must name the allowed modes, got: {bad_mode}"
+    );
+
+    let bad_event = kernel
+        .set_notification_routes(vec![agentos_api::types::ApiRouteRule {
+            event: "explosion".to_string(),
+            channel: "desktop".to_string(),
+            mode: "never".to_string(),
+        }])
+        .await
+        .expect_err("unknown event must be rejected");
+    assert!(
+        bad_event.to_string().contains("approval"),
+        "error must list the known events, got: {bad_event}"
+    );
+
+    // The rejected writes must not have landed.
+    let routes = kernel.get_notification_routes().await.unwrap();
+    assert!(
+        !routes.rules.iter().any(|r| r.event == "explosion"),
+        "a rejected rule must not be persisted"
+    );
+    kernel.shutdown();
 }

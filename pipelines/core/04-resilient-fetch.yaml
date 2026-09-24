@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 04 — Resilient Fetch: what happens when a step fails.
+#
+#   agentos pipeline install ~/.agentos/pipelines/core/04-resilient-fetch.yaml
+#   agentos pipeline run resilient-fetch --agent <your-agent> --input "https://example.com"
+#
+# A step is retried `retry_on_failure` times (exponential backoff), and only
+# after the last attempt fails does `on_failure` decide what the pipeline does:
+#
+#   fail         stop the whole run (the default — use it when later steps are
+#                meaningless without this one)
+#   skip         mark the step skipped and carry on; its output_var is unset,
+#                so anything referencing it renders {{UNRESOLVED:name}}
+#   use_default  carry on using `default_value` as this step's output
+#
+# Rule of thumb: `use_default` wherever a later step can still do useful work
+# with a placeholder, `fail` wherever it cannot.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: resilient-fetch
+version: "1.0.0"
+description: "Fetch a URL and summarise it, degrading gracefully when the fetch fails."
+
+steps:
+  - id: fetch
+    tool: web-fetch
+    input:
+      url: "{{input}}"
+      extract_text: true
+      max_chars: 20000
+    output_var: page
+    # ~1s, then ~2s, then ~4s between attempts (capped by retry_max_delay_ms).
+    retry_on_failure: 3
+    retry_backoff_ms: 1000
+    retry_max_delay_ms: 10000
+    timeout_minutes: 2
+    # The summary step below can still say something useful with this text, so
+    # a dead URL degrades instead of killing the run.
+    on_failure: use_default
+    default_value: "[fetch failed — no page content available]"
+
+  - id: summarise
+    agent: "{{agent}}"
+    task: |
+      Summarise the page below in five bullets. If the content is the marker
+      "[fetch failed — no page content available]", say only that the page could
+      not be fetched — do not invent its contents.
+
+      SOURCE: {{input}}
+
+      {{page}}
+    output_var: summary
+    depends_on: [fetch]
+    timeout_minutes: 5
+    # No summary means nothing left to do — stop rather than write a blank file.
+    on_failure: fail
+
+  - id: save
+    tool: file-writer
+    input:
+      path: "fetched/{{run_id}}.md"
+      content: "# {{input}}\n\n{{summary}}\n"
+    depends_on: [summarise]
+    # Losing the copy on disk is not worth failing a run that already produced
+    # the summary the operator asked for.
+    on_failure: skip
+
+output: summary

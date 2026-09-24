@@ -1,8 +1,18 @@
 tags = ["read", "write"]
 risk_class = "control_plane"
 
-# Per-action override: `list` enumerates sinks/sources. `capture`, `playback`,
-# `volume` and `mute` all change state and keep the tool-level control_plane.
+# Per-action override: `list` enumerates sinks/sources. `capture` keeps the
+# tool-level control_plane — it opens the microphone, which is the one audio
+# action that must never be grantable in one click.
+#
+# `speak`, `playback`, `volume` and `mute` are exec_capable rather than
+# control_plane: they make (or silence) sound on the host, which is a hardware
+# side effect, not a kernel-admin operation. ControlPlane is the
+# non-overridable floor, so while they sat on it every single "say this out
+# loud" re-prompted and "always approve" minted nothing (2026-09-20). As
+# exec_capable they still prompt by default, but an approve & remember mints an
+# action-scoped standing grant: "always allow audio speak" never becomes
+# "always allow audio capture".
 #
 # The playback lifecycle actions are here because they address a session handle,
 # never a device: the sink was gated when `playback` started the session, the
@@ -13,6 +23,10 @@ risk_class = "control_plane"
 # one case where waiting on a human is actively harmful.
 [risk_class_by_action]
 list = "readonly_external"
+speak = "exec_capable"
+playback = "exec_capable"
+volume = "exec_capable"
+mute = "exec_capable"
 playback_pause = "readonly_external"
 playback_resume = "readonly_external"
 playback_stop = "readonly_external"
@@ -21,13 +35,16 @@ playback_status = "readonly_external"
 [manifest]
 name        = "audio"
 version     = "1.0.0"
-description = "List audio devices, capture audio, play back audio files (pause/resume/stop them), and adjust volume or mute state through the HAL audio driver."
+description = "List audio devices, speak text aloud on the host speakers in one call (action=\"speak\"), capture audio, play back audio files (pause/resume/stop them), and adjust volume or mute state through the HAL audio driver."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "hal"
+search_hints = ["speak out loud", "say this through the speakers", "talk to me", "text to speech on the host", "read this aloud on the speakers", "play a sound"]
 
 [capabilities_required]
 permissions = [
+  # action="speak" writes one clip into the agent's own home before playing it.
+  "fs.user_data:w",
   "hardware.audio.list:r",
   "hardware.audio.capture:r",
   "hardware.audio.capture:x",
@@ -54,9 +71,18 @@ description = "Audio operation request"
 
 [payload_schema.properties.action]
 type = "string"
-enum = ["list", "capture", "playback", "playback_pause", "playback_resume", "playback_stop", "playback_status", "volume", "mute", "list_capture_consents"]
+enum = ["list", "speak", "capture", "playback", "playback_pause", "playback_resume", "playback_stop", "playback_status", "volume", "mute", "list_capture_consents"]
 default = "list"
 description = "Audio action to execute."
+
+[payload_schema.properties.text]
+type = "string"
+maxLength = 4000
+description = "For action=\"speak\" only, and required by it: what to say, as plain text. No markdown — it would be read out literally. The text is synthesised and played on the speakers in this one call."
+
+[payload_schema.properties.voice]
+type = "string"
+description = "For action=\"speak\" only: voice id offered by the configured voice service, 1-64 characters of letters, digits, '_' or '-'. Omit to use the operator's default."
 
 [payload_schema.properties.source]
 type = "string"
@@ -64,7 +90,7 @@ description = "Capture source id (for capture/consent actions)."
 
 [payload_schema.properties.sink]
 type = "string"
-description = "Playback sink id (optional for playback)."
+description = "Playback sink id (optional for playback and speak; omit for the default output)."
 
 [payload_schema.properties.node_id]
 type = "string"
@@ -82,13 +108,13 @@ description = "Where to save the recording. Relative paths land in your own file
 
 [payload_schema.properties.audio_path]
 type = "string"
-description = "Audio file to play — relative to your own files directory (e.g. inbox/<id>/song.mp3) or an absolute path inside a granted folder. WAV/FLAC/OGG play directly; other containers (MP3, M4A, AAC) are transcoded via ffmpeg first, which must be installed."
+description = "Audio file to play. Ignored and overwritten by action=\"speak\", which plays what it just synthesised. Relative to your own files directory (e.g. inbox/<id>/song.mp3) or an absolute path inside a granted folder. WAV/FLAC/OGG play directly; other containers (MP3, M4A, AAC) are transcoded via ffmpeg first, which must be installed."
 
 [payload_schema.properties.max_seconds]
 type = "integer"
 minimum = 1
 maximum = 3600
-description = "Playback duration cap in seconds (default 300). Time spent paused does not count against it. A track cut short by the cap ends in state \"truncated\"."
+description = "Playback duration cap in seconds (default 300), for playback and speak alike. Time spent paused does not count against it. A track cut short by the cap ends in state \"truncated\"."
 
 [payload_schema.properties.playback_id]
 type = "string"
@@ -97,21 +123,25 @@ description = "Session handle returned by action \"playback\". Required by playb
 [payload_schema.properties.wait]
 type = "boolean"
 default = false
-description = "Block until the track finishes instead of returning a playback_id immediately. Only for short notification sounds — it parks the whole turn for the length of the audio."
+description = "Block until the track finishes instead of returning a playback_id immediately, for playback and speak alike. Only for short sounds — it parks the whole turn for the length of the audio."
 
 [payload_schema.properties.volume]
 type = "number"
 minimum = 0
 maximum = 1
-description = "Volume level between 0.0 and 1.0. Omit to read current level."
+description = "Volume level between 0.0 and 1.0. A non-zero value also clears the node's mute flag. Omit to read current level."
 
 [payload_schema.properties.muted]
 type = "boolean"
 description = "Mute (true) or unmute (false) the node. Omit to read current mute state."
 
+# Executes in-process (the kernel builds it with [tts]); these limits document
+# intent for the day it could be sandboxed. `network`/`fs_write` are true for
+# action="speak", which posts to the operator's speech endpoint and writes the
+# resulting clip into the agent's own home before playing it.
 [sandbox]
-network       = false
-fs_write      = false
+network       = true
+fs_write      = true
 gpu           = false
 max_memory_mb = 256
 max_cpu_ms    = 20000
@@ -120,6 +150,10 @@ syscalls      = []
 [[examples]]
 description = "List sources and sinks"
 payload = { action = "list" }
+
+[[examples]]
+description = "Say something on the host speakers — synthesises and plays in one call, returns a playback_id"
+payload = { action = "speak", text = "The backup finished. Nothing needs your attention." }
 
 [[examples]]
 description = "Capture 10 seconds from source audio:47"

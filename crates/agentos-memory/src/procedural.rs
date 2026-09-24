@@ -113,6 +113,7 @@ impl ProceduralStore {
         })?;
 
         crate::lifecycle::migrate_lifecycle_columns(&conn, "procedures")?;
+        migrate_inputs_column(&conn)?;
 
         let probe = embedder
             .embed(&["procedural-memory-dimension-probe"])
@@ -134,6 +135,24 @@ impl ProceduralStore {
             embedder,
             dimension,
         })
+    }
+
+    /// Deserialize the `inputs` column by NAME, not by position.
+    ///
+    /// Five SELECT lists feed procedures back out of this table, three of them
+    /// through `row_to_procedure` and two through inline closures. Reading a
+    /// late-added column by index means keeping five lists and two index bases
+    /// in sync by hand, and `Row::get(n)` fails at runtime, not at compile
+    /// time. By name, adding the column to a SELECT is the only thing that can
+    /// go wrong, and it goes wrong loudly.
+    fn inputs_from_row(row: &rusqlite::Row) -> rusqlite::Result<Vec<crate::types::ProcedureInput>> {
+        // The `?` is what makes the design note true: a SELECT that forgets the
+        // column yields `InvalidColumnName` and fails the read, rather than an
+        // empty vec that turns a parameterised recipe into one binding nothing.
+        Ok(row
+            .get::<_, Option<String>>("inputs")?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
     }
 
     fn build_steps_text(steps: &[ProcedureStep]) -> String {
@@ -181,6 +200,9 @@ impl ProceduralStore {
         })?;
         let steps = serde_json::to_string(&procedure.steps)
             .map_err(|e| AgentOSError::StorageError(format!("Failed to serialize steps: {}", e)))?;
+        let inputs = serde_json::to_string(&procedure.inputs).map_err(|e| {
+            AgentOSError::StorageError(format!("Failed to serialize inputs: {}", e))
+        })?;
         let postconditions = serde_json::to_string(&procedure.postconditions).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to serialize postconditions: {}", e))
         })?;
@@ -249,9 +271,9 @@ impl ProceduralStore {
                     id, name, description, preconditions, steps, postconditions,
                     success_count, failure_count, source_episodes, agent_id, tags,
                     embedding, created_at, updated_at,
-                    last_used_at, use_count, confidence, status
+                    last_used_at, use_count, confidence, status, inputs
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                           ?15, ?16, ?17, ?18)",
+                           ?15, ?16, ?17, ?18, ?19)",
                 params![
                     proc_id,
                     name,
@@ -270,7 +292,8 @@ impl ProceduralStore {
                     last_used_at,
                     use_count,
                     confidence,
-                    status
+                    status,
+                    inputs
                 ],
             )
             .map_err(|e| AgentOSError::StorageError(format!("Failed to store procedure: {}", e)))?;
@@ -414,6 +437,7 @@ impl ProceduralStore {
                             .and_then(|s| Uuid::parse_str(&s).ok())
                             .map(AgentID::from_uuid),
                         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                        inputs: Self::inputs_from_row(row)?,
                         created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                             .unwrap_or_else(|_| chrono::Local::now().into())
                             .with_timezone(&Utc),
@@ -443,7 +467,7 @@ impl ProceduralStore {
                     "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
                             p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
                             p.created_at, p.updated_at, p.embedding, c.rowid,
-                            p.last_used_at, p.use_count, p.confidence, p.status
+                            p.last_used_at, p.use_count, p.confidence, p.status, p.inputs
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE c.rowid IN ({placeholders})
@@ -472,7 +496,7 @@ impl ProceduralStore {
                     "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
                             p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
                             p.created_at, p.updated_at, p.embedding, c.rowid,
-                            p.last_used_at, p.use_count, p.confidence, p.status
+                            p.last_used_at, p.use_count, p.confidence, p.status, p.inputs
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
@@ -539,7 +563,7 @@ impl ProceduralStore {
                     "SELECT id, name, description, preconditions, steps, postconditions,
                             success_count, failure_count, source_episodes, agent_id, tags,
                             created_at, updated_at,
-                            last_used_at, use_count, confidence, status
+                            last_used_at, use_count, confidence, status, inputs
                      FROM procedures WHERE id = ?1",
                 )
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
@@ -593,7 +617,7 @@ impl ProceduralStore {
                     "SELECT id, name, description, preconditions, steps, postconditions,
                             success_count, failure_count, source_episodes, agent_id, tags,
                             created_at, updated_at,
-                            last_used_at, use_count, confidence, status
+                            last_used_at, use_count, confidence, status, inputs
                      FROM procedures
                      WHERE name = ?1 AND agent_id IS ?2
                      LIMIT 1",
@@ -827,7 +851,7 @@ impl ProceduralStore {
                     "SELECT id, name, description, preconditions, steps, postconditions,
                             success_count, failure_count, source_episodes, agent_id, tags,
                             created_at, updated_at,
-                            last_used_at, use_count, confidence, status
+                            last_used_at, use_count, confidence, status, inputs
                      FROM procedures
                      WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)
                      ORDER BY updated_at DESC
@@ -1028,6 +1052,7 @@ impl ProceduralStore {
                 .and_then(|s| Uuid::parse_str(&s).ok())
                 .map(AgentID::from_uuid),
             tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            inputs: Self::inputs_from_row(row)?,
             created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                 .unwrap_or_else(|_| chrono::Local::now().into())
                 .with_timezone(&Utc),
@@ -1076,6 +1101,29 @@ impl ProceduralStore {
     }
 }
 
+/// Add the `inputs` column to an existing `procedures` table.
+///
+/// Additive with a default, matching how `last_used_at` / `use_count` /
+/// `confidence` / `status` were added: a row written before executable
+/// procedures existed reads back as `[]` and stays a prose SOP.
+fn migrate_inputs_column(conn: &rusqlite::Connection) -> Result<(), AgentOSError> {
+    let exists: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('procedures') WHERE name = 'inputs'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .map_err(|e| {
+            AgentOSError::StorageError(format!("Failed to inspect procedures columns: {e}"))
+        })?;
+    if exists {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE procedures ADD COLUMN inputs TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )
+    .map_err(|e| AgentOSError::StorageError(format!("Failed to add inputs column: {e}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1094,12 +1142,16 @@ mod tests {
                     action: "run tests".to_string(),
                     tool: Some("shell-exec".to_string()),
                     expected_outcome: Some("all pass".to_string()),
+                    input: None,
+                    output_var: None,
                 },
                 ProcedureStep {
                     order: 1,
                     action: "deploy".to_string(),
                     tool: Some("shell-exec".to_string()),
                     expected_outcome: Some("service healthy".to_string()),
+                    input: None,
+                    output_var: None,
                 },
             ],
             postconditions: vec!["deployment complete".to_string()],
@@ -1108,6 +1160,7 @@ mod tests {
             source_episodes: vec!["ep-1".to_string()],
             agent_id: None,
             tags: vec!["ops".to_string()],
+            inputs: vec![],
             created_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now),
             updated_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now),
             last_used_at: None,
@@ -1225,6 +1278,102 @@ mod tests {
         assert!(store.get("legacy-1").await.unwrap().is_some());
     }
 
+    /// An executable recipe must survive every read path. `inputs` is read by
+    /// NAME rather than by column index precisely so adding it could not shift
+    /// one of these out from under the others — this asserts all four agree.
+    #[tokio::test]
+    async fn an_executable_recipe_round_trips_through_every_read_path() {
+        let dir = TempDir::new().unwrap();
+        let store =
+            ProceduralStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap();
+
+        let mut procedure = make_test_procedure("speak-aloud", "say a line");
+        procedure.inputs = vec![crate::types::ProcedureInput {
+            name: "text".to_string(),
+            description: Some("what to say".to_string()),
+            required: true,
+            default: None,
+        }];
+        procedure.steps = vec![
+            ProcedureStep {
+                order: 0,
+                action: "synthesise".to_string(),
+                tool: Some("speak".to_string()),
+                expected_outcome: None,
+                input: Some(serde_json::json!({ "text": "{{inputs.text}}" })),
+                output_var: Some("clip".to_string()),
+            },
+            ProcedureStep {
+                order: 1,
+                action: "play".to_string(),
+                tool: Some("audio".to_string()),
+                expected_outcome: None,
+                input: Some(
+                    serde_json::json!({ "action": "playback", "audio_path": "{{clip.path}}" }),
+                ),
+                output_var: None,
+            },
+        ];
+        let id = store.store(&procedure).await.unwrap();
+
+        let check = |p: Procedure, via: &str| {
+            assert_eq!(p.inputs.len(), 1, "{via}: inputs lost");
+            assert_eq!(p.inputs[0].name, "text", "{via}");
+            assert!(p.inputs[0].required, "{via}");
+            assert!(p.is_executable(), "{via}: steps lost their payloads");
+            assert_eq!(
+                p.steps[1].input.as_ref().unwrap()["audio_path"],
+                "{{clip.path}}",
+                "{via}"
+            );
+            assert_eq!(p.steps[0].output_var.as_deref(), Some("clip"), "{via}");
+        };
+        check(store.get(&id).await.unwrap().unwrap(), "get");
+        check(
+            store
+                .find_by_name("speak-aloud", None)
+                .await
+                .unwrap()
+                .unwrap(),
+            "find_by_name",
+        );
+        check(
+            store
+                .list_by_agent(None, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap(),
+            "list_by_agent",
+        );
+        let hit = store
+            .search("say a line", None, 5, 0.0)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("search hit");
+        check(hit.procedure, "search");
+    }
+
+    /// The 25 rows already in procedural memory predate the `inputs` column.
+    /// They must keep loading, and must stay prose.
+    #[tokio::test]
+    async fn a_row_written_before_the_inputs_column_loads_as_prose() {
+        let dir = TempDir::new().unwrap();
+        seed_legacy_db(dir.path());
+        let store =
+            ProceduralStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap();
+
+        let legacy = store.get("legacy-1").await.unwrap().expect("legacy row");
+        assert!(legacy.inputs.is_empty());
+        assert!(
+            !legacy.is_executable(),
+            "a prose SOP must never look runnable"
+        );
+    }
+
     fn curator_store(dir: &TempDir) -> ProceduralStore {
         ProceduralStore::open_with_embedder(dir.path(), Arc::new(Embedder::noop())).unwrap()
     }
@@ -1330,6 +1479,8 @@ mod tests {
             action: "use the new pipeline".to_string(),
             tool: Some("shell-exec".to_string()),
             expected_outcome: None,
+            input: None,
+            output_var: None,
         }];
         store.store(&relearned).await.unwrap();
 

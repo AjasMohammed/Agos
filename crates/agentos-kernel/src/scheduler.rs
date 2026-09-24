@@ -34,6 +34,22 @@ pub struct TaskScheduler {
     /// `max_concurrent_tasks` bounds execution, not queue depth — see
     /// `enqueue` for why the rejection path emits no events.
     max_queued_per_agent: usize,
+    /// Background children that have not reported back yet, per parent. One
+    /// mutex covers both "parent checks + parks" and "child reports + wakes",
+    /// so a child finishing between the check and the park cannot strand the
+    /// parent in `Waiting`.
+    // ponytail: in-memory only — a parent parked across a kernel restart waits
+    // for its timeout. Persist alongside the task row if that ever matters.
+    pending_children: Mutex<HashMap<TaskID, PendingChildren>>,
+}
+
+#[derive(Default)]
+struct PendingChildren {
+    unreported: std::collections::HashSet<TaskID>,
+    /// The parent reached its final answer and is `Waiting` on these children.
+    /// Distinguishes it from a parent `Waiting` on an approval or an ask-user
+    /// answer, which a child report must never wake.
+    parked: bool,
 }
 
 #[derive(Eq, PartialEq)]
@@ -139,6 +155,7 @@ impl TaskScheduler {
             dependency_graph: RwLock::new(TaskDependencyGraph::new()),
             state_store,
             child_map: RwLock::new(HashMap::new()),
+            pending_children: Mutex::new(HashMap::new()),
             failure_reasons: RwLock::new(HashMap::new()),
             max_queued_per_agent,
         }
@@ -328,7 +345,16 @@ impl TaskScheduler {
             }
 
             if task.state == TaskState::Running {
-                task.state = TaskState::Queued;
+                // A checkpointed task is parked (Suspended, not queued) for
+                // `recover_checkpointed_tasks` to resume from its saved context.
+                // Queueing it here made the dispatcher re-run it from scratch —
+                // repeating its side effects — and made `cmd_resume_task` refuse
+                // it as "already Queued". Recovery requeues it if resume fails.
+                task.state = if exempt {
+                    TaskState::Suspended
+                } else {
+                    TaskState::Queued
+                };
                 task.started_at = None;
                 normalized_to_queued.push(task.clone());
             }
@@ -381,6 +407,18 @@ impl TaskScheduler {
             Some(store) => store.prune_terminal_scheduler_tasks(max_age).await?,
             None => 0,
         };
+        // The in-memory map needs the same retention or every task ever run
+        // stays resident for the kernel's lifetime (and `prune_failure_reasons`
+        // below, which keys off this map, never drops anything either).
+        // `created_at` is the only timestamp on `AgentTask`; it is <= finish
+        // time, and retention is measured in days, so this is conservative enough.
+        let cutoff = chrono::Utc::now() - max_age;
+        self.tasks.write().await.retain(|_, t| {
+            !matches!(
+                t.state,
+                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+            ) || t.created_at >= cutoff
+        });
         self.prune_failure_reasons().await;
         Ok(pruned)
     }
@@ -467,6 +505,9 @@ impl TaskScheduler {
                     ),
                 )
                 .await;
+                // A rejected background child never runs, so it never reports
+                // on its own — without this its parent would park forever.
+                self.report_child(&task_id).await;
                 return task_id;
             }
         }
@@ -543,6 +584,10 @@ impl TaskScheduler {
                 kids.retain(|k| !doomed_set.contains(k));
             }
         }
+        self.pending_children
+            .lock()
+            .await
+            .retain(|parent, _| !doomed_set.contains(parent));
 
         // Release anyone blocked on a purged task. `complete_dependency` only
         // ever fires from the task-completion paths, which a purged task never
@@ -608,7 +653,10 @@ impl TaskScheduler {
     /// Without this the pause primitive is only half-implemented: marking an
     /// agent `manually_offline` correctly stops it being reactivated at boot,
     /// but its already-queued tasks kept executing.
-    pub async fn dequeue_runnable(&self, runnable: impl Fn(&AgentID) -> bool) -> Option<AgentTask> {
+    pub async fn dequeue_runnable(
+        &self,
+        runnable: impl Fn(&AgentTask) -> bool,
+    ) -> Option<AgentTask> {
         let mut queue = self.queue.lock().await;
         let mut skipped: Vec<PrioritizedTask> = Vec::new();
         let mut found = None;
@@ -621,7 +669,7 @@ impl TaskScheduler {
             if task.state != TaskState::Queued {
                 continue;
             }
-            if !runnable(&task.agent_id) {
+            if !runnable(task) {
                 drop(tasks);
                 skipped.push(prioritized);
                 continue;
@@ -881,7 +929,8 @@ impl TaskScheduler {
 
     // --- Child-Map Methods ---
 
-    /// Register a child task under its parent for cascade-cancel.
+    /// Register a child task under its parent for cascade-cancel, and as a
+    /// background child the parent has not heard back from yet.
     pub async fn register_child(&self, parent_id: TaskID, child_id: TaskID) {
         self.child_map
             .write()
@@ -889,6 +938,50 @@ impl TaskScheduler {
             .entry(parent_id)
             .or_default()
             .push(child_id);
+        self.pending_children
+            .lock()
+            .await
+            .entry(parent_id)
+            .or_default()
+            .unreported
+            .insert(child_id);
+    }
+
+    /// Park `parent_id` (`Waiting`) until its background children report.
+    /// Returns `false` — and parks nothing — when every child has already
+    /// reported, or the task is terminal.
+    pub async fn park_until_children_report(&self, parent_id: &TaskID) -> bool {
+        let mut pending = self.pending_children.lock().await;
+        let Some(entry) = pending.get_mut(parent_id) else {
+            return false;
+        };
+        if entry.unreported.is_empty() {
+            pending.remove(parent_id);
+            return false;
+        }
+        let parked = matches!(
+            self.update_state_if_not_terminal(parent_id, TaskState::Waiting)
+                .await,
+            Ok(true)
+        );
+        entry.parked = parked;
+        parked
+    }
+
+    /// A child reached a terminal state. Returns the parent to `requeue` when
+    /// it was parked on its children; `None` when the parent is still working
+    /// (it reads the injected result on its next iteration) or parked on
+    /// something else.
+    pub async fn report_child(&self, child_id: &TaskID) -> Option<TaskID> {
+        let parent_id = self.tasks.read().await.get(child_id)?.parent_task_id?;
+        let mut pending = self.pending_children.lock().await;
+        let entry = pending.get_mut(&parent_id)?;
+        entry.unreported.remove(child_id);
+        let wake = std::mem::take(&mut entry.parked);
+        if entry.unreported.is_empty() {
+            pending.remove(&parent_id);
+        }
+        wake.then_some(parent_id)
     }
 
     /// Return all child task IDs registered under a parent.
@@ -976,9 +1069,20 @@ impl TaskScheduler {
     /// Called when a task completes — removes all edges and wakes waiting parents.
     /// Returns the list of parent tasks that were waiting on this task.
     pub async fn complete_dependency(&self, completed_task_id: TaskID) -> Vec<TaskID> {
-        let mut graph = self.dependency_graph.write().await;
-        let waiters = graph.dependents_of(completed_task_id);
-        graph.remove_edges_for(completed_task_id);
+        let mut waiters = {
+            let mut graph = self.dependency_graph.write().await;
+            let waiters = graph.dependents_of(completed_task_id);
+            graph.remove_edges_for(completed_task_id);
+            waiters
+        };
+        // Every terminal path already calls this, so it doubles as the
+        // background child's report: a parent parked on its children is woken
+        // through the same `requeue(waiter)` loop the callers run.
+        if let Some(parent) = self.report_child(&completed_task_id).await {
+            if !waiters.contains(&parent) {
+                waiters.push(parent);
+            }
+        }
         waiters
     }
 }
@@ -1114,6 +1218,61 @@ mod tests {
         let waiters = scheduler.complete_dependency(child_id).await;
         assert_eq!(waiters.len(), 1);
         assert_eq!(waiters[0], parent_id);
+    }
+
+    /// Background children: the parent parks only while a child is unreported,
+    /// a report wakes only a parent parked *on its children*, and a child that
+    /// reports first leaves nothing to park on.
+    #[tokio::test]
+    async fn background_child_report_wakes_only_a_parent_parked_on_children() {
+        let scheduler = TaskScheduler::new(10);
+        let parent = make_task(5, "parent");
+        let mut child = make_task(5, "child");
+        let mut late = make_task(5, "late child");
+        let (parent_id, child_id, late_id) = (parent.id, child.id, late.id);
+        child.parent_task_id = Some(parent_id);
+        late.parent_task_id = Some(parent_id);
+        scheduler.enqueue(parent).await;
+        scheduler.register_child(parent_id, child_id).await;
+        scheduler.enqueue(child).await;
+
+        // Parent waiting on something else (approval): a report must not wake it.
+        scheduler
+            .update_state(&parent_id, TaskState::Waiting)
+            .await
+            .unwrap();
+        assert!(scheduler.complete_dependency(child_id).await.is_empty());
+
+        // Every child reported: nothing to park on.
+        scheduler
+            .update_state(&parent_id, TaskState::Running)
+            .await
+            .unwrap();
+        assert!(!scheduler.park_until_children_report(&parent_id).await);
+
+        // Unreported child: parent parks, the report hands it back for requeue.
+        scheduler.register_child(parent_id, late_id).await;
+        scheduler.enqueue(late).await;
+        assert!(scheduler.park_until_children_report(&parent_id).await);
+        assert_eq!(
+            scheduler.get_task(&parent_id).await.unwrap().state,
+            TaskState::Waiting
+        );
+        assert_eq!(
+            scheduler.complete_dependency(late_id).await,
+            vec![parent_id]
+        );
+    }
+
+    /// The dispatcher's in-flight guard: a task the predicate rejects stays queued.
+    #[tokio::test]
+    async fn dequeue_runnable_holds_back_a_rejected_task() {
+        let scheduler = TaskScheduler::new(10);
+        let task = make_task(5, "still unwinding");
+        let id = task.id;
+        scheduler.enqueue(task).await;
+        assert!(scheduler.dequeue_runnable(|t| t.id != id).await.is_none());
+        assert_eq!(scheduler.dequeue().await.unwrap().id, id);
     }
 
     #[tokio::test]
@@ -1731,6 +1890,42 @@ mod tests {
         );
     }
 
+    /// A task that was Running at crash time and has a checkpoint must be parked
+    /// for resume, not queued: queueing it re-ran it from scratch.
+    #[tokio::test]
+    async fn test_restore_parks_a_checkpointed_running_task_for_resume() {
+        let dir = tempdir().expect("temp dir");
+        let store = Arc::new(
+            KernelStateStore::open(dir.path().join("kernel_state.db"))
+                .await
+                .expect("state store should open"),
+        );
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let task = make_task(5, "crashed mid-flight");
+        let id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler
+            .update_state(&id, TaskState::Running)
+            .await
+            .unwrap();
+
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let resumable: HashSet<TaskID> = [id].into_iter().collect();
+        restored.restore_from_store(24, &resumable).await.unwrap();
+
+        assert_eq!(
+            restored.get_task(&id).await.unwrap().state,
+            TaskState::Suspended
+        );
+        assert!(
+            restored.dequeue().await.is_none(),
+            "must not run from scratch"
+        );
+        // Recovery's fallback when the resume itself fails.
+        restored.requeue(&id).await.unwrap();
+        assert_eq!(restored.dequeue().await.unwrap().id, id);
+    }
+
     #[tokio::test]
     async fn test_purge_clears_persisted_rows() {
         let dir = tempdir().expect("temp dir");
@@ -1829,7 +2024,7 @@ mod tests {
             .await;
 
         let got = scheduler
-            .dequeue_runnable(|id| *id != paused)
+            .dequeue_runnable(|t| t.agent_id != paused)
             .await
             .expect("active agent's task should dequeue");
         assert_eq!(got.agent_id, active);

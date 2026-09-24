@@ -29,7 +29,7 @@ The `agentos` service is hardened:
 - **`no-new-privileges:true`**.
 - **Named volumes** `agentos-data` and `agentos-user-tools` for persistence.
 - Mounts `config/docker.toml` read-only at `/etc/agentos/config.toml`.
-- Runs `web serve --host 0.0.0.0 --port 8080`; publishes `8080` and `9091`.
+- Runs `start`; the REST API binds per `[api]` in `config/docker.toml` (`0.0.0.0:8080`). Publishes `8080` and `9091`.
 
 Jaeger is wired automatically (`AGENTOS_OTEL_ENDPOINT=http://jaeger:4317`); open the UI at
 <http://localhost:16686>.

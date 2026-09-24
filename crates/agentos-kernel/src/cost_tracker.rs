@@ -41,6 +41,10 @@ struct AgentCostState {
     agent_name: String,
     /// Monotonic version used for out-of-order-safe DB upserts.
     persist_version: AtomicU64,
+    /// Serializes the period rollover so `period_start_unix` and the counters
+    /// are never observed out of step. A plain `std::sync::Mutex` on purpose:
+    /// the critical section is a handful of atomic stores with no `.await`.
+    roll_lock: std::sync::Mutex<()>,
 }
 
 /// Result of a budget check before/after an inference call.
@@ -158,45 +162,45 @@ impl CostTracker {
     /// gate that stopped it — a hard-limited agent could never reach the code
     /// that would have freed it (MA-03).
     ///
-    /// `compare_exchange` keeps the concurrent-reset race safe: exactly one
-    /// caller advances `period_start_unix` and zeroes the counters; losers
-    /// observe the new timestamp and skip.
+    /// The rollover is serialized by `roll_lock` and publishes
+    /// `period_start_unix` **last**, with `Release`/`Acquire` ordering against
+    /// the zeroing stores. That is the whole invariant this function exists to
+    /// hold: *any* caller that observes a non-expired period start is
+    /// guaranteed to observe this period's counters, never the last period's.
     ///
-    /// Returns `true` when the period was rolled by this call **or** is being
-    /// rolled right now by another caller. In both cases the counters the
-    /// caller is about to read are not authoritative for the new period (the
-    /// winner's `store(0)` calls may not have landed yet), so a `true` here
-    /// must never be read as "over limit".
+    /// The earlier shape published the new timestamp with a `compare_exchange`
+    /// and zeroed the counters after, which left a window where a third caller
+    /// loaded the new timestamp, computed `elapsed ~= 0`, and then read the
+    /// winner's not-yet-zeroed counters as the new period's — a false
+    /// `HardLimitExceeded`, which `task_executor` turns into a
+    /// `BudgetAction::Suspend`/`Kill` on a live task (H18). It reproduced in
+    /// half of the runs of the regression test below.
     ///
-    // ponytail: `period_start_unix` and the five counters are separate atomics,
-    // all `Relaxed`, so there is a nanosecond-wide window between the
-    // `compare_exchange` below and the `store(0)` calls where a third caller
-    // loads the *new* timestamp, computes `elapsed ~= 0`, returns `false`, and
-    // then reads the winner's not-yet-zeroed counters as if they were the new
-    // period's. Closing it needs the timestamp and counters behind one atomic
-    // (a generation counter bumped by the winner, compared by readers) —
-    // upgrade path if a false one-shot over-limit at the rollover boundary ever
-    // shows up in practice.
+    /// Returns `true` only when this call performed the roll. Either way the
+    /// counters are authoritative once it returns.
     fn maybe_roll_period(state: &AgentCostState) -> bool {
         let now_ts = chrono::Utc::now().timestamp();
-        let start_ts = state.period_start_unix.load(Ordering::Relaxed);
-        if !Self::period_expired(now_ts - start_ts) {
+        if !Self::period_expired(now_ts - state.period_start_unix.load(Ordering::Acquire)) {
             return false;
         }
-        if state
-            .period_start_unix
-            .compare_exchange(start_ts, now_ts, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            state.input_tokens.store(0, Ordering::Relaxed);
-            state.output_tokens.store(0, Ordering::Relaxed);
-            state.tokens_used.store(0, Ordering::Relaxed);
-            state.cost_micro_usd.store(0, Ordering::Relaxed);
-            state.tool_calls.store(0, Ordering::Relaxed);
-            // Fresh period — the operator gets a new set of budget alerts.
-            state.alert_tier.store(0, Ordering::Relaxed);
-            state.tool_limit_notified.store(false, Ordering::Relaxed);
+        let _guard = state
+            .roll_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Re-check under the lock — another caller may have rolled while we waited.
+        if !Self::period_expired(now_ts - state.period_start_unix.load(Ordering::Acquire)) {
+            return false;
         }
+        state.input_tokens.store(0, Ordering::Relaxed);
+        state.output_tokens.store(0, Ordering::Relaxed);
+        state.tokens_used.store(0, Ordering::Relaxed);
+        state.cost_micro_usd.store(0, Ordering::Relaxed);
+        state.tool_calls.store(0, Ordering::Relaxed);
+        // Fresh period — the operator gets a new set of budget alerts.
+        state.alert_tier.store(0, Ordering::Relaxed);
+        state.tool_limit_notified.store(false, Ordering::Relaxed);
+        // Publish last: this is what makes the zeroing visible to everyone else.
+        state.period_start_unix.store(now_ts, Ordering::Release);
         true
     }
 
@@ -413,6 +417,7 @@ impl CostTracker {
             budget,
             agent_name,
             persist_version: AtomicU64::new(version),
+            roll_lock: std::sync::Mutex::new(()),
         };
         self.agents.write().await.insert(agent_id, state);
     }
@@ -445,28 +450,7 @@ impl CostTracker {
 
     /// Look up pricing for a provider + model. Falls back to wildcard, then zero.
     pub async fn get_pricing(&self, provider: &str, model: &str) -> ModelPricing {
-        let table = self.pricing.read().await;
-        // Exact match first
-        if let Some(p) = table
-            .iter()
-            .find(|p| p.provider == provider && p.model == model)
-        {
-            return p.clone();
-        }
-        // Wildcard match (e.g. ollama/*)
-        if let Some(p) = table
-            .iter()
-            .find(|p| p.provider == provider && p.model == "*")
-        {
-            return p.clone();
-        }
-        // Unknown — assume zero cost (conservative: don't block unknown models)
-        ModelPricing {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            input_per_1k: 0.0,
-            output_per_1k: 0.0,
-        }
+        agentos_llm::lookup_pricing(&self.pricing.read().await, provider, model)
     }
 
     /// Record an inference call's token usage and cost. Returns the budget check result.
@@ -512,13 +496,10 @@ impl CostTracker {
             };
 
             // Reset counters if we've crossed into a new budget period (24 hours).
-            // W2: a `true` means the period rolled — here, or concurrently in a
-            // CAS winner whose `store(0)` calls may not have landed yet. Either
-            // way the totals we read back below are pre-reset, so judge this
-            // call as the first of a fresh period instead of enforcing a limit
-            // against a budget that just reset (downstream that is a
-            // `BudgetAction::Suspend`/`Kill` on a live task).
-            let rolled = Self::maybe_roll_period(state);
+            // Whether we rolled or another caller did, the counters are zeroed
+            // before the new period is visible, so the accumulation below is
+            // always against the right period's totals (H18).
+            Self::maybe_roll_period(state);
 
             // Accumulate
             state
@@ -527,19 +508,14 @@ impl CostTracker {
             state
                 .output_tokens
                 .fetch_add(usage.completion_tokens, Ordering::Relaxed);
-            let acc_tokens = state
+            let new_tokens = state
                 .tokens_used
                 .fetch_add(usage.total_tokens, Ordering::Relaxed)
                 + usage.total_tokens;
-            let acc_cost_micro = state
+            let new_cost_micro = state
                 .cost_micro_usd
                 .fetch_add(cost_micro, Ordering::Relaxed)
                 + cost_micro;
-            let (new_tokens, new_cost_micro) = if rolled {
-                (usage.total_tokens, cost_micro)
-            } else {
-                (acc_tokens, acc_cost_micro)
-            };
 
             // Check limits
             let result = self.check_limits(state, new_tokens, new_cost_micro);
@@ -572,12 +548,8 @@ impl CostTracker {
             Some(s) => s,
             None => return BudgetCheckResult::Ok,
         };
-        // Fresh period (rolled here, or being rolled concurrently) — the
-        // counters below may still be the pre-reset values, so reading them
-        // would reject a turn one second after its budget actually reset.
-        if Self::maybe_roll_period(state) {
-            return BudgetCheckResult::Ok;
-        }
+        // Roll first: the counters read below are this period's either way.
+        Self::maybe_roll_period(state);
         let tokens = state.tokens_used.load(Ordering::Relaxed);
         let cost_micro = state.cost_micro_usd.load(Ordering::Relaxed);
         self.check_limits(state, tokens, cost_micro)
@@ -595,9 +567,8 @@ impl CostTracker {
             // W2: same rolled-period rule as `record_inference_with_cost` — a
             // rollover (ours or a concurrent CAS winner's) makes this the first
             // call of a fresh period, not the Nth of the old one.
-            let rolled = Self::maybe_roll_period(state);
-            let acc_calls = state.tool_calls.fetch_add(1, Ordering::Relaxed) + 1;
-            let new_calls = if rolled { 1 } else { acc_calls };
+            Self::maybe_roll_period(state);
+            let new_calls = state.tool_calls.fetch_add(1, Ordering::Relaxed) + 1;
 
             let result = if state.budget.max_tool_calls_per_day > 0 {
                 let pct = (new_calls as f64 / state.budget.max_tool_calls_per_day as f64) * 100.0;

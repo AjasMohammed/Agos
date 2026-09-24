@@ -4,7 +4,7 @@ risk_class = "control_plane"
 [manifest]
 name        = "task-delegate"
 version     = "1.0.0"
-description = "Delegate a sub-task to a named agent and BLOCK until it finishes. Your task is paused and automatically resumed with the child's output in your context. Use spawn-async instead if you must keep working while the child runs."
+description = "Delegate a sub-task to a named agent. The child runs in the background: keep working, its output is delivered into your context when it finishes. If you finish first, you are paused and resumed automatically when the child reports — no polling needed."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "agent"

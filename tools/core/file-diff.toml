@@ -8,6 +8,7 @@ description = "Compute a unified diff between two files (mode=files) or two inli
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
+search_hints = ["compare two files", "show a diff", "what changed between versions"]
 
 [capabilities_required]
 permissions = ["fs.user_data:r", "fs.workspace:r"]

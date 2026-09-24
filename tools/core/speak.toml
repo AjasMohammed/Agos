@@ -1,0 +1,59 @@
+tags = ["write", "voice"]
+# Writes one file under the agent's own home. The network call goes to the
+# operator's `[tts]` endpoint, never to a destination the payload names.
+risk_class = "write_scoped"
+
+[manifest]
+name        = "speak"
+version     = "1.0.0"
+description = "Text-to-speech: turn text into a spoken mp3 saved under speech/ in your own files, using the operator-configured voice service. Returns the file path. It does NOT play or send the audio — follow with channel-send (file_path) to send the file to the user. To speak on the host speakers instead, call audio with action=\"speak\" and the text directly: that synthesises and plays in one call. Use when the user asks you to say, read aloud, or reply in voice. Fails with a clear message if text-to-speech is not enabled."
+author      = "agentos-core"
+trust_tier  = "core"
+search_hints = ["text to speech", "say this out loud", "read aloud", "reply with a voice message", "talk back to the user", "generate spoken audio", "tts"]
+
+[capabilities_required]
+permissions = ["fs.user_data:w"]
+
+[capabilities_provided]
+outputs = ["path"]
+
+[intent_schema]
+input  = "SpeakIntent"
+output = "SpeakResult"
+
+[payload_schema]
+type = "object"
+required = ["text"]
+
+[payload_schema.properties.text]
+type = "string"
+description = "What to say, as plain text (max 4000 characters). No markdown — it would be read out literally."
+
+[payload_schema.properties.voice]
+type = "string"
+description = "Optional voice id offered by the configured voice service. Omit to use the operator's default."
+
+# Executes in-process (the kernel builds it from [tts]); these limits document
+# intent for the day it could be sandboxed.
+[sandbox]
+network       = true
+fs_write      = true
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []
+
+[usage_hints]
+use_for = [
+  "answering in voice when the user asks you to speak, read something aloud, or sent a voice message and wants one back",
+  "producing a voice FILE to send to the user — for sound on the host speakers call audio with action=\"speak\" instead, which synthesises and plays in one call",
+]
+prefer_over = [
+  "shell-exec with curl against a speech server — blocked without network grants and needs the endpoint you do not know",
+]
+related_tools = ["audio", "channel-send"]
+
+[[examples]]
+description = "Turn a short reply into speech"
+[examples.payload]
+text = "The backup finished. Nothing needs your attention."

@@ -643,6 +643,354 @@ Serves the [Scalar](https://scalar.com/) interactive API documentation UI, rende
 
 ---
 
+## Full Route Index
+
+Generated from `crates/agentos-api/openapi.json` — **135 paths, 177 operations**. That file (served at `GET /api/v1/openapi.json`, browsable at `GET /api/v1/docs`) is the authoritative contract: request and response schemas live there, and CI fails when it drifts from the handlers. The detailed sections above cover the most-used endpoints; everything else is listed here.
+
+### `agent-chats`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/agent-chats` | List multi-agent conversations (most-recent first). |
+| `POST` | `/api/v1/agent-chats` | Create a conversation and start its orchestration |
+| `GET` | `/api/v1/agent-chats/{id}` | Get a conversation with its turn timeline. |
+| `POST` | `/api/v1/agent-chats/{id}/continue` | Resume a finished conversation in |
+| `POST` | `/api/v1/agent-chats/{id}/messages` | Post an operator message. A running |
+| `POST` | `/api/v1/agent-chats/{id}/stop` | Stop a running conversation after its |
+
+### `agents`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/agents` | List all connected agents. |
+| `POST` | `/api/v1/agents` | Connect a new agent. |
+| `GET` | `/api/v1/agents/{id}/inbox` | Agent-to-agent message history for an agent |
+| `GET` | `/api/v1/agents/{name}` | Get detailed info for a single agent. |
+| `DELETE` | `/api/v1/agents/{name}` | Disconnect an agent by name, or remove it |
+| `GET` | `/api/v1/agents/{name}/identity` | Agent cryptographic identity. |
+| `POST` | `/api/v1/agents/{name}/permissions` | Grant a permission to an agent. |
+| `POST` | `/api/v1/agents/{name}/permissions/revoke` | Revoke a permission. |
+| `POST` | `/api/v1/agents/{name}/settings` | Update editable settings for an agent. |
+| `GET` | `/api/v1/providers` | List built-in and catalog LLM providers. |
+
+### `approval-policies`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/approval-policies` | List active standing grants. |
+| `POST` | `/api/v1/approval-policies` | Add a standing grant. |
+| `DELETE` | `/api/v1/approval-policies/{id}` | Revoke a standing grant. |
+
+### `audit`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/audit/logs` | Query audit log entries. |
+| `GET` | `/api/v1/audit/logs/{trace_id}` | Get a specific audit entry by trace ID. |
+| `GET` | `/api/v1/audit/verify` | Verify audit log integrity. |
+
+### `auth`
+
+| Method | Path | Summary |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | Exchange the operator credential for a scoped, |
+| `GET` | `/api/v1/auth/me` | Identity and scopes of the presented key. |
+| `POST` | `/api/v1/auth/refresh` | Rotate the presented key: mint a fresh key with |
+| `POST` | `/api/v1/ws/ticket` | Mint a short-lived, single-use WebSocket auth |
+
+### `channels`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/channels` | List connected channels. |
+| `POST` | `/api/v1/channels` | Connect a channel (mirrors `agentos channel connect`). |
+| `GET` | `/api/v1/channels/pairings` | DM pairing allowlist (approved + pending). |
+| `POST` | `/api/v1/channels/pairings/{code}/approve` | Approve a pairing code. |
+| `GET` | `/api/v1/channels/{id}` | Channel detail. |
+| `PUT` | `/api/v1/channels/{id}` | Edit a connected channel and rebuild its adapter. |
+| `PUT` | `/api/v1/channels/{id}/agent` | Set/clear the default chat agent. |
+| `POST` | `/api/v1/channels/{id}/disconnect` | Deregister a channel. |
+| `DELETE` | `/api/v1/channels/{id}/pairings/{sender_id}` | Revoke an approved sender. |
+| `POST` | `/api/v1/channels/{id}/pairings/{sender_id}/approve` | Approve a |
+| `POST` | `/api/v1/channels/{id}/test` | Deliver a test notification. |
+
+### `chat`
+
+| Method | Path | Summary |
+|---|---|---|
+| `POST` | `/api/v1/chat/completions` | OpenAI-compatible chat completion. |
+
+### `chat-sessions`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/chat/sessions` | List chat sessions (most-recent first). |
+| `POST` | `/api/v1/chat/sessions` | Create a new chat session. |
+| `GET` | `/api/v1/chat/sessions/{id}` | Get a session with its message timeline. |
+| `PATCH` | `/api/v1/chat/sessions/{id}` | Rename a session (or clear the title). |
+| `DELETE` | `/api/v1/chat/sessions/{id}` | Delete a session and its messages. |
+| `GET` | `/api/v1/chat/sessions/{id}/export` | Export a session as JSON or markdown. |
+| `POST` | `/api/v1/chat/sessions/{id}/fork` | Fork a session into a new copy. |
+| `GET` | `/api/v1/chat/sessions/{id}/messages` | List a session's messages. |
+| `POST` | `/api/v1/chat/sessions/{id}/messages` | send a user message and get the |
+| `POST` | `/api/v1/chat/sessions/{id}/messages/stream` | send a user message and |
+
+### `config`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/config` | Full config tree with secret-bearing leaves redacted. |
+| `GET` | `/api/v1/config/{key}` | Resolve a dotted config key from the live file. |
+| `PUT` | `/api/v1/config/{key}` | Write a dotted config key (gated by |
+
+### `connectors`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/connectors` | List registered connectors and connection status. |
+| `POST` | `/api/v1/connectors` | Register a connector from a manifest TOML. |
+| `GET` | `/api/v1/connectors/{id}` | Connector detail. |
+| `PUT` | `/api/v1/connectors/{id}` | Replace a connector manifest in place. |
+| `DELETE` | `/api/v1/connectors/{id}` | Remove manifest + credential. |
+| `POST` | `/api/v1/connectors/{id}/credential` | Store an OAuth token by hand. |
+| `POST` | `/api/v1/connectors/{id}/disconnect` | Revoke OAuth credential + deregister. |
+| `GET` | `/api/v1/connectors/{id}/oauth/callback` | Provider redirect target (public). |
+| `POST` | `/api/v1/connectors/{id}/oauth/start` | Begin OAuth; returns the URL to open. |
+
+### `costs`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/costs/agents/{name}` | Get cost summary for a specific agent. |
+| `GET` | `/api/v1/costs/summary` | Get cost summary across all agents. |
+
+### `escalations`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/escalations` | List escalations (pending by default, or all). |
+| `GET` | `/api/v1/escalations/{id}` | Get a single escalation by numeric ID. |
+| `POST` | `/api/v1/escalations/{id}/resolve` | Resolve an escalation with a decision. |
+
+### `events`
+
+| Method | Path | Summary |
+|---|---|---|
+| `POST` | `/api/v1/events/emit` | Emit an event into the kernel event bus. |
+| `GET` | `/api/v1/events/stream` | SSE stream of realtime events. |
+| `GET` | `/api/v1/events/subscriptions` | List all event subscriptions. |
+| `POST` | `/api/v1/events/subscriptions` | Create an event subscription. |
+| `DELETE` | `/api/v1/events/subscriptions/{id}` | Remove a subscription. |
+| `POST` | `/api/v1/events/subscriptions/{id}/disable` | Pause a subscription. |
+| `POST` | `/api/v1/events/subscriptions/{id}/enable` | Activate a subscription. |
+
+### `files`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/files` | List files for the authenticated principal. |
+| `POST` | `/api/v1/files` | Upload a file via `multipart/form-data`. |
+| `GET` | `/api/v1/files/{id}` | Get a single file's metadata. |
+| `DELETE` | `/api/v1/files/{id}` | Remove a file record and its bytes from disk. |
+| `GET` | `/api/v1/files/{id}/download` | Stream the raw file bytes. |
+
+### `keys`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/keys` | List all API keys with management metadata (never the |
+| `POST` | `/api/v1/keys` | Mint a new scoped API key. The raw key is returned once. |
+| `DELETE` | `/api/v1/keys/{id}` | Revoke a key by its public id. Idempotent-ish: |
+
+### `marketplace`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/marketplace` | Search the registry (empty list on failure). |
+| `GET` | `/api/v1/marketplace/{name}` | Fetch a single registry item. |
+| `POST` | `/api/v1/marketplace/{name}/reviews` | Submit a review to the registry. |
+
+### `mcp`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/mcp` | List MCP servers (live + persisted attachments). |
+| `POST` | `/api/v1/mcp` | Attach an MCP server at runtime (stdio or http). |
+| `GET` | `/api/v1/mcp/catalog` | Browse the curated MCP catalog. |
+| `GET` | `/api/v1/mcp/catalog/{id}` | Full catalog entry. |
+| `POST` | `/api/v1/mcp/catalog/{id}/install` | Install a catalog entry (attaches under its id). |
+| `PUT` | `/api/v1/mcp/{name}` | Re-attach a server with a new configuration. |
+| `POST` | `/api/v1/mcp/{name}/detach` | Stop and remove an MCP server. |
+
+### `memory`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/agents/{id}/memory/{tier}` | Browse or search an agent's memory. |
+
+### `notifications`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/notifications` | List notifications with optional filtering. |
+| `DELETE` | `/api/v1/notifications` | Clear every notification (live questions survive). |
+| `DELETE` | `/api/v1/notifications/read` | Clear all read notifications. |
+| `POST` | `/api/v1/notifications/read-all` | Mark every notification as read. |
+| `GET` | `/api/v1/notifications/unread` | Get count of unread notifications. |
+| `GET` | `/api/v1/notifications/{id}` | Get a single notification. |
+| `DELETE` | `/api/v1/notifications/{id}` | Dismiss a single notification. |
+| `POST` | `/api/v1/notifications/{id}/read` | Mark a single notification read. |
+| `POST` | `/api/v1/notifications/{id}/respond` | Respond to a notification. |
+
+### `pipelines`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/pipelines` | List all saved pipelines. |
+| `POST` | `/api/v1/pipelines` | Save (create or update) a pipeline. |
+| `POST` | `/api/v1/pipelines/import` | Install a pipeline from raw YAML. |
+| `GET` | `/api/v1/pipelines/runs/{run_id}/events` | Snapshot of a pipeline run. |
+| `GET` | `/api/v1/pipelines/{name}` | Full pipeline definition as JSON. |
+| `DELETE` | `/api/v1/pipelines/{name}` | Delete a pipeline. |
+| `GET` | `/api/v1/pipelines/{name}/export` | Export a pipeline as raw YAML. |
+| `POST` | `/api/v1/pipelines/{name}/run` | Execute a pipeline. |
+
+### `plugins`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/plugins` | List discovered plugins. |
+| `POST` | `/api/v1/plugins` | Install a plugin from a pasted `plugin.toml`. |
+| `POST` | `/api/v1/plugins/discover` | Re-scan plugin directories. |
+| `GET` | `/api/v1/plugins/{id}` | Plugin detail. |
+| `PUT` | `/api/v1/plugins/{id}` | Replace a user plugin's manifest in place. |
+| `DELETE` | `/api/v1/plugins/{id}` | Remove a user-installed plugin (core plugins refuse). |
+| `POST` | `/api/v1/plugins/{id}/disable` | Deactivate a plugin. |
+| `POST` | `/api/v1/plugins/{id}/enable` | Activate a plugin. |
+
+### `prefs`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/prefs/proposals` | List user-preference proposals by status. |
+| `POST` | `/api/v1/prefs/proposals/{id}/accept` | Accept a proposal. |
+| `POST` | `/api/v1/prefs/proposals/{id}/reject` | Reject a proposal. |
+| `GET` | `/api/v1/prefs/stats` | Aggregate proposal counts. |
+
+### `roles`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/roles` | List all roles. |
+| `POST` | `/api/v1/roles` | Create a new role with permissions. |
+| `GET` | `/api/v1/roles/{name}` | Get a single role by name. |
+| `DELETE` | `/api/v1/roles/{name}` | Delete a role by name. |
+
+### `schedules`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/schedules` | List all scheduled entries: recurring cron |
+| `POST` | `/api/v1/schedules` | Create a new cron schedule. |
+| `POST` | `/api/v1/schedules/preview` | Compute upcoming fire times for a cron |
+| `DELETE` | `/api/v1/schedules/{id}` | Delete a schedule. |
+| `POST` | `/api/v1/schedules/{id}/pause` | Pause a schedule. |
+| `POST` | `/api/v1/schedules/{id}/resume` | Resume a paused schedule. |
+| `GET` | `/api/v1/schedules/{id}/runs` | List recorded fires of a schedule. |
+
+### `scratchpad`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/agents/{name}/scratchpad` | List an agent's scratchpad pages. |
+| `GET` | `/api/v1/agents/{name}/scratchpad/{page}` | Read an agent's page. |
+| `PUT` | `/api/v1/agents/{name}/scratchpad/{page}` | Create or overwrite a page. |
+| `DELETE` | `/api/v1/agents/{name}/scratchpad/{page}` | Delete a page. |
+| `GET` | `/api/v1/scratchpad` | List pages in the global scratchpad. |
+| `GET` | `/api/v1/scratchpad/{page}` | Read a page from the global scratchpad. |
+| `PUT` | `/api/v1/scratchpad/{page}` | Create or overwrite a global page. |
+| `DELETE` | `/api/v1/scratchpad/{page}` | Delete a global page. |
+
+### `secrets`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/secrets` | List all secrets (metadata only, no values). |
+| `POST` | `/api/v1/secrets` | Set or update a secret. |
+| `DELETE` | `/api/v1/secrets/{name}` | Revoke (delete) a secret. |
+
+### `skills`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/skills` | List installed skills. |
+| `GET` | `/api/v1/skills/{name}` | Get one skill's full detail. |
+
+### `system`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/dashboard` | Composite dashboard summary (agents, task counts, |
+| `GET` | `/api/v1/doctor` | Run all diagnostic checks (read-only). |
+| `POST` | `/api/v1/doctor/fix` | Attempt to auto-repair failing checks, then |
+| `GET` | `/api/v1/hal` | Hardware abstraction layer device inventory + snapshot. |
+| `GET` | `/api/v1/health` | Public health check (no auth required). |
+| `GET` | `/api/v1/logs` | Query the audit log with optional level/since filters. |
+| `GET` | `/api/v1/resources` | Host memory/disk snapshot plus live resource locks. |
+| `GET` | `/api/v1/status` | System status with agent/task/tool counts. |
+
+### `tasks`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/tasks` | List tasks with optional filtering. |
+| `POST` | `/api/v1/tasks/run` | Submit a new task for execution. |
+| `GET` | `/api/v1/tasks/{id}` | Get a single task by ID. |
+| `POST` | `/api/v1/tasks/{id}/cancel` | Cancel a running task. |
+| `GET` | `/api/v1/tasks/{id}/checkpoints` | List checkpoints for a task (0 or 1). |
+| `POST` | `/api/v1/tasks/{id}/resume` | Resume a task from its latest checkpoint. |
+| `GET` | `/api/v1/tasks/{id}/trace` | Get execution trace for a task. |
+
+### `tools`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/tools` | List all registered tools. |
+| `POST` | `/api/v1/tools` | Install a tool from a manifest path. |
+| `GET` | `/api/v1/tools/{name}` | Get a specific tool by name. |
+| `DELETE` | `/api/v1/tools/{name}` | Remove a tool by name. |
+
+### `webhooks`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/webhooks` | List webhook endpoints. |
+| `POST` | `/api/v1/webhooks` | Create a webhook endpoint (returns secret once). |
+| `POST` | `/api/v1/webhooks/incoming/{endpoint_id}` | Provider webhook ingress. |
+| `POST` | `/api/v1/webhooks/telegram/{channel_id}` | `POST /api/v1/webhooks/telegram/{channel_id}` |
+| `DELETE` | `/api/v1/webhooks/{id}` | Delete a webhook endpoint. |
+| `POST` | `/api/v1/webhooks/{id}/rotate` | Rotate the endpoint secret (returns once). |
+
+### `workflows`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/workflows` | List all saved workflows. |
+| `POST` | `/api/v1/workflows` | Create a new workflow (server assigns the id). |
+| `GET` | `/api/v1/workflows/{id}` | Fetch a single workflow's full definition. |
+| `PUT` | `/api/v1/workflows/{id}` | Update an existing workflow in place. |
+| `DELETE` | `/api/v1/workflows/{id}` | Delete a workflow. |
+
+### `workspace-grants`
+
+| Method | Path | Summary |
+|---|---|---|
+| `GET` | `/api/v1/workspace-grants` | List active folder-access grants. |
+| `POST` | `/api/v1/workspace-grants` | Grant a host directory to one agent, or to |
+| `DELETE` | `/api/v1/workspace-grants` | Revoke a grant. |
+
+---
+
 ## Security Headers
 
 All API responses include:

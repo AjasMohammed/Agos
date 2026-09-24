@@ -27,6 +27,29 @@ pub fn apply_log_level(level: &str) -> Result<(), String> {
     }
 }
 
+/// Counts every emitted tracing event by level, turning "how many errors are
+/// we logging" into `agentos_log_events_total{level="error"}` instead of a
+/// grep over the log file. Level maps to a `&'static str`, so this allocates
+/// nothing on the hot path.
+pub struct LevelCounterLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LevelCounterLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = match *event.metadata().level() {
+            tracing::Level::ERROR => "error",
+            tracing::Level::WARN => "warn",
+            tracing::Level::INFO => "info",
+            tracing::Level::DEBUG => "debug",
+            tracing::Level::TRACE => "trace",
+        };
+        crate::metrics::record_log_event(level);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

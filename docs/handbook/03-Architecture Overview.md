@@ -62,7 +62,7 @@ status: complete
 │ LLM  │ │Tools │ │ Security │ │Memory │ │ Audit  │ │  HAL   │
 │      │ │      │ │          │ │       │ │        │ │        │
 │Ollama│ │file  │ │Capability│ │Episod.│ │SQLite  │ │System  │
-│OpenAI│ │shell │ │  Vault   │ │Semant.│ │146 evt │ │Process │
+│OpenAI│ │shell │ │  Vault   │ │Semant.│ │173 evt │ │Process │
 │Anthro│ │memory│ │ Sandbox  │ │Proced.│ │  types │ │Network │
 │Gemini│ │data  │ │  WASM    │ │Embedd.│ │        │ │GPU     │
 │Mock  │ │coord │ │          │ │       │ │        │ │Storage │
@@ -112,10 +112,6 @@ agentos-api                    (REST API + WebSocket server)
 
 agentos-sdk                    (tool development kit)
 ├── agentos-sdk-macros         (proc-macro for #[tool])
-└── agentos-types
-
-agentos-web                    (web UI, under development)
-├── agentos-kernel
 └── agentos-types
 ```
 
@@ -442,7 +438,7 @@ All file tools reject any path containing `..` — this is a hard-coded security
 
 ### Audit trail
 
-Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 146 event types. The log cannot be modified or deleted through normal operation.
+Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 173 event types. The log cannot be modified or deleted through normal operation.
 
 ---
 

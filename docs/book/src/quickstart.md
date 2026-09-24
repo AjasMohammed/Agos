@@ -10,10 +10,15 @@ Get from zero to a running task in minutes. The binary is **`agentos`**.
 curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | bash
 ```
 
-The installer detects your OS/arch, downloads the matching prebuilt binary, **verifies the
-SHA-256 checksum (mandatory)** and the minisign signature when available, installs to
+The installer detects your OS/arch, downloads the matching prebuilt binary, **verifies both the
+SHA-256 checksum and the minisign signature (both mandatory)**, installs to
 `~/.local/bin`, and runs `agentos doctor`. Pin a version with `AGENTOS_VERSION=v1.0.0` or
 change the target with `AGENTOS_INSTALL_DIR`.
+
+> Signature verification needs `minisign` (`apt`/`brew`/`dnf install minisign`) or `rsign`
+> (`cargo install rsign2`). Without one the install stops: the checksum arrives from the same
+> server as the binary, so only the signature proves the release came from the AgentOS key.
+> `AGENTOS_SKIP_SIG_VERIFY=1` installs on the checksum alone.
 
 > Linux is the primary target. On macOS, seccomp sandboxing and most hardware (HAL) tools
 > are unavailable and degrade gracefully. On Windows, use WSL2.
@@ -57,10 +62,10 @@ the bus socket, and tool loading. Add `--fix` to auto-repair common issues.
 
 ## 4. Run something
 
-Start the web UI:
+Start the kernel:
 
 ```bash
-agentos web serve            # http://127.0.0.1:8080
+agentos start                # REST API on http://127.0.0.1:8080 when [api] enabled = true
 ```
 
 …or run a task straight from the CLI. Connect an agent, grant it a permission, then run:

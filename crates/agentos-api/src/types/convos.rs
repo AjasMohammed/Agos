@@ -20,6 +20,10 @@ pub struct ApiConvoSummary {
     pub status: String,
     /// RFC3339 last-updated timestamp.
     pub updated_at: String,
+    /// How the thread started: `"operator"` (created from the UI or API) or
+    /// `"dm"` (opened by an agent's `agent-message`). Older rows read
+    /// `"operator"` — the column's default.
+    pub kind: String,
 }
 
 /// A single turn within a conversation.

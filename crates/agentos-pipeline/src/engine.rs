@@ -23,6 +23,15 @@ pub trait PipelineExecutor: Send + Sync {
         input: serde_json::Value,
     ) -> Result<String, AgentOSError>;
 
+    /// Name of the agent whose permissions govern this run.
+    ///
+    /// Bound to `{{agent}}` so a shipped template (`pipelines/core/`) runs
+    /// unedited under whatever the operator named their agent. `None` leaves
+    /// `{{agent}}` unresolved, which is what every non-operator caller wants.
+    fn governing_agent(&self) -> Option<String> {
+        None
+    }
+
     /// Check budget before executing a pipeline step. Returns Ok(()) if within budget,
     /// or Err if budget is exhausted for the pipeline's agent.
     /// Default implementation always returns Ok (no budget enforcement).
@@ -34,7 +43,27 @@ pub trait PipelineExecutor: Send + Sync {
 /// Variables produced by the kernel at pipeline start — never from user input
 /// or step output. These are kernel-controlled and safe to interpolate without
 /// escaping.
+///
+/// `agent` is deliberately NOT here. It is kernel-resolved (validated against
+/// the registry before the run starts) but its *shape* is free text an operator
+/// typed at `agent connect`, unlike a UUID, a date or an integer. Interpolated
+/// into a prompt it is wrapped in `<user_data>` tags and into a tool payload it
+/// is escaped, like any other value.
 const BUILTIN_VARS: &[&str] = &["run_id", "date", "timestamp"];
+
+/// Context names a step may not bind with `output_var`.
+///
+/// Without this, `output_var: agent` overwrites the kernel-seeded governing
+/// agent, and a later step's `agent: "{{agent}}"` dispatches to whatever that
+/// step *produced* — an LLM answer, a tool result, anything derived from the
+/// run's input. A step's agent is the authority its task runs with, so that is
+/// exactly the input-directed dispatch [`PipelineEngine::resolve_step_agent`]
+/// refuses on the template side. The same shadowing of `run_id`/`date`/
+/// `timestamp` would splice step output into a prompt or a tool payload with
+/// the escaping their built-in status skips.
+fn is_reserved_var(name: &str) -> bool {
+    name == "input" || name == "agent" || BUILTIN_VARS.contains(&name)
+}
 
 fn template_regex() -> &'static Regex {
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -96,12 +125,37 @@ impl PipelineEngine {
     }
 
     /// Run a pipeline end-to-end.
+    ///
+    /// Operator pipelines (`agentos pipeline run`) come through here and keep
+    /// the string-splicing template path they have always used.
     pub async fn run(
         &self,
         definition: &PipelineDefinition,
         input: &str,
         run_id: RunID,
         executor: &dyn PipelineExecutor,
+    ) -> Result<PipelineRun, AgentOSError> {
+        self.run_with_bindings(definition, input, run_id, executor, None)
+            .await
+    }
+
+    /// Run a pipeline with structured bindings for its tool step payloads.
+    ///
+    /// `bindings` is `Some` for a compiled procedure, whose payloads are
+    /// rendered by walking the JSON ([`crate::bindings::render`]) rather than
+    /// by substituting into serialized text. That is what lets a step payload
+    /// take a non-string value and select a field out of an earlier step's
+    /// result (`{{clip.path}}`), neither of which the text path can express.
+    ///
+    /// `None` keeps the legacy path exactly as it was, so nothing an operator
+    /// has already written changes behaviour.
+    pub async fn run_with_bindings(
+        &self,
+        definition: &PipelineDefinition,
+        input: &str,
+        run_id: RunID,
+        executor: &dyn PipelineExecutor,
+        bindings: Option<crate::bindings::Bindings>,
     ) -> Result<PipelineRun, AgentOSError> {
         // Validate the pipeline
         self.validate(definition)?;
@@ -131,6 +185,27 @@ impl PipelineEngine {
             Utc::now().format("%Y-%m-%d").to_string(),
         );
         context.insert("timestamp".to_string(), Utc::now().timestamp().to_string());
+        // Resolved by the kernel from the `--agent` flag and validated against
+        // the registry before the run starts. `validate` has already refused any
+        // step that would overwrite it.
+        if let Some(agent) = executor.governing_agent() {
+            context.insert("agent".to_string(), agent);
+        }
+
+        // The built-ins are mirrored into the structured map for symmetry with
+        // the legacy context. A procedure cannot actually reach them today —
+        // `procedure-create` only admits `inputs.<declared>` or an earlier
+        // `output_var`, and execution re-validates — so this is future-proofing,
+        // not a live path.
+        let mut bindings = bindings.map(|seed| {
+            let mut bindings = seed;
+            for (key, value) in &context {
+                bindings
+                    .entry(key.clone())
+                    .or_insert_with(|| serde_json::Value::String(value.clone()));
+            }
+            bindings
+        });
 
         // Build dependency graph for wave-based parallel execution.
         // Steps with no unresolved dependencies form a "wave" and execute
@@ -192,12 +267,15 @@ impl PipelineEngine {
             // Use a shared reference to context (each step in the same wave
             // reads from the same snapshot; they cannot see each other's outputs).
             let ctx_ref = &context;
+            let bindings_ref = bindings.as_ref();
             let run_ref = &run;
             let futs: Vec<_> = wave
                 .iter()
                 .filter_map(|&id| step_map.get(id).copied())
                 .map(|step| async move {
-                    let result = self.execute_step(step, ctx_ref, run_ref, executor).await;
+                    let result = self
+                        .execute_step(step, ctx_ref, bindings_ref, run_ref, executor)
+                        .await;
                     (step, result)
                 })
                 .collect();
@@ -212,6 +290,7 @@ impl PipelineEngine {
                         if let Some(ref var_name) = step.output_var {
                             if let Some(ref output) = step_result.output {
                                 context.insert(var_name.clone(), output.clone());
+                                bind_output(&mut bindings, var_name, output);
                             }
                         }
                         self.store.record_step_execution(&run.id, &step_result)?;
@@ -267,6 +346,7 @@ impl PipelineEngine {
                                 );
                                 if let Some(ref var_name) = step.output_var {
                                     context.insert(var_name.clone(), default_val.clone());
+                                    bind_output(&mut bindings, var_name, &default_val);
                                 }
                                 let default_result = StepResult {
                                     step_id: step.id.clone(),
@@ -319,6 +399,7 @@ impl PipelineEngine {
         &self,
         step: &PipelineStep,
         context: &HashMap<String, String>,
+        bindings: Option<&crate::bindings::Bindings>,
         _run: &PipelineRun,
         executor: &dyn PipelineExecutor,
     ) -> Result<StepResult, AgentOSError> {
@@ -333,8 +414,9 @@ impl PipelineEngine {
         for attempt in 1..=max_attempts {
             let result = match &step.action {
                 StepAction::Agent { agent, task } => {
+                    let agent = Self::resolve_step_agent(agent, context);
                     let rendered_task = Self::render_template_for_prompt(task, context);
-                    let fut = executor.run_agent_task(agent, &rendered_task);
+                    let fut = executor.run_agent_task(&agent, &rendered_task);
                     match timeout_duration {
                         Some(dur) => match tokio::time::timeout(dur, fut).await {
                             Ok(r) => r,
@@ -350,18 +432,44 @@ impl PipelineEngine {
                     }
                 }
                 StepAction::Tool { tool, input } => {
-                    // Render template variables in tool input
-                    let input_str = serde_json::to_string(input).unwrap_or_default();
-                    let rendered_input_str = Self::render_template_for_json(&input_str, context);
-                    let rendered_input: serde_json::Value =
-                        serde_json::from_str(&rendered_input_str).map_err(|e| {
-                            AgentOSError::KernelError {
-                                reason: format!(
-                                    "Template rendering produced invalid JSON for step '{}': {e}",
-                                    step.id
-                                ),
+                    let rendered_input = match bindings {
+                        // Structural: walks the value, so a bound value cannot
+                        // corrupt the payload's shape and can carry its own
+                        // JSON type.
+                        Some(bindings) => {
+                            let (rendered, unresolved) =
+                                crate::bindings::render_checked(input, bindings);
+                            // A binding that resolved to nothing must not be
+                            // handed to a live tool as the literal marker text:
+                            // `audio_path`, `url` and `command` all take it
+                            // verbatim. Reachable through the sanctioned path —
+                            // an optional input with no value and no default.
+                            if !unresolved.is_empty() {
+                                return Err(AgentOSError::KernelError {
+                                    reason: format!(
+                                        "step '{}' has unresolved bindings: {}",
+                                        step.id,
+                                        unresolved.join(", ")
+                                    ),
+                                });
                             }
-                        })?;
+                            rendered
+                        }
+                        // Legacy: serialize, substitute into the text, re-parse.
+                        None => {
+                            let input_str = serde_json::to_string(input).unwrap_or_default();
+                            let rendered_input_str =
+                                Self::render_template_for_json(&input_str, context);
+                            serde_json::from_str(&rendered_input_str).map_err(|e| {
+                                AgentOSError::KernelError {
+                                    reason: format!(
+                                        "Template rendering produced invalid JSON for step '{}': {e}",
+                                        step.id
+                                    ),
+                                }
+                            })?
+                        }
+                    };
 
                     let fut = executor.run_tool(tool, rendered_input);
                     match timeout_duration {
@@ -429,6 +537,22 @@ impl PipelineEngine {
         Err(last_error.unwrap_or_else(|| AgentOSError::KernelError {
             reason: format!("Step '{}' failed with no error details", step.id),
         }))
+    }
+
+    /// Which agent a step actually runs as.
+    ///
+    /// Only the exact value `{{agent}}` is substituted, and only with the
+    /// governing agent the operator named. Nothing else in the field is
+    /// rendered: a partial or computed name (`"review-{{input}}"`) would let a
+    /// run's *input* choose which agent a step executes as, and a step's agent
+    /// is what its task runs with the authority of.
+    fn resolve_step_agent(agent: &str, context: &HashMap<String, String>) -> String {
+        if agent.trim() == "{{agent}}" {
+            if let Some(governing) = context.get("agent") {
+                return governing.clone();
+            }
+        }
+        agent.to_string()
     }
 
     /// Resolve all `{{var}}` references in a template string without applying
@@ -575,6 +699,18 @@ impl PipelineEngine {
             }
         }
 
+        // A step may not shadow a kernel-seeded variable. See `is_reserved_var`.
+        for step in &definition.steps {
+            if let Some(var) = step.output_var.as_deref().filter(|v| is_reserved_var(v)) {
+                return Err(AgentOSError::KernelError {
+                    reason: format!(
+                        "Step '{}' binds output_var '{var}', which is a reserved pipeline variable",
+                        step.id
+                    ),
+                });
+            }
+        }
+
         // Validate topological sort (checks deps and cycles)
         Self::topological_sort(&definition.steps)?;
 
@@ -616,6 +752,7 @@ mod tests {
         tool_calls: Mutex<Vec<(String, serde_json::Value)>>,
         agent_response: AgentResponseFn,
         tool_response: ToolResponseFn,
+        governing_agent: Option<String>,
     }
 
     impl MockExecutor {
@@ -629,7 +766,13 @@ mod tests {
                 tool_response: Box::new(|tool, _input| {
                     Ok(format!("[{tool} executed with: {{input}}]"))
                 }),
+                governing_agent: None,
             }
+        }
+
+        fn with_governing_agent(mut self, name: &str) -> Self {
+            self.governing_agent = Some(name.to_string());
+            self
         }
 
         fn with_agent_response<F>(mut self, f: F) -> Self
@@ -651,6 +794,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PipelineExecutor for MockExecutor {
+        fn governing_agent(&self) -> Option<String> {
+            self.governing_agent.clone()
+        }
+
         async fn run_agent_task(
             &self,
             agent_name: &str,
@@ -776,6 +923,180 @@ output: analysis
         assert_eq!(def.steps[0].id, "research");
         assert_eq!(def.name, "test-pipeline");
         assert_eq!(def.output, Some("analysis".to_string()));
+    }
+
+    /// `{{agent}}` is what lets the shipped `pipelines/core/` templates run
+    /// under whatever the operator named their agent, without editing the YAML.
+    #[tokio::test]
+    async fn test_agent_binding_resolves_to_the_governing_agent() {
+        let (engine, _dir) = test_engine();
+        let executor = MockExecutor::new().with_governing_agent("nova");
+
+        let yaml = r#"
+name: "agent-binding"
+version: "1.0.0"
+steps:
+  - id: step1
+    agent: "{{agent}}"
+    task: "Explain {{input}} as {{agent}}"
+    output_var: out
+output: out
+"#;
+        install_def(&engine, yaml);
+        let def = PipelineDefinition::from_yaml(yaml).unwrap();
+        let run = engine
+            .run(&def, "pipelines", RunID::new(), &executor)
+            .await
+            .unwrap();
+
+        assert_eq!(run.status, PipelineRunStatus::Complete);
+        let calls = executor.agent_calls.lock().unwrap();
+        assert_eq!(calls[0].0, "nova");
+        // Not a BUILTIN_VAR: an operator-typed name is escaped in a prompt like
+        // any other value. Only the `agent:` field takes it verbatim.
+        assert!(
+            calls[0].1.contains("as <user_data>nova</user_data>"),
+            "{}",
+            calls[0].1
+        );
+    }
+
+    /// Only the whole field is substituted. A computed agent name would let a
+    /// run's input choose which agent a step executes with the authority of.
+    #[tokio::test]
+    async fn test_a_computed_agent_name_is_never_substituted() {
+        let (engine, _dir) = test_engine();
+        let executor = MockExecutor::new().with_governing_agent("nova");
+
+        let yaml = r#"
+name: "agent-binding-partial"
+version: "1.0.0"
+steps:
+  - id: step1
+    agent: "review-{{agent}}"
+    task: "x"
+    output_var: a
+  - id: step2
+    agent: "{{input}}"
+    task: "y"
+    output_var: b
+    depends_on: [step1]
+output: b
+"#;
+        install_def(&engine, yaml);
+        let def = PipelineDefinition::from_yaml(yaml).unwrap();
+        engine
+            .run(&def, "root-agent", RunID::new(), &executor)
+            .await
+            .unwrap();
+
+        let calls = executor.agent_calls.lock().unwrap();
+        assert_eq!(calls[0].0, "review-{{agent}}");
+        assert_eq!(calls[1].0, "{{input}}");
+    }
+
+    /// A step that rebinds `agent` would let step *output* pick the agent a
+    /// later step runs as. Refused at validation, so neither run path reaches it.
+    #[tokio::test]
+    async fn test_a_step_may_not_shadow_a_reserved_variable() {
+        let (engine, _dir) = test_engine();
+        let executor = MockExecutor::new().with_governing_agent("low-priv-bot");
+
+        let yaml = r#"
+name: "reserved-var"
+version: "1.0.0"
+steps:
+  - id: route
+    agent: "dispatcher"
+    task: "Which agent should handle {{input}}?"
+    output_var: agent
+  - id: work
+    agent: "{{agent}}"
+    task: "do it"
+    output_var: done
+    depends_on: [route]
+output: done
+"#;
+        let def = PipelineDefinition::from_yaml(yaml).unwrap();
+        let err = engine
+            .run(&def, "anything", RunID::new(), &executor)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved pipeline variable"), "{err}");
+        assert!(
+            executor.agent_calls.lock().unwrap().is_empty(),
+            "no step may run"
+        );
+
+        // Same rule for the pre-existing built-ins, whose escaping is skipped.
+        for reserved in ["run_id", "date", "timestamp", "input"] {
+            let yaml = format!(
+                "name: \"r\"\nversion: \"1.0.0\"\nsteps:\n  - id: s\n    agent: a\n    task: t\n    output_var: {reserved}\noutput: {reserved}\n"
+            );
+            let def = PipelineDefinition::from_yaml(&yaml).unwrap();
+            assert!(
+                engine
+                    .run(&def, "x", RunID::new(), &executor)
+                    .await
+                    .is_err(),
+                "{reserved} must be refused"
+            );
+        }
+    }
+
+    /// No governing agent (the procedure path) leaves the field alone rather
+    /// than dispatching to an empty agent name.
+    #[test]
+    fn test_agent_binding_without_a_governing_agent_is_left_alone() {
+        let empty = HashMap::new();
+        assert_eq!(
+            PipelineEngine::resolve_step_agent("{{agent}}", &empty),
+            "{{agent}}"
+        );
+        let ctx = HashMap::from([("agent".to_string(), "nova".to_string())]);
+        assert_eq!(
+            PipelineEngine::resolve_step_agent(" {{agent}} ", &ctx),
+            "nova"
+        );
+    }
+
+    /// Every starter template shipped in `pipelines/core/` must parse and pass
+    /// the same validation a real install runs, and must name an `output` that
+    /// some step actually sets — a typo there yields a run with empty output.
+    #[test]
+    fn test_shipped_starter_pipelines_are_valid() {
+        let (engine, _dir) = test_engine();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pipelines/core");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("pipelines/core exists") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let yaml = std::fs::read_to_string(&path).unwrap();
+            let def = PipelineDefinition::from_yaml(&yaml)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+            engine
+                .validate(&def)
+                .unwrap_or_else(|e| panic!("{} is invalid: {e}", path.display()));
+            let output = def
+                .output
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} declares no output", path.display()));
+            assert!(
+                def.steps
+                    .iter()
+                    .any(|s| s.output_var.as_ref() == Some(output)),
+                "{}: output '{output}' is set by no step",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "expected the starter templates, found {checked}"
+        );
     }
 
     // --- End-to-end pipeline execution tests ---
@@ -1570,5 +1891,89 @@ output: result
             total_elapsed < 500,
             "Total elapsed {total_elapsed}ms exceeded expected max with capped backoff"
         );
+    }
+}
+
+/// Record a step's output under its `output_var` for later steps to bind.
+///
+/// A tool result is JSON, so it is parsed: that is what makes `{{clip.path}}`
+/// work. A result that is not JSON (an agent step returns prose) binds as a
+/// plain string, so `{{summary}}` still interpolates.
+fn bind_output(bindings: &mut Option<crate::bindings::Bindings>, var_name: &str, output: &str) {
+    let Some(bindings) = bindings.as_mut() else {
+        return;
+    };
+    // Defence in depth for the authoring guard: the store is not a trust
+    // boundary, and a recipe whose step binds `inputs` would overwrite the
+    // caller's parameters mid-run, so every later `{{inputs.x}}` would read a
+    // field of THIS step's output instead.
+    if var_name == crate::bindings::INPUTS_ROOT {
+        tracing::error!(
+            var = var_name,
+            "Refusing to bind a step output over the reserved inputs root"
+        );
+        return;
+    }
+    // Step output is the one unbounded input to a run: the recipe is capped at
+    // 64 KiB and the caller's inputs at 16 KiB, but a tool can return anything.
+    // Past the cap it binds as a truncated string, so a later `{{var.field}}`
+    // fails to resolve — and an unresolved binding now fails the step, which is
+    // the honest outcome for "the value was too large to work with".
+    const MAX_BOUND_BYTES: usize = 1024 * 1024;
+    let value = if output.len() > MAX_BOUND_BYTES {
+        tracing::warn!(
+            var = var_name,
+            bytes = output.len(),
+            "Step output exceeds the bindable size; binding a truncated string"
+        );
+        serde_json::Value::String(output.chars().take(MAX_BOUND_BYTES).collect())
+    } else {
+        serde_json::from_str(output)
+            .unwrap_or_else(|_| serde_json::Value::String(output.to_string()))
+    };
+    bindings.insert(var_name.to_string(), value);
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    /// Defence in depth for the authoring guard. A step that binds `inputs`
+    /// would overwrite the caller's parameters mid-run, so every later
+    /// `{{inputs.x}}` would read a field of that step's output.
+    #[test]
+    fn a_step_cannot_bind_over_the_inputs_root() {
+        let mut bindings = Some(crate::bindings::Bindings::from([(
+            "inputs".to_string(),
+            serde_json::json!({ "path": "/safe" }),
+        )]));
+        bind_output(&mut bindings, "inputs", r#"{"path":"/etc/shadow"}"#);
+        assert_eq!(bindings.unwrap()["inputs"]["path"], "/safe");
+    }
+
+    #[test]
+    fn a_json_output_binds_structurally_and_prose_binds_as_a_string() {
+        let mut bindings = Some(crate::bindings::Bindings::new());
+        bind_output(&mut bindings, "clip", r#"{"path":"a.wav","bytes":3}"#);
+        bind_output(&mut bindings, "summary", "just prose");
+        let bindings = bindings.unwrap();
+        assert_eq!(bindings["clip"]["path"], "a.wav");
+        assert_eq!(bindings["clip"]["bytes"], 3);
+        assert_eq!(bindings["summary"], "just prose");
+    }
+
+    /// A substituted value must not be re-scanned: an input whose own text
+    /// contains `{{...}}` is data, not a template the author never wrote.
+    #[test]
+    fn substituted_values_are_not_rescanned() {
+        let bindings = crate::bindings::Bindings::from([
+            (
+                "inputs".to_string(),
+                serde_json::json!({ "t": "{{secret}}" }),
+            ),
+            ("secret".to_string(), serde_json::json!("leaked")),
+        ]);
+        let out = crate::bindings::render(&serde_json::json!({ "a": "{{inputs.t}}" }), &bindings);
+        assert_eq!(out["a"], "{{secret}}");
     }
 }

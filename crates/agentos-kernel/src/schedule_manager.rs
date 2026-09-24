@@ -114,10 +114,24 @@ impl ScheduleManager {
                 }
             }
         }
+        // And the reverse: timers and once-jobs written before their
+        // `create_*_with_creator` set the field carry the creator only in the
+        // side-map, but the fire path clamps permissions from the field.
+        let (mut jobs, mut timers, mut once_jobs) =
+            (snapshot.jobs, snapshot.timers, snapshot.once_jobs);
+        for (id, j) in jobs.iter_mut() {
+            j.creator_agent_id = j.creator_agent_id.or_else(|| creators.get(id).copied());
+        }
+        for (id, j) in once_jobs.iter_mut() {
+            j.creator_agent_id = j.creator_agent_id.or_else(|| creators.get(id).copied());
+        }
+        for (id, t) in timers.iter_mut() {
+            t.creator_agent_id = t.creator_agent_id.or_else(|| creators.get(id).copied());
+        }
         let mgr = Self {
-            jobs: RwLock::new(snapshot.jobs),
-            timers: RwLock::new(snapshot.timers),
-            once_jobs: RwLock::new(snapshot.once_jobs),
+            jobs: RwLock::new(jobs),
+            timers: RwLock::new(timers),
+            once_jobs: RwLock::new(once_jobs),
             creators: RwLock::new(creators),
             persistence: Some(persistence),
             store,
@@ -652,6 +666,22 @@ impl ScheduleManager {
         action: TimerAction,
         _extra: Option<serde_json::Value>,
     ) -> Result<ScheduleID, AgentOSError> {
+        self.insert_timer(name, delay_secs, agent_name, action, None)
+            .await
+    }
+
+    /// Stores the creator on the entry itself, in the same write and flush as
+    /// the insert: the fire path clamps a cross-agent timer to `target ∩ creator`
+    /// by reading `creator_agent_id`, so leaving it `None` runs the timer with
+    /// the target's full permissions.
+    async fn insert_timer(
+        &self,
+        name: String,
+        delay_secs: u64,
+        agent_name: String,
+        action: TimerAction,
+        creator: Option<AgentID>,
+    ) -> Result<ScheduleID, AgentOSError> {
         if name.is_empty() || name.len() > 128 {
             return Err(AgentOSError::SchemaValidation(
                 "Timer name must be 1–128 characters".into(),
@@ -670,7 +700,7 @@ impl ScheduleManager {
             fire_at,
             action,
             created_at: chrono::Utc::now(),
-            creator_agent_id: None,
+            creator_agent_id: creator,
             delivery: agentos_types::delivery::DeliveryMode::Silent,
         };
         let id = entry.id;
@@ -739,12 +769,12 @@ impl ScheduleManager {
         delay_secs: u64,
         agent_name: String,
         action: TimerAction,
-        extra: Option<serde_json::Value>,
+        _extra: Option<serde_json::Value>,
         creator: AgentID,
     ) -> Result<ScheduleID, AgentOSError> {
         self.enforce_creator_cap(creator).await?;
         let id = self
-            .create_timer(name, delay_secs, agent_name, action, extra)
+            .insert_timer(name, delay_secs, agent_name, action, Some(creator))
             .await?;
         self.record_creator(id, creator).await;
         self.flush().await;
@@ -781,6 +811,20 @@ impl ScheduleManager {
         agent_name: String,
         action: OnceJobAction,
     ) -> Result<ScheduleID, AgentOSError> {
+        self.insert_once_job(name, fire_at, agent_name, action, None)
+            .await
+    }
+
+    /// See `insert_timer`: the creator must land on the entry atomically, since
+    /// the fire path clamps permissions from `creator_agent_id`.
+    async fn insert_once_job(
+        &self,
+        name: String,
+        fire_at: chrono::DateTime<chrono::Utc>,
+        agent_name: String,
+        action: OnceJobAction,
+        creator: Option<AgentID>,
+    ) -> Result<ScheduleID, AgentOSError> {
         if name.is_empty() || name.len() > 128 {
             return Err(AgentOSError::SchemaValidation(
                 "Once-job name must be 1–128 characters".into(),
@@ -807,7 +851,7 @@ impl ScheduleManager {
             created_at: chrono::Utc::now(),
             state: OnceJobState::Pending,
             action,
-            creator_agent_id: None,
+            creator_agent_id: creator,
             delivery: agentos_types::delivery::DeliveryMode::Silent,
         };
         let id = job.id;
@@ -884,7 +928,7 @@ impl ScheduleManager {
     ) -> Result<ScheduleID, AgentOSError> {
         self.enforce_creator_cap(creator).await?;
         let id = self
-            .create_once_job(name, fire_at, agent_name, action)
+            .insert_once_job(name, fire_at, agent_name, action, Some(creator))
             .await?;
         self.record_creator(id, creator).await;
         self.flush().await;
@@ -1079,12 +1123,47 @@ mod tests {
             assert_eq!(once.len(), 1);
             assert_eq!(once[0].name, "one-shot");
             assert_eq!(mgr.creator_of(&once[0].id).await, Some(alice));
+            // The fire path clamps permissions from this field, not the side-map.
+            assert_eq!(once[0].creator_agent_id, Some(alice));
 
             let timers = mgr.list_timers().await;
             assert_eq!(timers.len(), 1);
             assert_eq!(timers[0].name, "burner");
             assert_eq!(mgr.creator_of(&timers[0].id).await, Some(alice));
+            assert_eq!(timers[0].creator_agent_id, Some(alice));
         }
+    }
+
+    /// Snapshots written before the fix carry a timer's creator only in the
+    /// side-map; boot must copy it back into the field the fire path reads.
+    #[tokio::test]
+    async fn legacy_side_map_creator_reaches_the_timer_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let alice = AgentID::new();
+        let p =
+            Arc::new(crate::schedule_persistence::SchedulePersistence::new(tmp.path()).unwrap());
+        let mut snap = crate::schedule_persistence::ScheduleSnapshot::default();
+        let mgr = ScheduleManager::new();
+        let id = mgr
+            .create_timer(
+                "burner".into(),
+                3600,
+                "alice".into(),
+                TimerAction::RunTask {
+                    prompt: "fire later".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let timer = mgr.list_timers().await.remove(0);
+        assert_eq!(timer.creator_agent_id, None);
+        snap.timers.insert(id, timer);
+        snap.creators.insert(id, alice);
+        p.flush(snap).await.unwrap();
+
+        let mgr = ScheduleManager::with_persistence(p).await.unwrap();
+        assert_eq!(mgr.list_timers().await[0].creator_agent_id, Some(alice));
     }
 
     #[tokio::test]

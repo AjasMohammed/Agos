@@ -74,7 +74,8 @@ impl AgentTool for FileReader {
         let agent_root = context.agent_files_dir()?;
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
         let resolved =
-            crate::traits::resolve_tool_path(path_str, &agent_root, &context.workspace_paths)?;
+            crate::traits::resolve_tool_path(path_str, &agent_root, &context.read_roots())
+                .map_err(|e| context.with_path_hint(e))?;
 
         // Canonicalize to verify containment. For directories that don't exist yet
         // we fall through to a clear error; for existing paths this enforces the boundary.
@@ -107,10 +108,7 @@ impl AgentTool for FileReader {
             .unwrap_or(false);
         if !canonical.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-reader: path traversal blocked");
-            return Err(AgentOSError::PermissionDenied {
-                resource: "fs.user_data".into(),
-                operation: format!("Path traversal denied: {}", path_str),
-            });
+            return Err(context.deny_path(path_str));
         }
         if in_workspace
             && !context

@@ -33,6 +33,22 @@ pub enum NotificationCommands {
 
     /// Poll for new notifications every 5 seconds (press Ctrl-C to stop)
     Watch,
+
+    /// Show the notification routing matrix (which events reach which channels)
+    Routes,
+
+    /// Set one cell of the routing matrix
+    Route {
+        /// Event kind: approval, task_complete, task_failed, question,
+        /// agent_message, system_alert, status_update
+        event: String,
+
+        /// Channel instance id, or a builtin kind: desktop, cli, web, webhook, slack
+        channel: String,
+
+        /// always | never | when_away
+        mode: String,
+    },
 }
 
 pub async fn handle(client: &mut BusClient, command: NotificationCommands) -> anyhow::Result<()> {
@@ -187,6 +203,80 @@ pub async fn handle(client: &mut BusClient, command: NotificationCommands) -> an
                 }
                 KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
                 _ => anyhow::bail!("Unexpected response from kernel"),
+            }
+        }
+
+        NotificationCommands::Routes => {
+            let resp = client
+                .send_command(KernelCommand::GetNotificationRoutes)
+                .await?;
+            match resp {
+                KernelResponse::Success { data: Some(v) } => {
+                    let empty = Vec::new();
+                    let channels = v["channels"].as_array().unwrap_or(&empty);
+                    let events = v["events"].as_array().unwrap_or(&empty);
+                    let rules = v["rules"].as_array().unwrap_or(&empty);
+
+                    if v["panel_connected"].as_bool().unwrap_or(false) {
+                        println!("Panel session open — 'when_away' rules are muted right now.\n");
+                    } else {
+                        println!("No panel session — 'when_away' rules deliver right now.\n");
+                    }
+
+                    println!("{:<16} {:<24} MODE", "EVENT", "CHANNEL");
+                    println!("{}", "-".repeat(56));
+                    for event in events {
+                        let event = event.as_str().unwrap_or_default();
+                        for ch in channels {
+                            let key = ch["key"].as_str().unwrap_or_default();
+                            // Absent rule = always, the kernel's own default.
+                            let mode = rules
+                                .iter()
+                                .find(|r| {
+                                    r["event"].as_str() == Some(event)
+                                        && r["channel"].as_str() == Some(key)
+                                })
+                                .and_then(|r| r["mode"].as_str())
+                                .unwrap_or("always");
+                            let offline = if ch["available"].as_bool().unwrap_or(true) {
+                                ""
+                            } else {
+                                " (offline)"
+                            };
+                            println!("{:<16} {:<24} {}{}", event, key, mode, offline);
+                        }
+                    }
+                }
+                KernelResponse::Success { data: None } => println!("No routing data returned."),
+                KernelResponse::Error { message } => anyhow::bail!(message),
+                other => anyhow::bail!("Unexpected response: {other:?}"),
+            }
+        }
+
+        NotificationCommands::Route {
+            event,
+            channel,
+            mode,
+        } => {
+            let resp = client
+                .send_command(KernelCommand::SetNotificationRoute {
+                    event,
+                    channel,
+                    mode,
+                })
+                .await?;
+            match resp {
+                KernelResponse::Success { data } => {
+                    let d = data.unwrap_or_default();
+                    println!(
+                        "Set {} on {} -> {}",
+                        d["event"].as_str().unwrap_or("?"),
+                        d["channel"].as_str().unwrap_or("?"),
+                        d["mode"].as_str().unwrap_or("?")
+                    );
+                }
+                KernelResponse::Error { message } => anyhow::bail!(message),
+                other => anyhow::bail!("Unexpected response: {other:?}"),
             }
         }
 

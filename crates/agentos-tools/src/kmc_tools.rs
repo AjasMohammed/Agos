@@ -58,6 +58,11 @@ macro_rules! kmc_tool {
                     workspace_paths: context.workspace_paths.clone(),
                     agent_home: context.agent_files_dir()?,
                     workspace_paths_executable: context.workspace_paths_executable.clone(),
+                    storage_zones: context
+                        .storage_zone_query
+                        .as_ref()
+                        .map(|q| q.zones_for(&context.agent_id))
+                        .unwrap_or_default(),
                 }).await
             }
         }

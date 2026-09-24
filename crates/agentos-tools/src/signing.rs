@@ -132,6 +132,15 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
     // exist to stop a read action inheriting a write action's prompt — not to
     // reclassify a tool.
     //
+    // `ExecCapable` is permitted alongside it, and is strictly MORE friction
+    // than `ReadonlyExternal` at every mode (`auto` → Allow, `ask_edit` →
+    // Prompt, `ask_always` → Prompt, `deny` → Deny). It is what a hardware
+    // action that changes host state but is not kernel admin should resolve
+    // to — `audio` `speak`/`playback` are control_plane at the tool level, and
+    // ControlPlane is the non-overridable floor the standing-grant matcher is
+    // never consulted for, so without this override every "say it out loud"
+    // re-prompts and "approve & remember" can mint nothing (2026-09-20).
+    //
     // `ReadonlyScoped` is excluded even though it reads as the *safer* label:
     // `ApprovalMode::decide` short-circuits it to `Allow` before it ever looks
     // at the mode, so it is allowed under `deny` too — the same strength as
@@ -146,16 +155,17 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
     // bypass hidden behind an accurate-looking label, through a field the two
     // Core-only gates above never inspect. Checked before the tier match so it
     // binds `Core` manifests too, which skip the signature check entirely.
-    if let Some((action, class)) = manifest
-        .risk_class_by_action
-        .iter()
-        .find(|(_, class)| !matches!(class, agentos_types::RiskClass::ReadonlyExternal))
-    {
+    if let Some((action, class)) = manifest.risk_class_by_action.iter().find(|(_, class)| {
+        !matches!(
+            class,
+            agentos_types::RiskClass::ReadonlyExternal | agentos_types::RiskClass::ExecCapable
+        )
+    }) {
         tracing::error!(
             tool = %info.name,
             %action,
             ?class,
-            "manifest risk_class_by_action may only name readonly_external"
+            "manifest risk_class_by_action may only name readonly_external or exec_capable"
         );
         return Err(AgentOSError::ToolBlocked {
             name: info.name.clone(),
@@ -419,14 +429,15 @@ mod tests {
         assert_ne!(after, signing_payload(&manifest));
     }
 
-    /// `ReadonlyExternal` is the only class an override may name.
+    /// `ReadonlyExternal` and `ExecCapable` are the only classes an override
+    /// may name.
     ///
     /// `ReadonlyScoped` is the trap: it reads as the safer of the two read
     /// classes and is rejected precisely because it is not — it is `Allow` under
     /// `deny`, the same strength as `Interactive`, which the Core-only gate
     /// above exists to keep out of self-declared manifests.
     #[test]
-    fn override_table_may_only_name_readonly_external() {
+    fn override_table_may_only_name_readonly_external_or_exec_capable() {
         use agentos_types::{ApprovalDecision, ApprovalMode};
 
         // The reason the bound is what it is, asserted rather than narrated.
@@ -447,12 +458,22 @@ mod tests {
             ApprovalDecision::Allow
         );
 
+        // `ExecCapable` is permitted: at every mode it is at least as much
+        // friction as `ReadonlyExternal`, which already is.
+        assert_eq!(
+            ApprovalMode::Deny.decide(RiskClass::ExecCapable),
+            ApprovalDecision::Deny
+        );
+        assert_eq!(
+            ApprovalMode::AskEdit.decide(RiskClass::ExecCapable),
+            ApprovalDecision::Prompt
+        );
+
         for class in [
             RiskClass::ReadonlyScoped,
             RiskClass::Interactive,
             RiskClass::WriteAgentState,
             RiskClass::WriteScoped,
-            RiskClass::ExecCapable,
             RiskClass::ControlPlane,
         ] {
             let mut manifest = make_manifest(TrustTier::Core);
@@ -469,6 +490,9 @@ mod tests {
         manifest
             .risk_class_by_action
             .insert("status".into(), RiskClass::ReadonlyExternal);
+        manifest
+            .risk_class_by_action
+            .insert("speak".into(), RiskClass::ExecCapable);
         assert!(verify_manifest(&manifest).is_ok());
     }
 
@@ -652,6 +676,23 @@ mod tests {
         // Downgrading risk_class after signing must invalidate the signature —
         // risk_class is now bound into the signed payload.
         m.risk_class = RiskClass::ReadonlyScoped;
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolSignatureInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn signed_trust_tier_tampering_is_rejected() {
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        let sig = signing_key.sign(&signing_payload(&m));
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(verify_manifest(&m).is_ok());
+
+        // Promoting the tier after signing must invalidate the signature.
+        m.manifest.trust_tier = TrustTier::Verified;
         assert!(matches!(
             verify_manifest(&m).unwrap_err(),
             AgentOSError::ToolSignatureInvalid { .. }

@@ -226,10 +226,16 @@ impl AgentMessageBus {
     /// `chain_depth` is the event-chain depth of the sending task (0 for
     /// operator-initiated sends); it rides on the emitted `DirectMessageReceived`
     /// so a reply loop between two agents hits `max_chain_depth`.
+    ///
+    /// `convo_id` names the DM session the message was appended to, when there
+    /// is one. It rides on the event so `event_dispatch` knows the message is
+    /// already being answered by a conversation runner and must not also spawn
+    /// a one-shot reaction task for it.
     pub async fn send_direct(
         &self,
         message: AgentMessage,
         chain_depth: u32,
+        convo_id: Option<&str>,
     ) -> Result<(), AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
         if message.is_expired() {
@@ -314,6 +320,7 @@ impl AgentMessageBus {
                     "message_id": msg_id.to_string(),
                     "message_content": preview,
                     "live_listener": true,
+                    "convo_id": convo_id,
                 }),
                 chain_depth,
             )
@@ -337,6 +344,7 @@ impl AgentMessageBus {
                     "message_id": msg_id.to_string(),
                     "message_content": preview,
                     "live_listener": false,
+                    "convo_id": convo_id,
                 }),
                 chain_depth,
             )
@@ -692,7 +700,7 @@ mod tests {
             "Hello from A",
             60,
         );
-        bus.send_direct(msg, 0).await.unwrap();
+        bus.send_direct(msg, 0, None).await.unwrap();
 
         let received = inbox_b.recv().await.unwrap();
         assert_eq!(received.from, agent_a);
@@ -731,7 +739,7 @@ mod tests {
         bus.register_pubkey_internal(from, pk).await.unwrap();
 
         let msg = make_signed_msg(&sk, from, MessageTarget::Direct(to), "ping", 60);
-        assert!(bus.send_direct(msg, 0).await.is_ok());
+        assert!(bus.send_direct(msg, 0, None).await.is_ok());
         assert_eq!(bus.get_history(&to, 10).await.len(), 1);
     }
 
@@ -783,7 +791,7 @@ mod tests {
             expires_at: Some(past + chrono::Duration::seconds(5)),
         };
 
-        let result = bus.send_direct(msg, 0).await;
+        let result = bus.send_direct(msg, 0, None).await;
         assert!(result.is_err(), "expired message should be rejected");
         assert!(result.unwrap_err().to_string().contains("expired"));
     }
@@ -810,7 +818,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(60)),
         };
 
-        let result = bus.send_direct(msg, 0).await;
+        let result = bus.send_direct(msg, 0, None).await;
         assert!(result.is_err(), "unsigned message should be rejected");
         assert!(result.unwrap_err().to_string().contains("no signature"));
     }
@@ -841,7 +849,7 @@ mod tests {
             expires_at: Some(now + chrono::Duration::seconds(60)),
         };
 
-        let result = bus.send_direct(msg, 0).await;
+        let result = bus.send_direct(msg, 0, None).await;
         assert!(
             result.is_err(),
             "message with invalid signature should be rejected"
@@ -870,7 +878,7 @@ mod tests {
             "signed msg",
             60,
         );
-        bus.send_direct(msg, 0).await.unwrap();
+        bus.send_direct(msg, 0, None).await.unwrap();
 
         let received = inbox_b.recv().await.unwrap();
         assert_eq!(received.from, agent_a);
@@ -902,7 +910,7 @@ mod tests {
             "event test",
             60,
         );
-        bus.send_direct(msg, 0).await.unwrap();
+        bus.send_direct(msg, 0, None).await.unwrap();
 
         let notif = notif_rx
             .try_recv()
@@ -976,7 +984,7 @@ mod tests {
         bus.register_pubkey_internal(from, pk).await.unwrap();
 
         let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "fail", 60);
-        assert!(bus.send_direct(msg, 0).await.is_ok());
+        assert!(bus.send_direct(msg, 0, None).await.is_ok());
 
         let notif = notif_rx
             .try_recv()
@@ -1007,7 +1015,7 @@ mod tests {
             "no sender",
             60,
         );
-        bus.send_direct(msg, 0).await.unwrap();
+        bus.send_direct(msg, 0, None).await.unwrap();
         assert!(inbox_b.try_recv().is_ok());
 
         let msg = make_signed_msg(&sk_a, agent_a, MessageTarget::Broadcast, "no sender bc", 60);

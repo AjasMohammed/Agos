@@ -44,6 +44,26 @@ Discord/Telegram/Slack/WhatsApp
    Agent reply  →  ChannelManager.send()  →  Platform
 ```
 
+Inbound messages are handled one at a time per channel (`/approve`, `/deny`, and `/stop` skip the queue, so an approval can unblock the very turn that is waiting on it). Plain text goes to the channel's default chat agent as a chat turn, with the conversation history for that channel attached, and the reply returns on the same channel. Files, photos, and voice notes a user sends are stored and become visible to the agent through `user-file-list` / `user-file-reader`; with `[transcription].enabled = true` voice notes are transcribed into the message text and the recording itself is then discarded — the transcript is what the agent keeps. An audio *file* someone uploads is transcribed and stored. Chat turns are not checkpointed — if the kernel restarts mid-turn, the sender is asked to resend.
+
+### Slash commands
+
+Any paired channel accepts these:
+
+| Command | Effect |
+|---------|--------|
+| `/help` | Show this list |
+| `/tasks`, `/status` | List active tasks |
+| `/stop <id>` | Cancel a task (first 8 characters of the task ID) |
+| `/approve <id> [always]` | Approve a pending escalation. `always` also mints a 7-day standing grant. Paired senders only. |
+| `/deny <id>` | Deny a pending escalation. Paired senders only. |
+| `/pair <code>` | Authorise this sender. The code comes from an operator; it is never sent to the chat. |
+| `/agents` | List agents available for chat |
+| `/agent [<name>]` | Show or set the channel's default chat agent |
+| `/chat <name> <message>` | Send one message to a specific agent |
+
+Agents send outbound with `channel-send` (one named channel, text and/or one media item) or `notify-user` (fan-out to every delivery adapter). File uploads via `channel-send` (`file_path`, `file_id`) are Telegram-only; URL media is posted natively on Telegram and WhatsApp and as a link elsewhere.
+
 ---
 
 ## Adapter Comparison
@@ -58,7 +78,7 @@ Discord/Telegram/Slack/WhatsApp
 | **Email** | Stub (IMAP planned) | SMTP via `lettre` | Unlimited | ✓ | Partial |
 | **Matrix** | HTTP long-poll `/sync` (30s) | PUT `/send` | — | ✓ | Stable |
 | **Mattermost** | WebSocket | REST API | — | ✓ | Stable |
-| **Teams** | Via agentos-web webhook | Incoming Webhook | — | ✗ | Stable |
+| **Teams** | — (outbound only) | Incoming Webhook | — | ✗ | Stable |
 | **Line** | Webhook (inbound via REST API) | Reply API | — | ✗ | Stable |
 
 ---
@@ -175,7 +195,8 @@ channel_manager.register("telegram-ops", Arc::new(adapter)).await?;
 
 - Telegram does not deliver messages sent before the bot was started (offset is initialised to current time)
 - There is no webhook mode in the current implementation — long-polling means one outbound HTTP request per 30-second poll window
-- Outbound messages use `parse_mode: Markdown`. Telegram's legacy Markdown parser requires careful escaping for `*`, `_`, `` ` ``, and `[` characters
+- Outbound messages use `parse_mode: HTML`. The adapter HTML-escapes the body, then converts standard markdown (bold, italic, strike, inline and fenced code, links, headings, lists, blockquotes) to Telegram's HTML subset; on a parse error it retries the segment as plain text. Agents write normal markdown and escape nothing.
+- Bodies longer than ~3000 source characters are split across several messages; question messages with option buttons are never split
 
 ---
 
@@ -428,7 +449,7 @@ Mattermost uses the **REST API** for outbound messages and a **WebSocket** for i
 
 ## Teams
 
-Microsoft Teams is **outbound-only** via an **Incoming Webhook**. Inbound messages are handled through the agentos-web webhook layer.
+Microsoft Teams is **outbound-only** via an **Incoming Webhook**.
 
 ### What you need
 
@@ -437,7 +458,7 @@ Microsoft Teams is **outbound-only** via an **Incoming Webhook**. Inbound messag
 ### Behaviour
 
 - Outbound messages POST to the configured Incoming Webhook URL
-- Inbound messages are not received by this adapter directly — they arrive via the agentos-web webhook endpoint
+- Inbound messages are not received — there is no Teams inbound path
 - The webhook URL/credentials are held as `Zeroizing<String>` and zeroed from the heap on drop
 
 ---

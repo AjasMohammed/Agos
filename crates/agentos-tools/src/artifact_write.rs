@@ -56,7 +56,7 @@ fn failed(reason: impl Into<String>) -> AgentOSError {
 /// Mirror of `agentos_kernel::file_store::sanitize_display_name`. This crate
 /// cannot depend on the kernel (the kernel depends on it), and the `name`
 /// column has to carry the same shape the web uploader writes.
-fn sanitize_display_name(name: &str) -> String {
+pub(crate) fn sanitize_display_name(name: &str) -> String {
     let s: String = name
         .chars()
         .map(|c| {
@@ -379,6 +379,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 

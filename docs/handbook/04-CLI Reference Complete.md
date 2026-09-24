@@ -1786,30 +1786,6 @@ web-search           disconnected 0        MCP server 'web-search' reconnect fai
 
 ---
 
-## `web` — Start the web UI server
-
-### `web serve`
-
-Start the AgentOS web UI. Boots the kernel internally and serves the dashboard at the given address. The vault passphrase is resolved from `AGENTOS_VAULT_PASSPHRASE` or via interactive prompt.
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--port` | `u16` | `8080` | Port to bind on |
-| `--host` | `String` | `"127.0.0.1"` | IP address to bind on |
-
-**Example:**
-
-```bash
-agentos web serve
-agentos web serve --port 3000 --host 0.0.0.0
-```
-
-The server prints `Web UI: http://<host>:<port>` on startup. Press Ctrl-C to shut down both the web server and the kernel gracefully. SIGTERM is also handled (for systemd).
-
-> **Note:** `web serve` boots its own embedded kernel. Do not run both `agentos start` and `agentos web serve` simultaneously — they would conflict on the bus socket and vault.
-
----
-
 ## `team` — Run and manage agent teams
 
 ### `team run`
@@ -2075,13 +2051,18 @@ Permissions follow the format `<resource>:<flags>` where flags are `r` (read), `
 | `memory.episodic` | Read | — | — |
 | `memory.blocks` | Read blocks | Write blocks | — |
 | `memory.procedural` | Read procedures | Write procedures | — |
-| `agent.message` | Receive msgs | — | Send msgs |
+| `agent.message` | Receive msgs | — | Send msgs, `task-delegate` |
 | `agent.broadcast` | Receive | — | Broadcast |
-| `agent.delegate` | — | — | Delegate subtasks |
+| `agent.spawn` | — | — | Spawn sub-agents, `task-spawn-async`, `start-conversation` |
 | `agent.registry` | List agents | — | — |
 | `task.query` | Query tasks | — | — |
 | `user.notify` | — | Send notifications | — |
 | `user.interact` | — | — | Ask blocking questions |
+| `fs.workspace` | Read granted host folders | Write granted host folders | — (also needs `agentos workspace grant`) |
+| `scratchpad` | Read pages | Write pages | — |
+| `channel.send` | — | `channel-send` to one channel | — |
+| `mcp:<server>/` | — | — | Call any tool of that MCP server (`mcp` alone = every server) |
+| `events.<category>` | — | — | `o` (observe): subscribe to that event category |
 
 **Examples:**
 
@@ -2100,7 +2081,7 @@ agentos perm grant monitor hardware.gpu:r
 
 ## Quick Reference: All Command Groups
 
-All **39** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
+All **44** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
 
 | Group | Description | Subcommands |
 |-------|-------------|-------------|
@@ -2142,6 +2123,12 @@ All **39** top-level command groups (an asterisk marks subcommands that work off
 | `workspace` | Persistent agent filesystem grants | `grant`, `revoke`, `list` |
 | `prefs` | Review user-preference adaptation proposals | `review`, `accept`, `reject`, `stats` |
 | `approval` | Tool-call approval mode + learned allow-policy | `mode get`, `mode set`, `mode clear`, `allow`, `list`, `revoke` |
-| `web` | Web UI server | `serve` |
+| `gateway` | Run as a long-lived messaging bot — boots the kernel and connects every `[[gateway.channels]]` entry | `run` |
+| `profile` | Learned user-profile facts | `list`, `show`, `edit`, `forget` |
+| `recommendations` | Proactive recommendations | `list`, `accept`, `dismiss` |
+| `personalization` | Personalization data: status, export, right-to-forget | `status`, `export`, `forget` |
+| `org` | Durable agent org chart (reporting lines + capability scopes) | `add-node`, `show` |
+
+Flag-level detail for every command, generated from the binary's own `--help`, lives in `docs/book/src/cli.md` (regenerate with `docs/book/gen-cli-ref.sh`).
 
 *\* Offline commands — do not require a running kernel.*

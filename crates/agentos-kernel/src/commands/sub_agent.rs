@@ -315,6 +315,11 @@ impl Kernel {
             chain_depth: parent_task.event_chain_depth(),
         };
 
+        // Register before enqueue: a fast child must not report before it is
+        // tracked. Cascade-cancel: cancelling the parent cancels all children.
+        self.scheduler
+            .register_child(parent_task_id, child_task_id)
+            .await;
         self.scheduler.enqueue(child_task).await;
 
         // Fire AgentSpawned hook so audit and metrics hooks can track the spawn event.
@@ -323,11 +328,6 @@ impl Kernel {
                 parent_task: parent_task_id,
                 child_agent: agent.id,
             })
-            .await;
-
-        // Register child for cascade-cancel: cancelling the parent cancels all children.
-        self.scheduler
-            .register_child(parent_task_id, child_task_id)
             .await;
 
         tracing::info!(

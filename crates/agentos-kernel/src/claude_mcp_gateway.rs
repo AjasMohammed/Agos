@@ -413,16 +413,15 @@ impl KernelMcpExecutor {
         // captured at construction: this gateway outlives any single turn.
         if let Some(kernel) = self.kernel() {
             if kernel.is_in_convo_turn(&self.agent_id).await
-                && crate::kernel::ChatTurnScope::ConvoTurn.withholds(tool_name)
+                && crate::kernel::convo_withholds(tool_name)
             {
                 tracing::warn!(
                     tool = %tool_name,
                     agent_id = %self.agent_id,
                     "Gateway tool call withheld by convo turn scope"
                 );
-                return Err(
-                    crate::kernel::ChatTurnScope::ConvoTurn.withheld_tool_message(tool_name)
-                );
+                return Err(crate::kernel::ChatTurnScope::ConvoTurn { shared_dir: None }
+                    .withheld_tool_message(tool_name));
             }
         }
 
@@ -689,6 +688,21 @@ impl KernelMcpExecutor {
                         )
                     });
                 }
+                // One operator interruption per conversation turn, claimed
+                // through the kernel because this gateway runs outside the chat
+                // loop that owns the loop-local budget. Unbounded, a parked pair
+                // could open a blocking question every iteration.
+                if let Some(kernel) = self.kernel() {
+                    if kernel.is_in_convo_turn(&self.agent_id).await
+                        && !kernel.claim_operator_interruption(&self.agent_id).await
+                    {
+                        return serde_json::json!({
+                            "error": "You already interrupted the operator once this turn. \
+                                      Their answer, or the timeout, arrives before your next turn — \
+                                      continue with what you have."
+                        });
+                    }
+                }
                 match ask_user_blocking(
                     &self.notification_router,
                     &self.agent_registry,
@@ -820,6 +834,13 @@ impl KernelMcpExecutor {
             storage_zone_query: Some(Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>),
             cancellation_token: self.cancellation_token.child_token(),
             tool_categories: None,
+            // Mid-convo, this is what makes a path refusal name the directory
+            // the pair CAN use. Without it a claude-code participant is told
+            // only what it may not do, which is the 2026-09-21 loop.
+            shared_dir: match self.kernel() {
+                Some(kernel) => kernel.convo_turn_shared_dir(&self.agent_id).await,
+                None => None,
+            },
         }
     }
 }

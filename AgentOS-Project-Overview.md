@@ -47,7 +47,6 @@ Kernel (inference orchestrator + subsystems)
 | **agentos-wasm** | WASM runtime | Wasmtime 38 integration for tool execution, WASI support |
 | **agentos-hal** | Hardware abstraction | 6 drivers: System (CPU/mem/uptime), Process (list/kill), Network (stats), LogReader, Sensor, GPU/Storage (planned) |
 | **agentos-pipeline** | Workflow orchestration | YAML-defined multi-step workflows, topological dependency resolution, template substitution, retry/timeout |
-| **agentos-web** | Web UI (WIP) | Axum 0.8 + HTMX dashboard, real-time SSE task streaming, pages for agents, tasks, tools, secrets, pipelines, audit |
 | **agentos-sdk** | Tool development kit | Proc-macro `#[tool(...)]` for ergonomic WASM tool authoring, auto-manifest generation |
 | **agentos-agent-tester** | Test harness | LLM-driven scenario evaluation, multi-turn feedback collection, report generation with consensus metrics |
 
@@ -243,17 +242,6 @@ Default config at `config/default.toml`. Key settings:
 
 ---
 
-## Web UI (agentos-web)
-
-Built with **Axum 0.8 + HTMX 2.x + Alpine.js + Pico CSS v2.1.1**:
-
-- Real-time SSE task streaming
-- Dashboard pages: agents, tasks, tools, secrets, pipelines, audit
-- Template engine: MiniJinja2 (semantic HTML, classless CSS)
-- Security: CSRF protection, CORS, CSP, rate limiting (in progress)
-
----
-
 ## Technology Stack
 
 | Area | Technology | Notes |
@@ -265,11 +253,10 @@ Built with **Axum 0.8 + HTMX 2.x + Alpine.js + Pico CSS v2.1.1**:
 | Database | SQLite | rusqlite 0.31, bundled |
 | CLI | Clap 4 | Derive macros |
 | HTTP client | Reqwest 0.12 | rustls-tls, streaming |
-| Web framework | Axum 0.8 | Web UI |
+| Web framework | Axum 0.8 | REST API (agentos-api) |
 | WASM runtime | Wasmtime 38 | Async + cranelift |
 | Logging | Tracing | JSON + text, rolling appender |
 | Embeddings | ONNX Runtime | MiniLM-L6-v2, 384-dim vectors |
-| Template engine | MiniJinja | HTMX + Alpine.js frontend |
 | System info | sysinfo 0.33 | HAL drivers |
 
 ### Platform Support

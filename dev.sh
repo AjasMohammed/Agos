@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# dev.sh — Build and run AgentOS locally (kernel + web UI in one process).
+# dev.sh — Build and run the AgentOS kernel locally.
 # No Docker needed. Uses config/default.toml with ephemeral /tmp paths.
 #
 # Usage:
 #   ./dev.sh
-#   AGENTOS_PORT=9090 ./dev.sh
 #   AGENTOS_CONFIG=config/docker.toml ./dev.sh
 #   AGENTOS_VAULT_PASSPHRASE=mypass ./dev.sh
 set -euo pipefail
@@ -14,8 +13,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # --- Config (override via env vars) ---
-HOST="${AGENTOS_HOST:-127.0.0.1}"
-PORT="${AGENTOS_PORT:-8080}"
 CONFIG="${AGENTOS_CONFIG:-config/default.toml}"
 # Vault passphrase — set this to your dev passphrase to skip the interactive prompt
 export AGENTOS_VAULT_PASSPHRASE="${AGENTOS_VAULT_PASSPHRASE:-devpass}"
@@ -39,11 +36,10 @@ echo "==> Building AgentOS..."
 cargo build -p agentos-cli 2>&1
 
 echo ""
-echo "==> Starting AgentOS (kernel + web UI)"
+echo "==> Starting AgentOS kernel"
 echo "    Config : $CONFIG"
-echo "    Web UI : http://$HOST:$PORT"
+echo "    REST API only if [api] enabled = true in $CONFIG (host/port from there)"
 echo ""
 
-# `web serve` boots the kernel internally and starts the web server in one process.
-# Ctrl+C triggers graceful shutdown of both.
-exec ./target/debug/agentos --config "$CONFIG" web serve --host "$HOST" --port "$PORT"
+# Ctrl+C triggers graceful shutdown.
+exec ./target/debug/agentos --config "$CONFIG" start

@@ -2,7 +2,6 @@ use crate::file_lock::WriteLockGuard;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::*;
 use async_trait::async_trait;
-use std::path::PathBuf;
 
 pub struct FileEditor;
 
@@ -60,7 +59,7 @@ impl AgentTool for FileEditor {
         );
 
         // Parse edits upfront so we fail fast on malformed input.
-        let mut parsed_edits: Vec<(String, String)> = Vec::with_capacity(edits.len());
+        let mut parsed_edits: Vec<(String, String, bool)> = Vec::with_capacity(edits.len());
         for (i, edit) in edits.iter().enumerate() {
             let old_text = edit
                 .get("old_text")
@@ -72,6 +71,14 @@ impl AgentTool for FileEditor {
                     ))
                 })?
                 .to_string();
+            // "".matches("") is non-zero: an empty needle would splice new_text
+            // between every character.
+            if old_text.is_empty() {
+                return Err(AgentOSError::SchemaValidation(format!(
+                    "file-editor: edit[{}] 'old_text' must not be empty",
+                    i
+                )));
+            }
             let new_text = edit
                 .get("new_text")
                 .and_then(|v| v.as_str())
@@ -82,7 +89,11 @@ impl AgentTool for FileEditor {
                     ))
                 })?
                 .to_string();
-            parsed_edits.push((old_text, new_text));
+            let replace_all = edit
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            parsed_edits.push((old_text, new_text, replace_all));
         }
 
         // SECURITY: relative paths resolve under the agent's own home, never the
@@ -92,8 +103,12 @@ impl AgentTool for FileEditor {
         let resolved = crate::traits::resolve_tool_path(
             path_str,
             &agent_root,
-            &context.workspace_paths_writable,
-        )?;
+            // Writable grants AND read-write storage zones — the conversation's
+            // shared workspace is a zone, and the resolver rejects an unknown
+            // absolute path before the zone check further down ever runs.
+            &context.write_roots(),
+        )
+        .map_err(|e| context.with_path_hint(e))?;
 
         let canonical = resolved
             .canonicalize()
@@ -122,10 +137,7 @@ impl AgentTool for FileEditor {
             .unwrap_or(false);
         if !canonical.starts_with(&canonical_agent_root) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-editor: path traversal blocked");
-            return Err(AgentOSError::PermissionDenied {
-                resource: "fs.user_data".into(),
-                operation: format!("Path traversal denied: {}", path_str),
-            });
+            return Err(context.deny_path(path_str));
         }
         // KMC: enforce read-only zones — deny writes to ReadOnly storage zones.
         if in_storage_zone {
@@ -188,7 +200,8 @@ impl AgentTool for FileEditor {
         })?;
 
         // Apply each edit sequentially.
-        for (i, (old_text, new_text)) in parsed_edits.iter().enumerate() {
+        let mut replacements = 0usize;
+        for (i, (old_text, new_text, replace_all)) in parsed_edits.iter().enumerate() {
             let occurrences = content.matches(old_text.as_str()).count();
             if occurrences == 0 {
                 return Err(AgentOSError::ToolExecutionFailed {
@@ -200,21 +213,23 @@ impl AgentTool for FileEditor {
                     ),
                 });
             }
-            if occurrences > 1 {
+            if occurrences > 1 && !replace_all {
                 return Err(AgentOSError::ToolExecutionFailed {
                     tool_name: "file-editor".into(),
                     reason: format!(
-                        "edit[{}]: 'old_text' appears {} times — must be unique. Provide more surrounding context to make it unambiguous.",
+                        "edit[{}]: 'old_text' appears {} times — must be unique. Provide more surrounding context, or set replace_all=true on this edit.",
                         i, occurrences
                     ),
                 });
             }
-            content = content.replacen(old_text.as_str(), new_text.as_str(), 1);
+            content = content.replace(old_text.as_str(), new_text.as_str());
+            replacements += occurrences;
         }
 
         // Atomic write via tmp + rename.
         let bytes_written = content.len() as u64;
-        atomic_write(&canonical, &content).await?;
+        let backup = crate::workspace::backup(&canonical_agent_root, &canonical).await;
+        crate::workspace::atomic_write("file-editor", &canonical, &content).await?;
 
         tracing::debug!(
             path = path_str,
@@ -226,26 +241,12 @@ impl AgentTool for FileEditor {
         Ok(serde_json::json!({
             "path": path_str,
             "edits_applied": parsed_edits.len(),
+            "replacements": replacements,
+            "backup": backup,
             "bytes_written": bytes_written,
             "success": true,
         }))
     }
-}
-
-async fn atomic_write(target: &PathBuf, content: &str) -> Result<(), AgentOSError> {
-    let tmp = target.with_extension("tmp");
-    tokio::fs::write(&tmp, content)
-        .await
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "file-editor".into(),
-            reason: format!("Temp write failed: {}", e),
-        })?;
-    tokio::fs::rename(&tmp, target)
-        .await
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "file-editor".into(),
-            reason: format!("Atomic rename failed: {}", e),
-        })
 }
 
 fn truncate_for_display(s: &str, max: usize) -> &str {

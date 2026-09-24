@@ -59,7 +59,6 @@ cargo test --workspace
 | `agentos-tools` | Built-in tool implementations |
 | `agentos-audit` | Append-only SQLite audit log |
 | `agentos-memory` | Multi-tier memory (episodic, semantic, procedural) |
-| `agentos-web` | Web UI (Axum + HTMX + Pico CSS) |
 | `agentos-capability` | HMAC-SHA256 signed capability tokens and permission system |
 | `agentos-vault` | AES-256-GCM encrypted secrets store |
 | `agentos-sandbox` | Seccomp-BPF syscall filtering (Linux-only) |

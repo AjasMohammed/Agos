@@ -115,14 +115,17 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                             .get("error")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        eprintln!(
+                        // A tamper check run from cron/CI reads the exit code.
+                        anyhow::bail!(
                             "Audit chain INVALID at seq {} ({} entries checked): {}",
-                            seq, checked, err
+                            seq,
+                            checked,
+                            err
                         );
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => anyhow::bail!("{message}"),
+                _ => anyhow::bail!("Unexpected response"),
             }
         }
         AuditCommands::Export { limit, output } => {

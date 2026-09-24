@@ -105,6 +105,8 @@ impl Modify for SecurityAddon {
         crate::handlers::notifications::get,
         crate::handlers::notifications::dismiss,
         crate::handlers::notifications::respond,
+        crate::handlers::notifications::get_routes,
+        crate::handlers::notifications::set_routes,
         crate::handlers::webhooks::telegram_webhook,
         crate::handlers::webhooks::incoming_webhook,
         crate::handlers::auth::login,
@@ -323,6 +325,11 @@ impl Modify for SecurityAddon {
         crate::types::CostSummaryEntry,
         crate::types::NotificationSummary,
         crate::types::NotificationResponseRequest,
+        crate::types::ApiNotificationRoutes,
+        crate::types::ApiNotificationEvent,
+        crate::types::ApiRouteChannel,
+        crate::types::ApiRouteRule,
+        crate::types::SetRoutesRequest,
         crate::types::NotificationFilter,
         crate::types::SystemStatus,
         crate::types::DashboardSummary,
@@ -433,6 +440,6 @@ mod tests {
             .values()
             .map(|item| methods.iter().filter(|m| item.get(*m).is_some()).count())
             .sum();
-        assert_eq!(ops, 177, "expected 177 documented operations");
+        assert_eq!(ops, 179, "expected 179 documented operations");
     }
 }

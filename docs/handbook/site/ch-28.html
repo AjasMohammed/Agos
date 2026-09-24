@@ -92,16 +92,16 @@ Use the `agent-inbox-list` tool to view notifications, `agent-messages-list` to 
 <h3 id="agent-inbox-list" class="anchored"><a class="hanchor" href="#agent-inbox-list" aria-label="link">#</a><code>agent-inbox-list</code></h3>
 <p>List unread (and optionally all) notification inbox entries. Returns entry IDs, kinds, titles, and timestamps. Does not return bodies (use <code>agent-inbox-read</code> to get the full body of a specific entry).</p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;unread_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"unread_only"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"limit"</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Output (array of entries)</span>
 <span class="p">[</span>
 <span class="w">  </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Scheduled&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled task completed: nightly-report&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-30T03:00:01Z&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">    </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JT..."</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Scheduled"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"title"</span><span class="p">:</span><span class="w"> </span><span class="s2">"scheduled task completed: nightly-report"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"created_at"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-04-30T03:00:01Z"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"read"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
 <span class="w">  </span><span class="p">}</span>
 <span class="p">]</span>
 </pre></div>
@@ -109,50 +109,50 @@ Use the `agent-inbox-list` tool to view notifications, `agent-messages-list` to 
 <h3 id="agent-inbox-read" class="anchored"><a class="hanchor" href="#agent-inbox-read" aria-label="link">#</a><code>agent-inbox-read</code></h3>
 <p>Mark a notification as read and return its full JSON body.</p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JT..."</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Output</span>
 <span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Scheduled&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled task completed: nightly-report&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;duration_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4200</span><span class="w"> </span><span class="p">},</span>
-<span class="w">  </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JT..."</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Scheduled"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"title"</span><span class="p">:</span><span class="w"> </span><span class="s2">"scheduled task completed: nightly-report"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"task_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span><span class="w"> </span><span class="nt">"result"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span><span class="w"> </span><span class="nt">"duration_ms"</span><span class="p">:</span><span class="w"> </span><span class="mi">4200</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"read"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
 <span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="agent-inbox-dismiss" class="anchored"><a class="hanchor" href="#agent-inbox-dismiss" aria-label="link">#</a><code>agent-inbox-dismiss</code></h3>
 <p>Permanently delete a notification.</p>
-<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JT..."</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="agent-messages-list" class="anchored"><a class="hanchor" href="#agent-messages-list" aria-label="link">#</a><code>agent-messages-list</code></h3>
 <p>List unread agent-to-agent messages, grouped by sender.</p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;unread_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"unread_only"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Output</span>
 <span class="p">[</span>
 <span class="w">  </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;from_agent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;from_agent_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;planner&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Analysis complete — see file report.md&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;reply_to&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-30T10:12:00Z&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">    </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JU..."</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"from_agent_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"from_agent_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"planner"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Analysis complete — see file report.md"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"reply_to"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"created_at"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-04-30T10:12:00Z"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"read"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
 <span class="w">  </span><span class="p">}</span>
 <span class="p">]</span>
 </pre></div>
 </div>
 <h3 id="agent-messages-read" class="anchored"><a class="hanchor" href="#agent-messages-read" aria-label="link">#</a><code>agent-messages-read</code></h3>
 <p>Mark a message as read and return its body.</p>
-<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JU..."</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="agent-messages-dismiss" class="anchored"><a class="hanchor" href="#agent-messages-dismiss" aria-label="link">#</a><code>agent-messages-dismiss</code></h3>
 <p>Permanently delete a message.</p>
-<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"01JU..."</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <hr>

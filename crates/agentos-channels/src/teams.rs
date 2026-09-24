@@ -1,8 +1,7 @@
 /// Microsoft Teams channel adapter.
 ///
 /// Outbound: sends to an Incoming Webhook URL configured in Teams.
-/// Inbound: receives via an HTTP webhook registered in the kernel's web server
-///          at `/api/channels/teams` (wired separately in agentos-web).
+/// Inbound: not routed — no HTTP endpoint serves Teams outgoing webhooks yet.
 use crate::types::{ChannelCapabilities, DeliveryReceipt, OutboundMessage};
 use crate::{ChannelAdapter, ChannelHealth};
 use agentos_http::{client, HttpProfile};
@@ -116,7 +115,7 @@ impl ChannelAdapter for TeamsAdapter {
         _tx: mpsc::Sender<crate::types::InboundMessage>,
         cancel: CancellationToken,
     ) -> Result<(), AgentOSError> {
-        // Inbound messages arrive via HTTP webhook in agentos-web. No persistent connection.
+        // Outbound-only: no inbound HTTP route exists. No persistent connection.
         cancel.cancelled().await;
         Ok(())
     }

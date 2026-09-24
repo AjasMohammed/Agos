@@ -188,6 +188,7 @@ async fn add_list_revoke_approval_policy_round_trip() {
     let resp = client
         .send_command(KernelCommand::AddApprovalPolicy {
             tool_name: "file-writer".into(),
+            action: None,
             path_glob: Some("/tmp/agos-e2e/**".into()),
             agent_name: None,
         })

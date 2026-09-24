@@ -2,6 +2,12 @@
 # OpenAI-compatible LLM providers that can be used via the `CustomCore` adapter.
 # Each entry defines a provider's base URL, API key env var, and available models.
 # Use `agentos provider list` to see all available providers and their status.
+#
+# `supports_thinking = true` opts a provider into the reasoning dial: tasks run
+# with a non-zero thinking level then send `reasoning_effort`. It applies to
+# every model in that entry's `models` list, so leave it unset on entries that
+# mix reasoning and non-reasoning models, and on endpoints that reject the
+# parameter. An `extra_body_json` value for the same key wins over it.
 
 [[provider]]
 name = "deepseek"

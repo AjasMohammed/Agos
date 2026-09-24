@@ -43,6 +43,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 reaction_batch_window_secs: 0,
                 ..Default::default()
             },
+            convo: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
             context_compaction: Default::default(),
@@ -124,6 +125,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         context_budget: Default::default(),
         context: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
+        resource_guard: Default::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
         // Tests must never reach the host notification daemon: the desktop
@@ -146,7 +148,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         otel: OtelConfig::default(),
         approval: Default::default(),
         api: Default::default(),
-        web: Default::default(),
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
@@ -154,6 +155,8 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         storage: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        tts: Default::default(),
+        procedures: Default::default(),
         agent_heartbeat: Default::default(),
         agent_budget: Default::default(),
         hal: Default::default(),

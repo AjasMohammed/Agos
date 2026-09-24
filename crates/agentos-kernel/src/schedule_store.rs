@@ -865,6 +865,13 @@ impl ScheduleStore {
             .context("Failed to run schedule schema migration v6")?;
         }
 
+        // Idempotent, so no version bump: backs `find_running_run_for_task`,
+        // which task completion runs for every finishing task.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_runs_task ON scheduled_runs(task_id, state);",
+        )
+        .context("Failed to create scheduled_runs task index")?;
+
         Ok(())
     }
 

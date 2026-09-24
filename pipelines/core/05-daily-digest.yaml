@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 05 — Daily Digest: read memory, have the agent write it up, save it.
+#
+#   agentos pipeline install ~/.agentos/pipelines/core/05-daily-digest.yaml
+#   agentos pipeline run daily-digest --agent <your-agent> --input "this week"
+#   agentos pipeline run daily-digest --agent <your-agent> --input "this week" --detach
+#
+# --detach returns a run id immediately and keeps going in the background:
+#
+#   agentos pipeline status daily-digest --run-id <id>
+#   agentos pipeline logs   daily-digest --run-id <id> --step digest
+#
+# There is no built-in scheduler for pipelines yet — run the detached command
+# from cron or a systemd timer if you want this every morning.
+#
+# Why this one saves a file instead of notifying you — two real limits, both
+# worth knowing before you write your own:
+#
+#   1. Some tools (notify-user, ask-user, spawn-agent) do not do the work
+#      themselves; they return a kernel action for the kernel's dispatch loop.
+#      A pipeline `tool:` step has no dispatcher, so it fails with "tool
+#      requires kernel action dispatch, which pipeline steps do not support".
+#   2. An agent step could dispatch one — but only on a foreground run. Under
+#      --detach an agent step is a single inference with no tool loop, so it
+#      can only produce text.
+#
+# So: to be notified, drop the `save` step, add an agent step telling the agent
+# to send the digest with notify-user, and run it WITHOUT --detach.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: daily-digest
+version: "1.0.0"
+description: "Search what the agent remembers about a period and write a digest to a file."
+
+# The engine caps nothing per run — `timeout_minutes` below is per step, and
+# the only spend limit is the agent's own daily budget (`agentos cost show`,
+# checked before each wave).
+# Keep the steps few and the timeouts tight on anything you schedule.
+
+steps:
+  # Episodic memory is the record of past task executions; `global: true` looks
+  # across every task AND every agent, not just this one — add an `agent_id`
+  # to narrow it. Swap scope to "semantic" to search distilled facts instead.
+  - id: recall
+    tool: memory-search
+    input:
+      query: "{{input}}"
+      scope: episodic
+      global: true
+      top_k: 25
+    output_var: recalled
+    timeout_minutes: 2
+    on_failure: use_default
+    default_value: "[no memories matched]"
+
+  - id: digest
+    agent: "{{agent}}"
+    task: |
+      Today is {{date}}. Write a digest of the work below covering "{{input}}".
+
+      Group by theme, lead with anything that stalled or needs a decision, and
+      keep it under 300 words. Say "nothing to report" if the records are empty.
+
+      {{recalled}}
+    output_var: digest
+    depends_on: [recall]
+    timeout_minutes: 6
+
+  # Lands in <data_dir>/agents/<agent-UUID>/digests/ — a pipeline step has no
+  # agent registry snapshot, so it is the id, not the agent's named home.
+  - id: save
+    tool: file-writer
+    input:
+      path: "digests/{{date}}.md"
+      content: "{{digest}}"
+    depends_on: [digest]
+    # The digest is still the run's result even if the write fails.
+    on_failure: skip
+
+output: digest

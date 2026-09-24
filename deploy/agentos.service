@@ -15,7 +15,8 @@ StartLimitBurst=5
 # graceful shutdown.  Systemd therefore detects both crashes AND hangs.
 Type=notify
 
-ExecStart=/usr/local/bin/agentos web serve --host 0.0.0.0 --port 8080
+# The REST API binds to [api] host/port in $AGENTOS_CONFIG; set [api] enabled = true there.
+ExecStart=/usr/local/bin/agentos start
 
 User=agentos
 Group=agentos

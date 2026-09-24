@@ -67,6 +67,16 @@ max_parallel_tool_calls = 10
 # heavy load (10+ agents, frequent tool calls).
 channel_capacity = 1024
 
+[kernel.convo]
+# Agent turns granted each time an agent-message reopens a direct-message session.
+dm_max_turns = 6
+# How long a direct-message session lives, from when it opens. Not extended by
+# activity — only by the operator, when the expiry escalation asks.
+dm_session_ttl_secs = 1800
+# Ask the operator to extend a direct-message session when its clock runs out.
+# Unanswered after 5 minutes, the session closes.
+dm_expiry_escalation = true
+
 [kernel.context_compaction]
 # Cadence in completed iterations: the compactor fires every N iterations
 # (and only when there are enough compactable entries to produce a useful
@@ -214,6 +224,15 @@ rust_allowlist = [
 ]
 
 # Hardware Abstraction Layer policy.
+[hal]
+# Peripheral drivers (audio, bluetooth, display, printer, raw-usb,
+# usb-storage, webcam, wifi) register only when the host has the hardware and
+# the service the driver uses; `agentos doctor` shows what was detected.
+# force_enable = ["printer"]    # e.g. a remote CUPS server
+# disable = ["webcam", "audio"] # never register, even when present
+force_enable = []
+disable = []
+
 [hal.raw_usb]
 # Allowlist of raw-USB devices agents may open, as "vid:pid" hex strings.
 # The raw-usb driver is fail-closed: with an empty list every
@@ -357,6 +376,22 @@ min_free_disk_mb = 512
 # are writable before subsystem init.
 check_db_writable = true
 
+# Runtime disk-headroom guard. [preflight] checks once at boot; this keeps
+# checking. Without it, a filling disk is invisible until SQLite starts
+# returning "database or disk is full" and writes fail silently.
+[resource_guard]
+enabled = true
+# Seconds between measurements of the data-dir partition.
+check_interval_secs = 60
+# Below this many free MB: level = warn, operator notified.
+warn_free_mb = 2048
+# Below this many free MB: level = critical. Deferrable writers (snapshots,
+# captures, episodic memory) pause; audit, checkpoints and vault never do.
+# /readyz starts returning 503.
+critical_free_mb = 512
+# Inode exhaustion fails writes just as hard as byte exhaustion.
+critical_free_inodes = 10000
+
 [otel]
 enabled = false
 endpoint = "http://localhost:4317"
@@ -433,6 +468,9 @@ auto_write_max_summary = 2048
 [skills]
 # Skill system directories. Skills are autonomous capability packages
 # containing a SKILL.toml manifest + system prompt file.
+# Relative paths resolve against the kernel data dir (~/.agentos by default),
+# which is where the CLI extracts the embedded core skills — NOT the cwd the
+# kernel was started from. Absolute paths are used verbatim.
 core_skills_dir = "skills/core"
 user_skills_dir = "skills/user"
 
@@ -463,17 +501,6 @@ refresh_enabled = false
 # Allow PUT /api/v1/config/{key} to write the config file at runtime. Off by
 # default; enable only on trusted control-plane deployments.
 config_writable = false
-
-[web]
-# Web UI authentication. The login token is resolved at startup in this order:
-#   1. $AGENTOS_WEB_TOKEN environment variable (best for systemd/Docker — never
-#      written to disk).
-#   2. auth_token set here.
-#   3. A token generated once on first boot and persisted to {data_dir}/web_token
-#      (mode 0600), then reused on every restart.
-# This makes the token stable across restarts instead of regenerating each boot.
-# Prefer an env-substituted value over committing a secret here.
-# auth_token = "change-me"
 
 [mcp]
 # List of MCP servers to connect at kernel boot.
@@ -630,12 +657,24 @@ run_retention_days = 30
 # Inbound voice/audio transcription (speech-to-text) for channel media.
 # When enabled, voice notes received on a channel (e.g. Telegram) are sent to an
 # OpenAI-compatible /audio/transcriptions endpoint and the transcript is injected
-# into the message the agent reads. Disabled by default. The API key is read from
+# into the message the agent reads. Audio attached in the web/panel chat is
+# transcribed the same way. Disabled by default. The API key is read from
 # the named environment variable — never stored in config.
 [transcription]
 enabled = false
 endpoint = "https://api.openai.com/v1/audio/transcriptions"
 model = "whisper-1"
+api_key_env = "OPENAI_API_KEY"
+
+# Outbound text-to-speech for the `speak` tool. The agent supplies text; the
+# kernel posts it to this OpenAI-compatible /audio/speech endpoint and writes the
+# mp3 into the agent's own files. Disabled by default. The endpoint may be local
+# (e.g. a `speaches` container); leave the key variable unset if it needs no auth.
+[tts]
+enabled = false
+endpoint = "https://api.openai.com/v1/audio/speech"
+model = "tts-1"
+voice = "alloy"
 api_key_env = "OPENAI_API_KEY"
 
 # Gateway ("run as a bot") — `agentos gateway run` boots the kernel and connects

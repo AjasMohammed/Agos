@@ -1094,7 +1094,7 @@ pub fn extract_inbound_message(
                 return Some(InboundMessage {
                     channel: DeliveryChannel::custom(DeliveryChannel::TELEGRAM),
                     channel_instance_id,
-                    external_sender_id: registered_chat_id.to_string(),
+                    external_sender_id: sender_identity(msg.from.as_ref(), msg.chat.id),
                     text,
                     reply_to_notification_id: None,
                     received_at: Utc::now(),
@@ -1119,7 +1119,10 @@ pub fn extract_inbound_message(
                 return Some(InboundMessage {
                     channel: DeliveryChannel::custom(DeliveryChannel::TELEGRAM),
                     channel_instance_id,
-                    external_sender_id: registered_chat_id.to_string(),
+                    external_sender_id: sender_identity(
+                        cq.from.as_ref(),
+                        cq.message.as_ref().map_or(0, |m| m.chat.id),
+                    ),
                     text: data,
                     reply_to_notification_id: None,
                     received_at: Utc::now(),
@@ -1293,6 +1296,8 @@ pub struct TelegramMessage {
     pub message_id: i64,
     pub chat: TelegramChat,
     #[serde(default)]
+    pub from: Option<TelegramUser>,
+    #[serde(default)]
     pub text: Option<String>,
     /// Caption accompanying a media message (photo/document/etc.). Telegram puts
     /// the user's typed text here — NOT in `text` — when media is attached.
@@ -1449,9 +1454,43 @@ pub struct TelegramChat {
     pub id: i64,
 }
 
+/// The human (or bot) that sent an update. Distinct from the chat: in a group
+/// every member shares one `chat.id`, so authorization must key off this.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramUser {
+    pub id: i64,
+}
+
+/// Sender identity for pairing / approval checks.
+///
+/// Private chats have `from.id == chat.id`, so existing DM pairings are
+/// unchanged. In groups (negative chat id) each member is their own identity
+/// and must pair individually — using the chat id there made every member the
+/// paired operator, able to `/approve` escalations. No `from` in a group
+/// (should not happen for `message`/`callback_query`) yields an empty,
+/// never-paired id.
+fn sender_identity(from: Option<&TelegramUser>, chat_id: i64) -> String {
+    match from {
+        Some(u) => u.id.to_string(),
+        None if chat_id > 0 => chat_id.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Chat id of a raw Telegram `message` or `callback_query` payload, as stored
+/// in `InboundMessage::raw`. The chat — not the sender — is where replies go.
+pub fn chat_id_from_raw(raw: &serde_json::Value) -> Option<String> {
+    raw.pointer("/chat/id")
+        .or_else(|| raw.pointer("/message/chat/id"))
+        .and_then(|v| v.as_i64())
+        .map(|id| id.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct TelegramCallbackQuery {
     pub id: String,
+    #[serde(default)]
+    pub from: Option<TelegramUser>,
     #[serde(default)]
     pub data: Option<String>,
     #[serde(default)]
@@ -1496,6 +1535,45 @@ mod tests {
 
     fn msg_from(value: serde_json::Value) -> TelegramMessage {
         serde_json::from_value(value).expect("valid TelegramMessage")
+    }
+
+    #[test]
+    fn group_member_is_not_the_chat_identity() {
+        let group = "-100500";
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": -100500},
+                "from": {"id": 777},
+                "text": "/approve 1"
+            }
+        }))
+        .expect("parse update");
+        let inbound =
+            extract_inbound_message(&update, group, ChannelInstanceID::new()).expect("inbound");
+        // Identity is the member, so pairing the group no longer pairs everyone in it…
+        assert_eq!(inbound.external_sender_id, "777");
+        // …while replies still resolve to the chat.
+        assert_eq!(chat_id_from_raw(&inbound.raw).as_deref(), Some(group));
+
+        let tap: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 2,
+            "callback_query": {
+                "id": "cb", "data": "approve:1", "from": {"id": 888},
+                "message": {"message_id": 2, "chat": {"id": -100500}}
+            }
+        }))
+        .expect("parse update");
+        let inbound =
+            extract_inbound_message(&tap, group, ChannelInstanceID::new()).expect("inbound");
+        assert_eq!(inbound.external_sender_id, "888");
+        assert_eq!(chat_id_from_raw(&inbound.raw).as_deref(), Some(group));
+
+        // DM: from == chat, existing pairings keep working. Group with no `from`: never paired.
+        assert_eq!(sender_identity(Some(&TelegramUser { id: 42 }), 42), "42");
+        assert_eq!(sender_identity(None, 42), "42");
+        assert_eq!(sender_identity(None, -100500), "");
     }
 
     #[test]

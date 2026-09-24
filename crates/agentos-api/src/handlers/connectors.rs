@@ -1,8 +1,4 @@
-//! Connector (OAuth) endpoints: list, detail, disconnect.
-//!
-//! Note: OAuth `start`/`callback` flows are intentionally NOT exposed here — they
-//! are cookie/redirect-shaped and live in `agentos-web`. This surface manages
-//! existing connectors only.
+//! Connector (OAuth) endpoints: list, detail, disconnect, OAuth start/callback.
 
 use axum::extract::{Path, State};
 use axum::Extension;

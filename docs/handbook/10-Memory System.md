@@ -465,8 +465,8 @@ Beyond the tier-specific tools documented above, the memory system provides the 
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
-| `context-memory-read` | `agent.context:r` | Read agent's context memory document |
-| `context-memory-update` | `agent.context:w` | Update agent's context memory document |
+| `context-memory-read` | `memory.context:r` | Read agent's context memory document |
+| `context-memory-update` | `memory.context:w` | Update agent's context memory document |
 
 ---
 

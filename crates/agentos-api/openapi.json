@@ -17,6 +17,20 @@
         ],
         "summary": "`GET /api/v1/agent-chats` — List multi-agent conversations (most-recent first).",
         "operationId": "agent_chats_list",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Restrict to one origin: `dm` (opened by an agent's `agent-message`) or\n`operator` (started from the UI or API). Omit for every conversation.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of conversations",
@@ -24,6 +38,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ListEnvelope_ApiConvoSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
                 }
               }
             }
@@ -5914,6 +5938,96 @@
         ]
       }
     },
+    "/api/v1/notifications/routes": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "`GET /api/v1/notifications/routes` — The notification routing matrix.",
+        "operationId": "notifications_get_routes",
+        "responses": {
+          "200": {
+            "description": "Routing matrix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiNotificationRoutes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "`PUT /api/v1/notifications/routes` — Update matrix cells. Partial: cells\nnot listed in the request are left untouched.",
+        "operationId": "notifications_set_routes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRoutesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated routing matrix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiNotificationRoutes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown event or mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/notifications/unread": {
       "get": {
         "tags": [
@@ -9991,6 +10105,13 @@
           "tool_name"
         ],
         "properties": {
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional action of a multi-action tool to scope the grant to\n(e.g. `\"speak\"` for `audio`); omit to cover every action."
+          },
           "agent_id": {
             "type": [
               "string",
@@ -10197,6 +10318,13 @@
           "source"
         ],
         "properties": {
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Single action this grant covers; `null` = every action of the tool."
+          },
           "agent_id": {
             "type": [
               "string",
@@ -10669,12 +10797,17 @@
           "topic",
           "participants",
           "status",
-          "updated_at"
+          "updated_at",
+          "kind"
         ],
         "properties": {
           "id": {
             "type": "string",
             "description": "Conversation id (UUID)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "How the thread started: `\"operator\"` (created from the UI or API) or\n`\"dm\"` (opened by an agent's `agent-message`). Older rows read\n`\"operator\"` — the column's default."
           },
           "participants": {
             "type": "array",
@@ -11254,6 +11387,62 @@
           }
         }
       },
+      "ApiNotificationEvent": {
+        "type": "object",
+        "description": "One row of the notification routing matrix.",
+        "required": [
+          "key",
+          "label",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "Stable key: `approval`, `task_complete`, `task_failed`, `question`,\n`agent_message`, `system_alert`, `status_update`."
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiNotificationRoutes": {
+        "type": "object",
+        "description": "The whole matrix: axes, current rules, and what `when_away` resolves to now.",
+        "required": [
+          "events",
+          "channels",
+          "rules",
+          "panel_connected"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiRouteChannel"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiNotificationEvent"
+            }
+          },
+          "panel_connected": {
+            "type": "boolean",
+            "description": "True while a control-panel WebSocket is connected — `when_away` rules\nare muted exactly while this is true."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiRouteRule"
+            },
+            "description": "Only cells that differ from the default; an absent cell means `always`."
+          }
+        }
+      },
       "ApiPageSummary": {
         "type": "object",
         "description": "Lightweight scratchpad page summary. Mirrors `agentos_scratch::PageSummary`.",
@@ -11685,6 +11874,54 @@
               "type": "string"
             },
             "description": "Permissions in `\"resource:rwxqo\"` form (only the set flags are included)."
+          }
+        }
+      },
+      "ApiRouteChannel": {
+        "type": "object",
+        "description": "One column of the matrix: a delivery target the kernel can reach.",
+        "required": [
+          "key",
+          "kind",
+          "label",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "False when the adapter is registered but currently cannot deliver\n(e.g. `notify-send` missing, Telegram chat id not yet discovered)."
+          },
+          "key": {
+            "type": "string",
+            "description": "Matrix key: a channel instance id (`telegram-main`) or a builtin\ndelivery kind (`desktop`, `cli`, `web`, `webhook`, `slack`)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Channel kind, for iconography."
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiRouteRule": {
+        "type": "object",
+        "description": "A single `(event, channel) -> mode` cell.",
+        "required": [
+          "event",
+          "channel",
+          "mode"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "`always` | `never` | `when_away`."
           }
         }
       },
@@ -13324,6 +13561,13 @@
               "source"
             ],
             "properties": {
+              "action": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Single action this grant covers; `null` = every action of the tool."
+              },
               "agent_id": {
                 "type": [
                   "string",
@@ -13722,12 +13966,17 @@
               "topic",
               "participants",
               "status",
-              "updated_at"
+              "updated_at",
+              "kind"
             ],
             "properties": {
               "id": {
                 "type": "string",
                 "description": "Conversation id (UUID)."
+              },
+              "kind": {
+                "type": "string",
+                "description": "How the thread started: `\"operator\"` (created from the UI or API) or\n`\"dm\"` (opened by an agent's `agent-message`). Older rows read\n`\"operator\"` — the column's default."
               },
               "participants": {
                 "type": "array",
@@ -13949,6 +14198,50 @@
               "uploaded_at": {
                 "type": "string",
                 "description": "RFC3339 (or `YYYY-MM-DDTHH:MM:SSZ`) upload timestamp."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiNotificationRoutes": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The whole matrix: axes, current rules, and what `when_away` resolves to now.",
+            "required": [
+              "events",
+              "channels",
+              "rules",
+              "panel_connected"
+            ],
+            "properties": {
+              "channels": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiRouteChannel"
+                }
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiNotificationEvent"
+                }
+              },
+              "panel_connected": {
+                "type": "boolean",
+                "description": "True while a control-panel WebSocket is connected — `when_away` rules\nare muted exactly while this is true."
+              },
+              "rules": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiRouteRule"
+                },
+                "description": "Only cells that differ from the default; an absent cell means `always`."
               }
             }
           }
@@ -15459,6 +15752,13 @@
                 "source"
               ],
               "properties": {
+                "action": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Single action this grant covers; `null` = every action of the tool."
+                },
                 "agent_id": {
                   "type": [
                     "string",
@@ -17579,12 +17879,17 @@
                 "topic",
                 "participants",
                 "status",
-                "updated_at"
+                "updated_at",
+                "kind"
               ],
               "properties": {
                 "id": {
                   "type": "string",
                   "description": "Conversation id (UUID)."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "How the thread started: `\"operator\"` (created from the UI or API) or\n`\"dm\"` (opened by an agent's `agent-message`). Older rows read\n`\"operator\"` — the column's default."
                 },
                 "participants": {
                   "type": "array",
@@ -18501,6 +18806,21 @@
           "value": {
             "type": "object",
             "description": "The new value to write at the dotted key."
+          }
+        }
+      },
+      "SetRoutesRequest": {
+        "type": "object",
+        "description": "Partial update: cells not listed are left untouched.",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiRouteRule"
+            }
           }
         }
       },

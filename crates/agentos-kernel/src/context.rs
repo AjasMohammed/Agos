@@ -247,6 +247,17 @@ impl ContextManager {
         Ok(())
     }
 
+    /// How many sub-agent results have been injected into this task's window.
+    /// The executor compares it across an inference to spot a result that
+    /// landed after the context was assembled.
+    pub async fn injected_sub_agent_count(&self, task_id: &TaskID) -> usize {
+        self.tasks
+            .read()
+            .await
+            .get(task_id)
+            .map_or(0, |tc| tc.injected_sub_agents.len())
+    }
+
     /// Returns `true` if the task's original prompt has already been pushed into
     /// the context window. Used by `setup_task_context` to prevent duplicate pushes
     /// on task resume (escalation approval, checkpoint restore).
@@ -619,14 +630,10 @@ impl ContextManager {
     ) -> Result<usize, AgentOSError> {
         use agentos_tools::sanitize;
 
-        let sanitized = sanitize::sanitize_tool_output(tool_name, result);
-        // Token-aware truncation: cap any single tool output at ~25% of the
-        // task's token budget (≈ `effective_budget / 2` chars at 4 chars/token),
-        // bounded above by the static 50k-char ceiling. For an 8k-window
-        // local model this is ~4k chars; for a 200k Claude window it stays
-        // at the 50k ceiling. Prevents one fat tool result from blowing
-        // the window on small models. Per-task override (set from the LLM
-        // adapter's capabilities) takes precedence over the global budget.
+        // Per-task override (set from the LLM adapter's capabilities) takes
+        // precedence over the global budget; `output_budget_chars` turns it
+        // into a char cap. Prevents one fat tool result from blowing the
+        // window on small models.
         let effective_budget = {
             let tasks = self.tasks.read().await;
             tasks
@@ -634,12 +641,35 @@ impl ContextManager {
                 .and_then(|tc| tc.token_budget_override)
                 .unwrap_or(self.token_budget)
         };
-        let dynamic_cap = if effective_budget > 0 {
-            (effective_budget / 2).min(sanitize::DEFAULT_MAX_OUTPUT_CHARS)
-        } else {
-            sanitize::DEFAULT_MAX_OUTPUT_CHARS
-        };
-        let content = sanitize::truncate_if_needed(&sanitized, dynamic_cap);
+        let dynamic_cap = sanitize::output_budget_chars(effective_budget);
+        // Reduce by value size before serializing: every key survives and the
+        // payload stays valid JSON, instead of a byte-offset cut that keeps
+        // whatever the serializer emitted first. See `render_within_budget`.
+        let (rendered, elision) = sanitize::render_within_budget(result, dynamic_cap);
+        if elision.did_elide() {
+            tracing::warn!(
+                tool = %tool_name,
+                original_chars = elision.original_chars,
+                limit_chars = dynamic_cap,
+                values_shortened = elision.elided_leaves,
+                bytes_elided = elision.elided_bytes,
+                "Tool result elided before context injection"
+            );
+        }
+        // Guard first, wrap second: the budget covers the payload, while the
+        // `[TOOL_RESULT]` delimiters and the notices are system overhead.
+        // Truncating with its marker attached would feed `[TOOL_RESULT_TRUNCATED`
+        // to the delimiter escaping below and hand the agent
+        // `[ESCAPED_TOOL_RESULT_TRUNCATED`, which the system prompt never
+        // mentions — so the marker goes on after the escaping, like the notice.
+        let (payload, was_cut) = sanitize::truncate_payload(&rendered, dynamic_cap);
+        let mut content = sanitize::sanitize_tool_output_text(tool_name, &payload);
+        if was_cut {
+            content.push_str(&sanitize::truncation_notice(dynamic_cap));
+        }
+        if elision.did_elide() {
+            content.push_str(&sanitize::elision_notice(tool_name, &elision, dynamic_cap));
+        }
 
         let is_error = result.get("error").is_some();
         let importance = if is_error { 0.8 } else { 0.5 };
@@ -796,6 +826,119 @@ impl ContextManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool result shaped like a Gmail read: the interesting headers sit
+    /// behind kilobytes of ARC/DKIM base64, so a byte-offset cut loses them.
+    fn gmail_shaped_result() -> serde_json::Value {
+        // Big enough that the whole result exceeds a 16 KB budget, so the
+        // elider actually runs — a fixture that fits proves nothing.
+        let blob = "A1b2C3d4".repeat(500);
+        let mut headers = Vec::new();
+        for name in [
+            "Received",
+            "ARC-Seal",
+            "ARC-Message-Signature",
+            "ARC-Authentication-Results",
+            "DKIM-Signature",
+        ] {
+            headers.push(serde_json::json!({"name": name, "value": blob.clone()}));
+        }
+        for i in 0..20 {
+            headers.push(serde_json::json!({"name": format!("X-Filler-{i}"), "value": "x"}));
+        }
+        headers.push(serde_json::json!({
+            "name": "Subject",
+            "value": "Re: [cth-devel/ba-bu] Chore/pre deploy cleanup (PR #6)"
+        }));
+        serde_json::json!({"payload": {"headers": headers}, "snippet": "left a comment"})
+    }
+
+    /// The 2026-09-21 failure, at the layer that injects into context: the
+    /// subject must survive, and the notice explaining why must sit OUTSIDE
+    /// the `[TOOL_RESULT]` envelope — inside it, it is tool output the agent
+    /// is told to distrust rather than the kernel speaking.
+    #[tokio::test]
+    async fn push_tool_result_elides_by_value_and_notices_outside_the_envelope() {
+        let mgr = ContextManager::new(100);
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+        mgr.create_context(task_id, agent_id, "sys").await;
+        mgr.set_task_token_budget(&task_id, 32_768).await; // -> 16,384 chars
+
+        mgr.push_tool_result(&task_id, "gmail_read", &gmail_shaped_result(), None)
+            .await
+            .expect("push");
+
+        let ctx = mgr.get_context(&task_id).await.expect("context");
+        let text = ctx
+            .entries
+            .iter()
+            .filter(|e| e.role == ContextRole::ToolResult)
+            .flat_map(|e| e.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .next()
+            .expect("tool result entry");
+
+        assert!(
+            text.contains("Chore/pre deploy cleanup (PR #6)"),
+            "subject was cut away: {}",
+            &text[..text.len().min(400)]
+        );
+        let close = text.find("[/TOOL_RESULT]").expect("envelope closed");
+        let notice = text
+            .find("[TOOL_RESULT_ELIDED")
+            .expect("elision notice present");
+        assert!(
+            notice > close,
+            "notice must sit outside the tool-result envelope"
+        );
+        // The kernel's own markers must never come back escaped.
+        assert!(!text.contains("[ESCAPED_TOOL_RESULT_TRUNCATED"));
+    }
+
+    /// A result whose bulk is ONE long string — the shape the task path builds
+    /// when it flattens a tool result into `{"output": "<everything>"}`. The
+    /// elider has no structure to exploit here, so it must still spend the
+    /// whole budget rather than falling back to its loosest fixed leaf cap.
+    #[tokio::test]
+    async fn push_tool_result_single_string_leaf_spends_the_whole_budget() {
+        let mgr = ContextManager::new(100);
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+        mgr.create_context(task_id, agent_id, "sys").await;
+        mgr.set_task_token_budget(&task_id, 32_768).await; // -> 16,384 chars
+
+        // Needle sits at ~8 KB: past any 4 KB cap, inside a 16 KB budget.
+        let mut body = "z".repeat(8_000);
+        body.push_str("NEEDLE");
+        body.push_str(&"z".repeat(20_000));
+        let value = serde_json::json!({ "output": body });
+
+        mgr.push_tool_result(&task_id, "file-reader", &value, None)
+            .await
+            .expect("push");
+
+        let ctx = mgr.get_context(&task_id).await.expect("context");
+        let text = ctx
+            .entries
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .find(|t| t.contains("file-reader"))
+            .expect("tool result entry");
+
+        assert!(
+            text.contains("NEEDLE"),
+            "budget collapsed to the fixed ladder: kept only {} chars",
+            text.len()
+        );
+    }
 
     fn checkpoint_window(text: &str) -> ContextWindow {
         let mut window = ContextWindow::with_strategy(100, OverflowStrategy::SemanticEviction);

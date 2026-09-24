@@ -98,7 +98,7 @@ And it deploys as a single binary or a Docker container in two commands.
 git clone https://github.com/AjasMohammed/Agos.git
 cd agentos
 docker compose up -d
-open http://localhost:8080
+curl http://localhost:8080/api/v1/health   # REST API (config/docker.toml sets [api] enabled = true)
 ```
 
 Or follow the [5-minute quickstart](../../README.md) to build from source.

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-const LATEST_MIGRATION_VERSION: i64 = 1;
+const LATEST_MIGRATION_VERSION: i64 = 2;
 
 /// Sentinel resource value on `PermissionDenied` for duplicate policy entries.
 pub const POLICY_DUPLICATE_RESOURCE: &str = "approval.policy.duplicate";
@@ -27,6 +27,8 @@ pub const POLICY_DUPLICATE_RESOURCE: &str = "approval.policy.duplicate";
 ///
 /// Matching semantics:
 /// - `tool_name` is required and matched exactly.
+/// - `action` is optional; when set, the payload's `action` field must equal
+///   it. `None` means "every action of this tool".
 /// - `path_glob` is optional; when set, the payload's `path` field (if any)
 ///   must match the glob.
 /// - `agent_id == None` means the entry applies to every agent.
@@ -37,6 +39,12 @@ pub const POLICY_DUPLICATE_RESOURCE: &str = "approval.policy.duplicate";
 pub struct ApprovalPolicyEntry {
     pub id: i64,
     pub tool_name: String,
+    /// Single action this grant covers (`None` = every action). Multi-action
+    /// tools (`audio`, `process-manager`) are one tool with very different
+    /// blast radii per action, so "always allow" has to be able to mean one
+    /// of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
     pub path_glob: Option<String>,
     pub agent_id: Option<AgentID>,
     pub granted_at: DateTime<Utc>,
@@ -99,6 +107,34 @@ impl ApprovalPolicyStore {
         if current >= LATEST_MIGRATION_VERSION {
             return Ok(());
         }
+        if current < 1 {
+            Self::migrate_v1(conn)?;
+        }
+        // v2: per-action grants. The unique index has to cover `action` too,
+        // or "allow audio speak" and "allow audio playback" collide as one
+        // duplicate scope.
+        conn.execute_batch(
+            r#"
+            ALTER TABLE approval_policy_entries ADD COLUMN action TEXT;
+            DROP INDEX IF EXISTS idx_policy_unique_active;
+            CREATE UNIQUE INDEX idx_policy_unique_active
+                ON approval_policy_entries(
+                    tool_name,
+                    COALESCE(action, ''),
+                    COALESCE(path_glob, ''),
+                    COALESCE(agent_id, '')
+                )
+                WHERE revoked_at IS NULL;
+            "#,
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version) VALUES (?1)",
+            params![LATEST_MIGRATION_VERSION],
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v1(conn: &Connection) -> anyhow::Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS approval_policy_entries (
@@ -125,15 +161,19 @@ impl ApprovalPolicyStore {
             "#,
         )?;
         conn.execute(
-            "INSERT OR IGNORE INTO schema_version(version) VALUES (?1)",
-            params![LATEST_MIGRATION_VERSION],
+            "INSERT OR IGNORE INTO schema_version(version) VALUES (1)",
+            [],
         )?;
         Ok(())
     }
 
+    // One row of the policy table, passed positionally. A params struct would
+    // be ceremony for a single call site per impl.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &self,
         tool_name: &str,
+        action: Option<&str>,
         path_glob: Option<&str>,
         agent_id: Option<AgentID>,
         granted_by: &str,
@@ -154,10 +194,11 @@ impl ApprovalPolicyStore {
         let agent_str = agent_id.as_ref().map(|a| a.to_string());
         let result = guard.execute(
             "INSERT INTO approval_policy_entries
-                (tool_name, path_glob, agent_id, granted_at, granted_by, source, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (tool_name, action, path_glob, agent_id, granted_at, granted_by, source, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 tool_name,
+                action,
                 path_glob,
                 agent_str,
                 now.to_rfc3339(),
@@ -173,6 +214,7 @@ impl ApprovalPolicyStore {
                 Ok(ApprovalPolicyEntry {
                     id,
                     tool_name: tool_name.to_string(),
+                    action: action.map(str::to_string),
                     path_glob: path_glob.map(str::to_string),
                     agent_id,
                     granted_at: now,
@@ -188,7 +230,7 @@ impl ApprovalPolicyStore {
                             resource: POLICY_DUPLICATE_RESOURCE.into(),
                             operation: format!(
                                 "approval policy already exists for tool '{}' \
-                                 (path_glob, agent_id) scope",
+                                 (action, path_glob, agent_id) scope",
                                 tool_name
                             ),
                         });
@@ -226,7 +268,7 @@ impl ApprovalPolicyStore {
             .map_err(|_| AgentOSError::StorageError("approval policy DB mutex poisoned".into()))?;
         let mut stmt = guard
             .prepare(
-                "SELECT id, tool_name, path_glob, agent_id, granted_at, granted_by, source, expires_at
+                "SELECT id, tool_name, path_glob, agent_id, granted_at, granted_by, source, expires_at, action
                  FROM approval_policy_entries
                  WHERE revoked_at IS NULL
                  ORDER BY id ASC",
@@ -254,6 +296,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalPolicyEntry
     let granted_by: String = row.get(5)?;
     let source: String = row.get(6)?;
     let expires_at: Option<String> = row.get(7)?;
+    let action: Option<String> = row.get(8)?;
     let parse_dt = |s: &str| {
         DateTime::parse_from_rfc3339(s)
             .map(|d| d.with_timezone(&Utc))
@@ -273,6 +316,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalPolicyEntry
     Ok(ApprovalPolicyEntry {
         id,
         tool_name,
+        action,
         path_glob,
         agent_id: agent_str.and_then(|s| s.parse::<AgentID>().ok()),
         granted_at,
@@ -315,6 +359,10 @@ pub enum RememberOutcome {
 /// Scope: the escalating agent only; when the payload had a `path`, the
 /// grant covers that path's parent directory (`<dir>/**`).
 ///
+/// When the approved call resolved through a per-action risk override, the
+/// grant is scoped to that action too — "always allow `audio` `speak`" never
+/// becomes "always allow `audio` `capture`".
+///
 /// Refuses (→ `NotApplicable`) rather than widening when:
 /// - the escalation carries no `tool_approval` metadata (HAL/device rows,
 ///   legacy rows);
@@ -324,9 +372,9 @@ pub enum RememberOutcome {
 ///   derived (`"notes.txt"`, `"/"`, non-string, `..` traversal) — a
 ///   `path_glob` of `None` means "matches ANY path" in [`ApprovalPolicyMatcher::allows`],
 ///   so "couldn't derive a directory" must never collapse into "tool-wide";
-/// - the class is `ExecCapable`/`Interactive` and there is no path to scope
-///   by (e.g. `shell-exec`) — one click must not buy 7 days of unprompted
-///   arbitrary shell.
+/// - the class is `ExecCapable`/`Interactive` and there is neither a path nor
+///   an action to scope by (e.g. `shell-exec`) — one click must not buy 7
+///   days of unprompted arbitrary shell.
 ///
 /// ponytail: parent-dir glob is the one-click heuristic. A long task writes
 /// many files in one tree; exact-path grants would re-prompt on every file.
@@ -374,29 +422,26 @@ pub fn grant_from_escalation(
             Some(format!("{}/**", dir.display()))
         }
     };
-    if path_glob.is_none() && matches!(risk, "ExecCapable" | "Interactive") {
+    // The action the per-action override resolved on, when there was one.
+    // `ApprovalHook` stamps it only in that case, which is exactly when the
+    // operator's yes was about one action of a multi-action tool.
+    let action = meta.get("scoped_action").and_then(|a| a.as_str());
+    if path_glob.is_none() && action.is_none() && matches!(risk, "ExecCapable" | "Interactive") {
         return Ok(NotApplicable(
-            "an exec-capable tool with no path cannot be remembered unscoped",
+            "an exec-capable tool with no path or action cannot be remembered unscoped",
         ));
     }
     // `risk` above is the class `ApprovalHook` RESOLVED for this call, which a
     // per-action override may have lowered (`wifi` is control_plane, but its
-    // `scan` action resolves readonly_external). The grant this mints is keyed
-    // on `(tool_name, path_glob, agent_id)` — there is no action dimension — so
-    // remembering an approval the operator only ever saw for one read action
-    // would extend it to every other action of the same tool, including the
-    // writes the tool-level class exists to gate. Refuse instead: the operator
-    // can still approve each call, and a path-scoped grant is unaffected.
-    if path_glob.is_none() && meta.get("scoped_action").is_some_and(|a| a.is_string()) {
-        return Ok(NotApplicable(
-            "this approval covered a single action; an unscoped tool-wide grant \
-             would also cover the tool's other actions",
-        ));
-    }
-
+    // `scan` action resolves readonly_external). Carrying `action` onto the
+    // grant is what keeps that limit: without it, remembering an approval the
+    // operator only ever saw for one read action would extend it to every
+    // other action of the same tool, including the writes the tool-level class
+    // exists to gate.
     let expires_at = Some(Utc::now() + chrono::Duration::days(REMEMBER_GRANT_DAYS));
     let entry = match matcher.add(
         tool_name,
+        action,
         path_glob.as_deref(),
         Some(esc.agent_id),
         granted_by,
@@ -425,6 +470,7 @@ pub fn grant_from_escalation(
             "setting": "approval.policy.added",
             "id": entry.id,
             "tool_name": entry.tool_name,
+            "action": entry.action,
             "path_glob": entry.path_glob,
             "agent_id": entry.agent_id.map(|a| a.to_string()),
             "source": entry.source,
@@ -456,8 +502,10 @@ impl ApprovalPolicyMatcher {
     }
 
     /// Does any active policy entry lift this call's prompt to allow?
-    /// `path_in_payload` is the `path` field extracted from the tool payload
-    /// by the caller (None if the tool has no path field).
+    /// `action_in_payload` and `path_in_payload` are the payload's `action`
+    /// and `path` fields as extracted by the caller (None when the tool has
+    /// no such field). An entry with an `action` matches only that action; an
+    /// entry without one matches every action of the tool.
     ///
     /// Iterates under the cache read guard with no clone — the prompt branch
     /// is the hot path inside `ApprovalHook::on_event` and we want to keep
@@ -465,6 +513,7 @@ impl ApprovalPolicyMatcher {
     pub fn allows(
         &self,
         tool_name: &str,
+        action_in_payload: Option<&str>,
         agent_id: &AgentID,
         path_in_payload: Option<&str>,
     ) -> bool {
@@ -481,6 +530,14 @@ impl ApprovalPolicyMatcher {
         for entry in cache.iter() {
             if entry.tool_name != tool_name {
                 continue;
+            }
+            if let Some(scoped) = &entry.action {
+                // An action-scoped grant covers exactly that action. A call
+                // with no `action` field can never match one — it is a
+                // different shape of call than the one approved.
+                if action_in_payload != Some(scoped.as_str()) {
+                    continue;
+                }
             }
             if let Some(expiry) = entry.expires_at {
                 if expiry < now {
@@ -517,9 +574,13 @@ impl ApprovalPolicyMatcher {
         false
     }
 
+    // One row of the policy table, passed positionally. A params struct would
+    // be ceremony for a single call site per impl.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &self,
         tool_name: &str,
+        action: Option<&str>,
         path_glob: Option<&str>,
         agent_id: Option<AgentID>,
         granted_by: &str,
@@ -530,7 +591,7 @@ impl ApprovalPolicyMatcher {
         // run under the cache write guard that every `allows()` call on the
         // ToolPre hot path needs.
         let entry = self.store.add(
-            tool_name, path_glob, agent_id, granted_by, source, expires_at,
+            tool_name, action, path_glob, agent_id, granted_by, source, expires_at,
         )?;
         let mut cache = self
             .cache
@@ -643,6 +704,54 @@ mod tests {
         (d, Arc::new(s))
     }
 
+    /// A v1 database (no `action` column) must upgrade in place, keeping its
+    /// rows. Every deployed kernel has one.
+    #[tokio::test]
+    async fn migrates_a_v1_database_in_place() {
+        let d = TempDir::new().unwrap();
+        let path = d.path().join("policy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                 INSERT INTO schema_version(version) VALUES (1);
+                 CREATE TABLE approval_policy_entries (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name   TEXT    NOT NULL,
+                    path_glob   TEXT,
+                    agent_id    TEXT,
+                    granted_at  TEXT    NOT NULL,
+                    granted_by  TEXT    NOT NULL DEFAULT 'local-cli',
+                    source      TEXT    NOT NULL DEFAULT 'cli',
+                    expires_at  TEXT,
+                    revoked_at  TEXT
+                 );
+                 CREATE UNIQUE INDEX idx_policy_unique_active
+                    ON approval_policy_entries(
+                        tool_name, COALESCE(path_glob, ''), COALESCE(agent_id, '')
+                    )
+                    WHERE revoked_at IS NULL;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO approval_policy_entries
+                    (tool_name, granted_at, granted_by, source)
+                 VALUES ('speak', ?1, 'local-cli', 'approve_remember')",
+                params![Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let store = ApprovalPolicyStore::open(path).await.unwrap();
+        let rows = store.list_active().unwrap();
+        assert_eq!(rows.len(), 1, "the v1 row must survive the migration");
+        assert_eq!(rows[0].action, None, "pre-v2 grants stay tool-wide");
+        // And the new dimension works on the upgraded DB.
+        store
+            .add("audio", Some("speak"), None, None, "t", "test", None)
+            .unwrap();
+        assert_eq!(store.list_active().unwrap().len(), 2);
+    }
+
     fn escalation_with(metadata: serde_json::Value) -> crate::escalation::PendingEscalation {
         use agentos_types::*;
         crate::escalation::PendingEscalation {
@@ -683,38 +792,56 @@ mod tests {
         }))
     }
 
-    /// An approval the operator only ever saw for ONE action must not become a
-    /// tool-wide standing grant. The matcher is keyed on
-    /// `(tool_name, path_glob, agent_id)` with no action dimension, so an
-    /// unscoped grant minted off `wifi`'s downgraded `scan` would also satisfy
-    /// `wifi connect` for `REMEMBER_GRANT_DAYS`.
+    /// An approval the operator only ever saw for ONE action stays scoped to
+    /// that action. The grant carries `action`, so a grant minted off `wifi`'s
+    /// downgraded `scan` never satisfies `wifi connect`.
     ///
     /// The `ExecCapable`/`Interactive` guard above does not cover this: the risk
     /// string in the metadata is the class `ApprovalHook` RESOLVED, which the
     /// per-action override already lowered to `ReadonlyExternal`.
     #[tokio::test]
-    async fn action_scoped_approval_cannot_mint_an_unscoped_tool_wide_grant() {
+    async fn action_scoped_approval_mints_an_action_scoped_grant() {
         let (_t, store) = fresh().await;
         let matcher = ApprovalPolicyMatcher::load(store).unwrap();
         let audit = test_audit();
 
         let mut esc = tool_esc("wifi", "ReadonlyExternal", serde_json::Value::Null);
         esc.metadata["scoped_action"] = "scan".into();
-        assert!(matches!(
-            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
-            RememberOutcome::NotApplicable(_)
-        ));
+        let RememberOutcome::Granted(entry) =
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap()
+        else {
+            panic!("an action-scoped approval must mint an action-scoped grant");
+        };
+        assert_eq!(entry.action.as_deref(), Some("scan"));
+        assert!(matcher.allows("wifi", Some("scan"), &esc.agent_id, None));
+        // The action the operator never saw, and a call with no action at all.
+        assert!(!matcher.allows("wifi", Some("connect"), &esc.agent_id, None));
+        assert!(!matcher.allows("wifi", None, &esc.agent_id, None));
 
-        // Without the action marker the same escalation is remembered, which is
-        // what makes the marker (not the risk string) the thing doing the work.
+        // `audio speak` is the case this exists for: exec-capable, no path, and
+        // one click must buy speaking aloud without buying the microphone.
+        let mut esc = tool_esc("audio", "ExecCapable", serde_json::Value::Null);
+        esc.metadata["scoped_action"] = "speak".into();
+        let RememberOutcome::Granted(entry) =
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap()
+        else {
+            panic!("`audio speak` must be rememberable");
+        };
+        assert_eq!(entry.action.as_deref(), Some("speak"));
+        assert!(matcher.allows("audio", Some("speak"), &esc.agent_id, None));
+        assert!(!matcher.allows("audio", Some("capture"), &esc.agent_id, None));
+
+        // Without the action marker the grant is tool-wide, as before.
         let esc = tool_esc("wifi", "ReadonlyExternal", serde_json::Value::Null);
-        assert!(matches!(
-            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
-            RememberOutcome::Granted(_)
-        ));
+        let RememberOutcome::Granted(entry) =
+            grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap()
+        else {
+            panic!("an unscoped approval still mints a tool-wide grant");
+        };
+        assert_eq!(entry.action, None);
+        assert!(matcher.allows("wifi", Some("connect"), &esc.agent_id, None));
 
-        // A path-scoped grant is unaffected: the glob already bounds it, so the
-        // action marker must not block it.
+        // A path-scoped grant is unaffected: the glob already bounds it.
         let mut esc = tool_esc(
             "file-writer",
             "WriteScoped",
@@ -725,6 +852,37 @@ mod tests {
             grant_from_escalation(&matcher, &esc, "tester", &audit).unwrap(),
             RememberOutcome::Granted(_)
         ));
+    }
+
+    /// Two actions of the same tool are two grants, not a duplicate-scope
+    /// collision — the unique index has to cover `action`.
+    #[tokio::test]
+    async fn per_action_grants_do_not_collide() {
+        let (_t, store) = fresh().await;
+        let agent = AgentID::new();
+        store
+            .add("audio", Some("speak"), None, Some(agent), "t", "test", None)
+            .unwrap();
+        store
+            .add(
+                "audio",
+                Some("playback"),
+                None,
+                Some(agent),
+                "t",
+                "test",
+                None,
+            )
+            .unwrap();
+        let err = store
+            .add("audio", Some("speak"), None, Some(agent), "t", "test", None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AgentOSError::PermissionDenied { ref resource, .. }
+                if resource == POLICY_DUPLICATE_RESOURCE
+        ));
+        assert_eq!(store.list_active().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -749,12 +907,19 @@ mod tests {
         // The grant lifts a matching call — and only for that agent, that tree.
         assert!(matcher.allows(
             "file-writer",
+            None,
             &esc.agent_id,
             Some("/home/alice/proj/src/lib.rs")
         ));
-        assert!(!matcher.allows("file-writer", &esc.agent_id, Some("/home/alice/other/x.rs")));
         assert!(!matcher.allows(
             "file-writer",
+            None,
+            &esc.agent_id,
+            Some("/home/alice/other/x.rs")
+        ));
+        assert!(!matcher.allows(
+            "file-writer",
+            None,
             &agentos_types::AgentID::new(),
             Some("/home/alice/proj/src/lib.rs")
         ));
@@ -827,6 +992,7 @@ mod tests {
         let e = store
             .add(
                 "file-writer",
+                None,
                 Some("/home/alice/proj/**"),
                 None,
                 "tester",
@@ -847,10 +1013,10 @@ mod tests {
     async fn duplicate_returns_sentinel_resource() {
         let (_t, store) = fresh().await;
         store
-            .add("file-writer", None, None, "t", "test", None)
+            .add("file-writer", None, None, None, "t", "test", None)
             .unwrap();
         let err = store
-            .add("file-writer", None, None, "t", "test", None)
+            .add("file-writer", None, None, None, "t", "test", None)
             .unwrap_err();
         match err {
             AgentOSError::PermissionDenied { resource, .. } => {
@@ -866,6 +1032,7 @@ mod tests {
         let m = ApprovalPolicyMatcher::load(store.clone()).unwrap();
         m.add(
             "file-writer",
+            None,
             Some("/home/alice/proj/**"),
             None,
             "tester",
@@ -874,12 +1041,17 @@ mod tests {
         )
         .unwrap();
         let agent = AgentID::new();
-        assert!(m.allows("file-writer", &agent, Some("/home/alice/proj/src/main.rs")));
-        assert!(!m.allows("file-writer", &agent, Some("/home/bob/proj/main.rs")));
+        assert!(m.allows(
+            "file-writer",
+            None,
+            &agent,
+            Some("/home/alice/proj/src/main.rs")
+        ));
+        assert!(!m.allows("file-writer", None, &agent, Some("/home/bob/proj/main.rs")));
         // Glob present but no path in payload → no match (fail-safe).
-        assert!(!m.allows("file-writer", &agent, None));
+        assert!(!m.allows("file-writer", None, &agent, None));
         // Wrong tool name → no match.
-        assert!(!m.allows("file-reader", &agent, Some("/home/alice/proj/x")));
+        assert!(!m.allows("file-reader", None, &agent, Some("/home/alice/proj/x")));
     }
 
     #[tokio::test]
@@ -888,10 +1060,18 @@ mod tests {
         let m = ApprovalPolicyMatcher::load(store.clone()).unwrap();
         let scoped = AgentID::new();
         let other = AgentID::new();
-        m.add("file-writer", None, Some(scoped), "tester", "test", None)
-            .unwrap();
-        assert!(m.allows("file-writer", &scoped, None));
-        assert!(!m.allows("file-writer", &other, None));
+        m.add(
+            "file-writer",
+            None,
+            None,
+            Some(scoped),
+            "tester",
+            "test",
+            None,
+        )
+        .unwrap();
+        assert!(m.allows("file-writer", None, &scoped, None));
+        assert!(!m.allows("file-writer", None, &other, None));
     }
 
     #[tokio::test]
@@ -900,9 +1080,17 @@ mod tests {
         let m = ApprovalPolicyMatcher::load(store.clone()).unwrap();
         let agent = AgentID::new();
         let yesterday = Utc::now() - chrono::Duration::days(1);
-        m.add("file-writer", None, None, "tester", "test", Some(yesterday))
-            .unwrap();
-        assert!(!m.allows("file-writer", &agent, None));
+        m.add(
+            "file-writer",
+            None,
+            None,
+            None,
+            "tester",
+            "test",
+            Some(yesterday),
+        )
+        .unwrap();
+        assert!(!m.allows("file-writer", None, &agent, None));
     }
 
     #[test]

@@ -22,6 +22,10 @@ pub enum ApprovalCommands {
     Allow {
         /// Tool name (e.g. `file-writer`).
         tool: String,
+        /// Scope this entry to one action of a multi-action tool
+        /// (e.g. `--action speak` for `audio`). Default: every action.
+        #[arg(long)]
+        action: Option<String>,
         /// Optional glob to match against the payload's `path` field
         /// (e.g. `/home/alice/project/**`).
         #[arg(long)]
@@ -58,7 +62,12 @@ pub enum ModeCommands {
 pub async fn handle(client: &mut BusClient, command: ApprovalCommands) -> anyhow::Result<()> {
     match command {
         ApprovalCommands::Mode { command } => mode(client, command).await,
-        ApprovalCommands::Allow { tool, path, agent } => allow(client, tool, path, agent).await,
+        ApprovalCommands::Allow {
+            tool,
+            action,
+            path,
+            agent,
+        } => allow(client, tool, action, path, agent).await,
         ApprovalCommands::List => list(client).await,
         ApprovalCommands::Revoke { id } => revoke(client, id).await,
     }
@@ -149,12 +158,14 @@ async fn mode(client: &mut BusClient, cmd: ModeCommands) -> anyhow::Result<()> {
 async fn allow(
     client: &mut BusClient,
     tool: String,
+    action: Option<String>,
     path: Option<String>,
     agent: Option<String>,
 ) -> anyhow::Result<()> {
     let resp = client
         .send_command(KernelCommand::AddApprovalPolicy {
             tool_name: tool.clone(),
+            action: action.clone(),
             path_glob: path.clone(),
             agent_name: agent.clone(),
         })
@@ -163,11 +174,13 @@ async fn allow(
         KernelResponse::ApprovalPolicyAdded {
             id,
             tool_name,
+            action,
             path_glob,
             agent_name,
         } => {
             println!(
-                "added policy #{id}: tool='{tool_name}' path={} agent={}",
+                "added policy #{id}: tool='{tool_name}' action={} path={} agent={}",
+                action.as_deref().unwrap_or("(any)"),
                 path_glob.as_deref().unwrap_or("(any)"),
                 agent_name.as_deref().unwrap_or("(any)"),
             );
@@ -187,18 +200,20 @@ async fn list(client: &mut BusClient) -> anyhow::Result<()> {
             if entries.is_empty() {
                 println!("No active approval policies.");
                 println!(
-                    "Add one with: agentos approval allow <tool> [--path <glob>] [--agent <name>]"
+                    "Add one with: agentos approval allow <tool> [--action <action>] \
+                     [--path <glob>] [--agent <name>]"
                 );
                 return Ok(());
             }
             println!(
-                "{:<4} {:<22} {:<32} {:<22} GRANTED_BY",
-                "ID", "TOOL", "PATH_GLOB", "AGENT"
+                "{:<4} {:<22} {:<14} {:<32} {:<22} GRANTED_BY",
+                "ID", "TOOL", "ACTION", "PATH_GLOB", "AGENT"
             );
             println!("{}", "-".repeat(100));
             for e in entries {
                 let id = e.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
                 let tool = e.get("tool_name").and_then(|v| v.as_str()).unwrap_or("-");
+                let action = e.get("action").and_then(|v| v.as_str()).unwrap_or("(any)");
                 let path = e
                     .get("path_glob")
                     .and_then(|v| v.as_str())
@@ -209,9 +224,10 @@ async fn list(client: &mut BusClient) -> anyhow::Result<()> {
                     .unwrap_or("(any)");
                 let granted_by = e.get("granted_by").and_then(|v| v.as_str()).unwrap_or("-");
                 println!(
-                    "{:<4} {:<22} {:<32} {:<22} {}",
+                    "{:<4} {:<22} {:<14} {:<32} {:<22} {}",
                     id,
                     tool.chars().take(22).collect::<String>(),
+                    action.chars().take(14).collect::<String>(),
                     path.chars().take(32).collect::<String>(),
                     agent.chars().take(22).collect::<String>(),
                     granted_by,

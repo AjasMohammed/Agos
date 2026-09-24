@@ -128,7 +128,10 @@ const NOT_DERIVED: &str = "scope <> 'derived'";
 /// written a few reports gets a "what did the user upload?" answer made entirely
 /// of its own output, and never sees the file the user actually sent. They are
 /// still reachable by id; they are just not user uploads.
-const NOT_ARTIFACT: &str = "','||COALESCE(tags,'')||',' NOT LIKE '%,artifact,%'";
+///
+/// `file-publish` rows (`published`) are agent output for the same reason.
+const NOT_ARTIFACT: &str = "','||COALESCE(tags,'')||',' NOT LIKE '%,artifact,%' \
+     AND ','||COALESCE(tags,'')||',' NOT LIKE '%,published,%'";
 
 impl UserFiles {
     /// Open the registry under `data_dir`. `Ok(None)` means no upload has ever
@@ -178,7 +181,7 @@ impl UserFiles {
         let conn = self.conn()?;
         let sql = format!(
             "SELECT {COLUMNS} FROM uploaded_files
-             WHERE (name = ?1 OR original_name = ?1) AND {NOT_DERIVED}
+             WHERE (name = ?1 OR original_name = ?1) AND {NOT_DERIVED} AND {NOT_ARTIFACT}
                AND ','||COALESCE(tags,'')||',' NOT LIKE '%,inbound,%'
              ORDER BY uploaded_at DESC LIMIT 1"
         );
@@ -355,6 +358,32 @@ pub(crate) mod tests {
         let hit = files.find_by_name("notes.txt").unwrap().unwrap();
         assert!(!hit.is_inbound());
         assert_eq!(hit.source(), "upload");
+    }
+
+    /// `file-publish` titles default to the on-disk file name, so an agent's own
+    /// copy would otherwise out-rank the operator's upload of the same name.
+    #[test]
+    fn name_lookup_ignores_files_the_agent_published() {
+        let dir = TempDir::new().unwrap();
+        let upload = register(
+            dir.path(),
+            "invoice.pdf",
+            "application/pdf",
+            b"operator",
+            "",
+        );
+        register(
+            dir.path(),
+            "invoice.pdf",
+            "application/pdf",
+            b"agent",
+            "published,agent:x",
+        );
+        let files = UserFiles::open(dir.path()).unwrap();
+        assert_eq!(
+            files.find_by_name("invoice.pdf").unwrap().unwrap().id,
+            upload
+        );
     }
 
     #[test]

@@ -42,7 +42,6 @@ pub mod status;
 pub mod task;
 pub mod team;
 pub mod tool;
-pub mod web;
 pub mod workspace;
 
 pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow::Result<()> {

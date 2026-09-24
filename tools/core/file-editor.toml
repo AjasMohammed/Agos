@@ -4,7 +4,7 @@ risk_class = "write_scoped"
 [manifest]
 name        = "file-editor"
 version     = "1.0.0"
-description = "Applies exact string replacements to a file. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous."
+description = "Applies exact string replacements to a file. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous — unless that edit sets replace_all=true, which replaces every occurrence (use it for renames). The previous version is kept in .trash/ for ~72h and its path returned as \"backup\"."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
@@ -44,6 +44,10 @@ description = "Unique text to replace"
 [payload_schema.properties.edits.items.properties.new_text]
 type = "string"
 description = "Replacement text"
+[payload_schema.properties.edits.items.properties.replace_all]
+type = "boolean"
+default = false
+description = "Replace every occurrence of old_text instead of requiring exactly one"
 
 [sandbox]
 network       = false

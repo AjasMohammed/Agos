@@ -64,13 +64,23 @@ impl BackgroundPool {
         }
     }
 
+    /// The live task with this name, else the newest. Names repeat: every fire
+    /// of a recurring schedule reuses the schedule's name.
     pub async fn get_by_name(&self, name: &str) -> Option<BackgroundTask> {
+        self.named(name)
+            .await
+            .into_iter()
+            .max_by_key(|t| (t.completed_at.is_none(), t.started_at))
+    }
+
+    pub async fn named(&self, name: &str) -> Vec<BackgroundTask> {
         self.tasks
             .read()
             .await
             .values()
-            .find(|t| t.name == name)
+            .filter(|t| t.name == name)
             .cloned()
+            .collect()
     }
 
     /// Remove terminal (Complete / Failed) tasks that completed more than

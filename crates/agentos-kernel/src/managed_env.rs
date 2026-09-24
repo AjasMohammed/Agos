@@ -137,8 +137,10 @@ pub struct PackageAllowlist {
 /// Validate workspace name: must be 1-64 chars, alphanumeric + hyphens + underscores.
 fn validate_workspace_name(name: &str) -> Result<(), AgentOSError> {
     const MAX_LEN: usize = 64;
+    // A leading `-` would reach pip/npm/cargo argv as a flag.
     if name.is_empty()
         || name.len() > MAX_LEN
+        || name.starts_with('-')
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -181,8 +183,10 @@ fn validate_version(version: &str) -> Result<(), AgentOSError> {
 /// Validate package name: must be 1-128 chars, alphanumeric + hyphens + underscores + dots.
 fn validate_package_name(name: &str) -> Result<(), AgentOSError> {
     const MAX_LEN: usize = 128;
+    // A leading `-` would reach pip/npm/cargo argv as a flag.
     if name.is_empty()
         || name.len() > MAX_LEN
+        || name.starts_with('-')
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
@@ -1155,6 +1159,7 @@ mod tests {
             workspace_paths: vec![],
             agent_home: data_dir.join("agents").join("test"),
             workspace_paths_executable: vec![],
+            storage_zones: vec![],
         }
     }
 
@@ -1208,6 +1213,7 @@ mod tests {
     #[test]
     fn validate_package_name_bad() {
         assert!(validate_package_name("").is_err());
+        assert!(validate_package_name("--index-url").is_err());
         assert!(validate_package_name("flask; rm -rf /").is_err());
         assert!(validate_package_name("pkg && malicious").is_err());
         assert!(validate_package_name(&"x".repeat(129)).is_err());
@@ -1286,6 +1292,7 @@ mod tests {
             workspace_paths: vec![],
             agent_home: tmp.path().join("agents").join("test"),
             workspace_paths_executable: vec![],
+            storage_zones: vec![],
         };
 
         // First provider — create a generic workspace via the action.

@@ -51,6 +51,11 @@ pub enum ZoneGrantSource {
     Policy,
     /// Granted by operator approval via escalation.
     OperatorApproval { escalation_id: u64 },
+    /// Minted by the kernel for a conversation's shared workspace. Scoped to
+    /// the participants and expiring with the convo, so it needs no operator
+    /// step: two agents the operator put in one conversation do not need a
+    /// second consent to hand each other a file inside kernel space.
+    Convo { convo_id: String },
 }
 
 /// A filesystem zone granting an agent access to a specific directory.
@@ -572,6 +577,34 @@ impl agentos_types::StorageZoneQuery for ZoneTable {
         self.is_path_in_zone_sync(agent_id, path)
     }
 
+    /// Every live zone for this agent. Sandbox builders need the list up front
+    /// — bwrap binds directories when the command is constructed, so testing
+    /// one path at a time (`is_path_in_zone`) is no use to them.
+    fn zones_for(
+        &self,
+        agent_id: &AgentID,
+    ) -> Vec<(std::path::PathBuf, agentos_types::ZoneAccessLevel)> {
+        match self.inner.try_read() {
+            Ok(inner) => inner
+                .zones
+                .values()
+                .filter(|z| z.agent_id == *agent_id && !z.is_expired())
+                .map(|z| {
+                    (
+                        z.path.clone(),
+                        match z.access {
+                            ZoneAccess::ReadOnly => agentos_types::ZoneAccessLevel::ReadOnly,
+                            ZoneAccess::ReadWrite => agentos_types::ZoneAccessLevel::ReadWrite,
+                        },
+                    )
+                })
+                .collect(),
+            // Lock contended — conservative empty, exactly like the other two
+            // accessors. A missed bind fails the command; a wrong one is a hole.
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn zone_access(
         &self,
         agent_id: &AgentID,
@@ -724,6 +757,7 @@ impl StorageProvider {
         let granted_by_label = match &granted_by {
             ZoneGrantSource::Policy => "policy",
             ZoneGrantSource::OperatorApproval { .. } => "operator_approval",
+            ZoneGrantSource::Convo { .. } => "convo",
         };
 
         // Atomically check zone limit, generate ID, and insert — prevents
@@ -914,6 +948,7 @@ mod tests {
             workspace_paths: vec![],
             agent_home: PathBuf::from("/tmp/agents/test"),
             workspace_paths_executable: vec![],
+            storage_zones: vec![],
         }
     }
 

@@ -15,6 +15,7 @@ pub mod archival_search;
 pub mod artifact_write;
 pub mod ask_user;
 pub mod audio;
+pub mod automation_policy;
 pub mod bluetooth;
 pub mod cancel_agent;
 pub mod channel_send;
@@ -41,6 +42,7 @@ pub mod file_glob;
 pub mod file_grep;
 pub mod file_lock;
 pub mod file_move;
+pub mod file_publish;
 pub mod file_reader;
 pub mod file_writer;
 pub mod get_schedule_runs;
@@ -71,6 +73,7 @@ pub mod printer;
 pub mod procedure_create;
 pub mod procedure_delete;
 pub mod procedure_list;
+pub mod procedure_run;
 pub mod procedure_search;
 pub mod process_manager;
 pub mod raw_usb;
@@ -92,6 +95,7 @@ pub mod shell_exec;
 pub mod signing;
 pub mod skill_create;
 pub mod skill_prompt;
+pub mod speak;
 pub(crate) mod ssrf;
 pub mod sys_monitor;
 pub mod system_mounts;
@@ -113,6 +117,7 @@ pub mod web_search;
 pub mod webcam;
 pub mod wifi;
 pub mod workspace;
+pub mod workspace_request;
 
 pub use a2a_tools::A2ADelegateTool;
 pub use agent_call::AgentCallTool;
@@ -155,6 +160,7 @@ pub use file_glob::FileGlob;
 pub use file_grep::FileGrep;
 pub use file_lock::{FileLockRegistry, WriteLockGuard};
 pub use file_move::FileMove;
+pub use file_publish::FilePublishTool;
 pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
 pub use get_schedule_runs::GetScheduleRunsTool;
@@ -200,6 +206,7 @@ pub use shell_exec::ShellExec;
 pub use signing::{pubkey_hex_from_seed, sign_manifest, signing_payload, verify_manifest};
 pub use skill_create::{SharedSkillInstaller, SkillCreateTool, SkillInstaller};
 pub use skill_prompt::SkillPromptTool;
+pub use speak::{SpeakTool, TtsSettings};
 pub use sys_monitor::SysMonitorTool;
 pub use system_mounts::SystemMountsTool;
 pub use system_open_files::SystemOpenFilesTool;
@@ -216,6 +223,7 @@ pub use user_files::{UserFileRecord, UserFiles};
 pub use web_fetch::WebFetch;
 pub use webcam::WebcamTool;
 pub use wifi::WifiTool;
+pub use workspace_request::WorkspaceRequestTool;
 
 #[cfg(test)]
 mod tests {
@@ -251,6 +259,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -294,6 +303,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -356,6 +366,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -385,6 +396,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -2100,7 +2112,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_delete_directory_rejected() {
         let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("mydir")).unwrap();
+        std::fs::create_dir(agent_home(dir.path()).join("mydir")).unwrap();
 
         let tool = crate::file_delete::FileDelete::new();
         let mut perms = PermissionSet::new();
@@ -2114,6 +2126,137 @@ mod tests {
 
         assert!(matches!(err, AgentOSError::ToolExecutionFailed { .. }));
         assert!(err.to_string().contains("directory"));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_trash_restore_recursive_and_root_guard() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        std::fs::create_dir_all(home.join("proj/sub")).unwrap();
+        std::fs::write(home.join("proj/sub/a.txt"), "a").unwrap();
+        std::fs::write(home.join("note.txt"), "keep me").unwrap();
+
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, true, false, None);
+        let ctx = || make_context_with_permissions(dir.path(), perms.clone());
+        let delete = crate::file_delete::FileDelete::new();
+
+        // A directory needs recursive=true; the home dir itself is never deletable.
+        let err = delete
+            .execute(serde_json::json!({"path": "proj"}), ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("recursive=true"));
+        let err = delete
+            .execute(serde_json::json!({"path": ".", "recursive": true}), ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+        assert!(home.join("note.txt").exists());
+
+        let out = delete
+            .execute(
+                serde_json::json!({"path": "proj", "recursive": true}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["recoverable"], true);
+        let proj_trash_path = out["trash_path"].as_str().unwrap().to_string();
+        assert!(!home.join("proj").exists());
+
+        // Delete then restore a file with file-move from its trash path.
+        let out = delete
+            .execute(serde_json::json!({"path": "note.txt"}), ctx())
+            .await
+            .unwrap();
+        let trash_path = out["trash_path"].as_str().unwrap().to_string();
+        crate::file_move::FileMove::new()
+            .execute(
+                serde_json::json!({"from": trash_path, "to": "note.txt"}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("note.txt")).unwrap(),
+            "keep me"
+        );
+
+        // Deleting inside the trash is permanent.
+        let rel = proj_trash_path;
+        let out = delete
+            .execute(serde_json::json!({"path": rel, "recursive": true}), ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["recoverable"], false);
+        assert_eq!(std::fs::read_dir(home.join(".trash")).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_writer_append_refuses_symlink_leaf() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        let outside = dir.path().join("authorized_keys");
+        std::fs::write(&outside, "").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("out")).unwrap();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, true, false, None);
+
+        let err = crate::file_writer::FileWriter::new()
+            .execute(
+                serde_json::json!({"path": "out", "content": "evil", "mode": "append"}),
+                make_context_with_permissions(dir.path(), perms),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn test_file_editor_replace_all_and_file_move_copy() {
+        let dir = TempDir::new().unwrap();
+        let home = agent_home(dir.path());
+        std::fs::write(home.join("a.txt"), "foo foo foo").unwrap();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, true, false, None);
+        let ctx = || make_context_with_permissions(dir.path(), perms.clone());
+        let editor = crate::file_editor::FileEditor::new();
+
+        let edit = |all: bool| {
+            serde_json::json!({"path": "a.txt", "edits": [
+                {"old_text": "foo", "new_text": "bar", "replace_all": all}
+            ]})
+        };
+        assert!(editor.execute(edit(false), ctx()).await.is_err());
+        let empty = serde_json::json!({"path": "a.txt", "edits": [
+            {"old_text": "", "new_text": "X", "replace_all": true}
+        ]});
+        assert!(editor.execute(empty, ctx()).await.is_err());
+        let out = editor.execute(edit(true), ctx()).await.unwrap();
+        assert_eq!(out["replacements"], 3);
+        assert_eq!(
+            std::fs::read_to_string(home.join("a.txt")).unwrap(),
+            "bar bar bar"
+        );
+        let backup = out["backup"].as_str().expect("previous version kept");
+        assert_eq!(
+            std::fs::read_to_string(home.join(backup)).unwrap(),
+            "foo foo foo"
+        );
+
+        let mover = crate::file_move::FileMove::new();
+        let copy = serde_json::json!({"from": "a.txt", "to": "b.txt", "copy": true});
+        mover.execute(copy.clone(), ctx()).await.unwrap();
+        assert!(home.join("a.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("b.txt")).unwrap(),
+            "bar bar bar"
+        );
+        // Never overwrites.
+        assert!(mover.execute(copy, ctx()).await.is_err());
     }
 
     #[tokio::test]
@@ -2545,8 +2688,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["section"], "events");
-        // 10 EventCategory variants — see agentos_types::event::EventCategory.
-        assert_eq!(result["categories"].as_array().unwrap().len(), 10);
+        // 11 EventCategory variants — see agentos_types::event::EventCategory.
+        assert_eq!(result["categories"].as_array().unwrap().len(), 11);
         assert_eq!(result["self_subscription"]["enabled"], true);
     }
 

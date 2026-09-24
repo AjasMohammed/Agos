@@ -10,7 +10,13 @@ repository.workspace = true
 agentos-types = { path = "../agentos-types" }
 # Pinned to 4.x — upgrading to 5.x requires API migration and platform testing
 # (5.x uses @pykeio/ort ONNX runtime which may increase binary size)
-fastembed = { version = "4", optional = true }
+# rustls rather than fastembed's default native-tls: hf-hub was the only
+# native-tls consumer in the tree, and openssl-sys has no aarch64 libs in the
+# cross image, which broke the linux-arm64 release leg.
+fastembed = { version = "4", optional = true, default-features = false, features = [
+    "ort-download-binaries",
+    "hf-hub-rustls-tls",
+] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

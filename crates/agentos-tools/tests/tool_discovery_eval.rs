@@ -95,6 +95,7 @@ fn noop_ctx() -> ToolExecutionContext {
         storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         tool_categories: None,
+        shared_dir: None,
     }
 }
 

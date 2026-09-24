@@ -30,6 +30,24 @@ impl Kernel {
         ))
     }
 
+    /// Canonicalize a `skill:`-namespaced resource typed by an operator.
+    ///
+    /// `skill_permission_resource` lowercases the skill name and terminates it
+    /// with `/`; an operator string does neither, so `skill:Researcher/` and
+    /// `skill:researcher` (no terminator) would be stored as resources that
+    /// `check()` never matches — a grant that grants nothing, or a deny that
+    /// prefix-matches every sibling skill (`skill:researcher` also covers
+    /// `researcher-pro`). This is the equivalent of MCP's `sanitize_tool_name`.
+    ///
+    /// The bare namespace `skill:` (the broad default grant) is left alone.
+    /// Every other resource is returned unchanged.
+    pub(crate) fn canonicalize_permission_resource(resource: &str) -> String {
+        match resource.strip_prefix("skill:") {
+            Some(name) if !name.is_empty() => skill_permission_resource(name.trim_end_matches('/')),
+            _ => resource.to_string(),
+        }
+    }
+
     pub(crate) async fn cmd_grant_permission(
         &self,
         agent_name: String,
@@ -58,7 +76,13 @@ impl Kernel {
             }
         };
 
+        let resource = Self::canonicalize_permission_resource(&resource);
         let mut perms = agent.permissions.clone();
+        // An explicit deny outranks every grant, so granting a resource that
+        // is currently denied would silently change nothing. A grant is the
+        // operator reversing that decision — e.g. re-enabling a skill they
+        // scoped out with `perm revoke <agent> skill:<name>/:x`.
+        let cleared_deny = perms.clear_deny(&resource);
         perms.grant(resource.clone(), read, write, execute, None);
         if query {
             perms.grant_op(resource.clone(), PermissionOp::Query, None);
@@ -80,7 +104,11 @@ impl Kernel {
             agent_id: Some(agent.id),
             task_id: None,
             tool_id: None,
-            details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
+            details: serde_json::json!({
+                "permission": permission,
+                "agent_name": agent_name,
+                "cleared_deny": cleared_deny,
+            }),
             severity: agentos_audit::AuditSeverity::Info,
             reversible: false,
             rollback_ref: None,
@@ -134,18 +162,66 @@ impl Kernel {
         // Effective permissions also include role grants; those are not in
         // the agent's own set, so a revoke here would report success and
         // change nothing. Say so instead.
-        if !agent
+        let resource = Self::canonicalize_permission_resource(&resource);
+
+        // A revoke can also narrow a broader direct grant: the default
+        // `skill:` grant covers `skill:researcher/`, and scoping that one
+        // skill out is a deny, not an entry deletion. Only a resource with
+        // neither its own entry nor a covering direct grant is unrevokable
+        // here (it comes from a role, or was never granted).
+        let has_direct_entry = agent
             .permissions
             .entries()
             .iter()
-            .any(|e| e.resource == resource)
-        {
+            .any(|e| e.resource == resource);
+        // Which ops the direct set currently confers on this resource, via
+        // ANY grant. `check()` (not a raw prefix scan) so wildcards, the
+        // path-boundary rule and expiry all behave as they do at call time.
+        const ALL_OPS: [(PermissionOp, char); 5] = [
+            (PermissionOp::Read, 'r'),
+            (PermissionOp::Write, 'w'),
+            (PermissionOp::Execute, 'x'),
+            (PermissionOp::Query, 'q'),
+            (PermissionOp::Observe, 'o'),
+        ];
+        let requested = [
+            (read, PermissionOp::Read),
+            (write, PermissionOp::Write),
+            (execute, PermissionOp::Execute),
+            (query, PermissionOp::Query),
+            (observe, PermissionOp::Observe),
+        ];
+        let effective: Vec<(PermissionOp, char)> = ALL_OPS
+            .into_iter()
+            .filter(|(op, _)| agent.permissions.check(&resource, *op))
+            .collect();
+        let covered_by_broader_grant = !has_direct_entry && !effective.is_empty();
+        if !has_direct_entry && !covered_by_broader_grant {
             return KernelResponse::Error {
                 message: format!(
                     "Permission '{}' is not granted directly to '{}' (it comes from a role or is absent); edit the role instead",
                     permission, agent_name
                 ),
             };
+        }
+        // Narrowing a broader grant is recorded as a deny, and a deny has no
+        // notion of ops — it kills every op on the resource. Refuse a partial
+        // revoke rather than silently taking away bits the operator kept.
+        if covered_by_broader_grant {
+            let kept: Vec<char> = effective
+                .iter()
+                .filter(|(op, _)| !requested.iter().any(|(on, r)| *on && r == op))
+                .map(|(_, c)| *c)
+                .collect();
+            if !kept.is_empty() {
+                let all: String = effective.iter().map(|(_, c)| *c).collect();
+                return KernelResponse::Error {
+                    message: format!(
+                        "'{agent_name}' holds '{resource}' through a broader grant, which can only be narrowed by denying the whole resource — that would also drop '{}'. Re-run with every op it confers: '{resource}:{all}'",
+                        kept.iter().collect::<String>(),
+                    ),
+                };
+            }
         }
 
         let mut perms = agent.permissions.clone();
@@ -162,7 +238,8 @@ impl Kernel {
         // granted". Record the operator's decision as a deny, which `check()`
         // honours ahead of any grant and the backfill skips.
         if !perms.entries().iter().any(|e| e.resource == resource)
-            && crate::commands::agent::is_late_default_grant(&resource)
+            && (covered_by_broader_grant
+                || crate::commands::agent::is_late_default_grant(&resource))
         {
             perms.deny(resource.clone());
         }
@@ -343,7 +420,11 @@ impl Kernel {
             }
         };
 
+        let resource = Self::canonicalize_permission_resource(&resource);
         let mut perms = agent.permissions.clone();
+        // Same reason as the untimed grant: a deny outranks every grant, so a
+        // timed re-grant of a denied resource would confer nothing.
+        perms.clear_deny(&resource);
         perms.grant(resource.clone(), read, write, execute, Some(expires_at));
         if query {
             perms.grant_op(resource.clone(), PermissionOp::Query, Some(expires_at));
@@ -404,5 +485,30 @@ mod tests {
         assert!(Kernel::parse_permission("fs:/data/").is_none());
         assert!(Kernel::parse_permission(":rw").is_none());
         assert!(Kernel::parse_permission("fs").is_none());
+    }
+
+    /// An operator types the resource by hand; `skill_permission_resource`
+    /// does not. Both must land on the same string or a grant grants nothing
+    /// and a deny covers every sibling skill.
+    #[test]
+    fn skill_resources_are_canonicalized_to_the_enforced_form() {
+        for typed in [
+            "skill:researcher",
+            "skill:researcher/",
+            "skill:Researcher",
+            "skill:RESEARCHER//",
+        ] {
+            assert_eq!(
+                Kernel::canonicalize_permission_resource(typed),
+                skill_permission_resource("researcher"),
+                "{typed}"
+            );
+        }
+        // The broad default grant and every non-skill resource pass through.
+        assert_eq!(Kernel::canonicalize_permission_resource("skill:"), "skill:");
+        assert_eq!(
+            Kernel::canonicalize_permission_resource("fs:agents/Nimo/"),
+            "fs:agents/Nimo/"
+        );
     }
 }

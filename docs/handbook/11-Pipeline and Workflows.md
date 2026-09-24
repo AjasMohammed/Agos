@@ -74,9 +74,9 @@ steps:
 | `name` | string | Unique pipeline name. Used to reference the pipeline in CLI commands. |
 | `version` | string | Version string (e.g. `"1.0"`). Informational; not used for conflict resolution. |
 | `description` | string (optional) | Human-readable description shown in `pipeline list`. |
-| `permissions` | list (optional) | Permission strings required by the pipeline's steps. Same format as capability tokens. |
-| `max_cost_usd` | float (optional) | Hard cost cap in USD for the entire pipeline run. If the budget is exhausted before a step executes, the pipeline fails with a budget error. |
-| `max_wall_time_minutes` | integer (optional) | Hard wall-clock timeout for the entire run. Currently used for documentation; per-step `timeout_minutes` is enforced at the step level by `tokio::time::timeout`. |
+| `permissions` | list (optional) | Documentation only — the engine does not read this field. What a step may do is decided entirely by the effective grants of the `--agent` it runs under. |
+| `max_cost_usd` | float (optional) | **Parsed but not enforced.** No code reads it on the pipeline path. The budget that is actually checked before each wave is the *agent's* daily budget in `CostTracker` — see Budget Enforcement below. |
+| `max_wall_time_minutes` | integer (optional) | **Parsed but not enforced.** Only per-step `timeout_minutes` is applied, via `tokio::time::timeout`. |
 | `output` | string (optional) | The `output_var` name whose value becomes the final pipeline output. If omitted, the pipeline has no declared output. |
 
 ### Per-Step Fields
@@ -127,6 +127,22 @@ Directly invokes a tool with a JSON input object.
 
 The engine calls `PipelineExecutor::run_tool(tool_name, rendered_input)`. The tool must be installed in the kernel's tool registry.
 
+Two limits worth knowing before you plan a pipeline around a particular tool:
+
+- **Kernel-action tools cannot be a `tool:` step.** `notify-user`, `ask-user`,
+  `spawn-agent` and friends return a `_kernel_action` envelope for the kernel's
+  dispatch loop rather than doing the work themselves. A pipeline step has no
+  dispatcher, so the detached executor fails the step with `tool requires kernel
+  action dispatch, which pipeline steps do not support`.
+- **A detached agent step has no tool loop.** Under `--detach`, `run_agent_task`
+  runs a *single inference* and returns its text — it deliberately advertises no
+  tool protocol. A foreground run goes through `cmd_run_task` instead, which is
+  a full task and can call tools. So an agent step that needs to use a tool only
+  works without `--detach`.
+
+- **A tool step's output is the whole result JSON serialized to a string**, not
+  prose. Downstream agent steps handle that; a downstream tool payload may not.
+
 ### Variable Interpolation
 
 The `{{var_name}}` syntax substitutes any variable in the pipeline context. Variables are populated from:
@@ -140,6 +156,19 @@ The `{{var_name}}` syntax substitutes any variable in the pipeline context. Vari
 | `{{run_id}}` | The unique ID of this pipeline run (UUID). |
 | `{{date}}` | Current date in `YYYY-MM-DD` format. |
 | `{{timestamp}}` | Current Unix timestamp (seconds). |
+| `{{agent}}` | The agent name passed to `pipeline run --agent`. |
+
+`{{agent}}` is also substituted in a step's `agent:` field, but only when it is
+the *entire* value — `agent: "{{agent}}"` runs the step as the governing agent,
+while `agent: "review-{{agent}}"` or `agent: "{{input}}"` is passed through and
+looked up literally. A step's agent is the authority its task runs with, so a
+computed one would let a run's input select it.
+
+A step may **not** bind an `output_var` named `input`, `agent`, `run_id`, `date`
+or `timestamp`. The engine refuses the pipeline at validation: shadowing `agent`
+would let one step's output choose which agent a later `agent: "{{agent}}"` step
+runs as, and shadowing a built-in would splice step output into a prompt or a
+tool payload with the escaping that built-ins skip.
 
 If a variable is referenced but not yet populated, the engine substitutes `{{UNRESOLVED:var_name}}` and logs a warning. Single-brace `{var}` syntax is not treated as a variable — only `{{double_brace}}`.
 
@@ -221,6 +250,8 @@ Wave 1 executes `fetch-a` and `fetch-b` concurrently. Wave 2 executes `merge` af
 
 The pipeline engine checks the agent's budget before each wave. If the budget is exhausted, the pipeline fails immediately with a budget error rather than starting additional steps that cannot complete.
 
+Note what this is not: it is the agent's **daily** budget, not the pipeline's `max_cost_usd`. That field and `max_wall_time_minutes` are inert on this path.
+
 The `PipelineExecutor` trait exposes a `check_budget()` method that the kernel implements by querying the `CostTracker`:
 
 ```rust
@@ -242,6 +273,38 @@ Template variables are sanitized differently depending on context:
 - **Agent step prompts** (LLM context) — user-derived values (any variable not in the built-in set `run_id`, `date`, `timestamp`) are wrapped in `<user_data>` tags with tag-boundary escaping to prevent prompt injection
 
 Built-in variables (`{{run_id}}`, `{{date}}`, `{{timestamp}}`) are kernel-controlled and interpolated without sanitization.
+
+---
+
+## Starter Templates
+
+Five annotated templates ship with the binary. The CLI seeds them as files
+beside the data dir (`<data_dir>/../pipelines/core/`, source: `pipelines/core/`
+in the repo), and the kernel installs them into the pipeline store on boot, so
+they show up in `pipeline list` and the panel with no setup:
+
+```bash
+agentos pipeline run hello-pipeline --agent <your-agent> --input "quantum computing"
+```
+
+Seeding writes a file only when it is absent, and installing uses the `name`
+primary key rather than `INSERT OR REPLACE` — so a template you edited, or one
+you installed under the same name, is never clobbered by the shipped copy. A
+template you `pipeline remove` is re-installed on the next boot; there is no
+tombstone. `Kernel::seed_starter_pipelines` is the entry point.
+
+| File | Teaches |
+|------|---------|
+| `01-hello-pipeline.yaml` | One agent step, `{{input}}`, `output` |
+| `02-research-report.yaml` | Tool vs agent steps, `depends_on`, `output_var`, run budgets |
+| `03-parallel-review.yaml` | Wave execution — independent steps run concurrently |
+| `04-resilient-fetch.yaml` | `retry_on_failure`, backoff, `on_failure` policies |
+| `05-daily-digest.yaml` | Tool → agent → tool, memory search, notifications, `--detach` |
+
+Each uses `agent: "{{agent}}"` so it runs unedited under whatever the operator
+named their agent. Copy one, change its `name:`, and install it to start from a
+template rather than from an empty file. `pipelines/core/README.md` covers
+editing them.
 
 ---
 
@@ -273,11 +336,14 @@ data-analysis             1.0        3        Fetch, parse, and summarize a data
 ### Run a Pipeline
 
 ```bash
-agentos pipeline run <name> --input "<input>" [--agent <agent-name>] [--detach]
+agentos pipeline run <name> --input "<input>" --agent <agent-name> [--detach]
 ```
 
 - `--input` — string input passed as `{{input}}` to all steps.
-- `--agent` — agent whose permissions govern pipeline execution (optional).
+- `--agent` — **required.** The agent whose permissions govern every step,
+  including tool steps, and the value of `{{agent}}`. A run without it fails
+  with `Pipeline execution requires --agent <name>`; an unknown name fails with
+  `Agent '<name>' not found for pipeline execution`.
 - `--detach` — run in background and return immediately with the run ID.
 
 Without `--detach`, the command blocks until the pipeline completes and prints per-step status:

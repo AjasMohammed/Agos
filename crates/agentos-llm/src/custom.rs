@@ -80,22 +80,7 @@ const MAX_NVCF_POLL_ERRORS: u32 = 3;
 impl CustomCore {
     /// Create a new Custom adapter.
     pub fn new(api_key: Option<SecretString>, model: String, base_url: String) -> Self {
-        let table = default_pricing_table();
-        let pricing = table
-            .iter()
-            .find(|p| p.provider == "custom" && p.model == model)
-            .or_else(|| {
-                table
-                    .iter()
-                    .find(|p| p.provider == "custom" && p.model == "*")
-            })
-            .cloned()
-            .unwrap_or(ModelPricing {
-                provider: "custom".to_string(),
-                model: model.clone(),
-                input_per_1k: 0.0,
-                output_per_1k: 0.0,
-            });
+        let pricing = crate::lookup_pricing(&default_pricing_table(), "custom", &model);
         // Hoisted: `base_url` is moved into the struct literal below.
         let concurrency = crate::retry::concurrency_limiter_for(&base_url);
         Self {
@@ -475,7 +460,7 @@ impl CustomCore {
     fn format_messages(&self, context: &ContextWindow) -> Vec<Value> {
         let mut messages = Vec::new();
 
-        for entry in context.active_entries() {
+        for entry in context.wire_entries().iter().map(|e| &**e) {
             match entry.role {
                 ContextRole::ToolResult => {
                     let tool_call_id = entry
@@ -1015,6 +1000,19 @@ impl LLMCore for CustomCore {
         }
         self.apply_max_tokens(&mut body, options.max_tokens, estimated);
         self.apply_extra_body(&mut body);
+        // Reasoning depth. A custom endpoint's model id tells us nothing, so
+        // the provider entry's `supports_thinking` is the gate.
+        //
+        // This runs *after* `apply_extra_body` and only fills an absent key,
+        // because that merge lets adapter-set keys win: setting
+        // `reasoning_effort` first would make the operator's own
+        // `extra_body_json` value unreachable on an endpoint that wants a
+        // different value or a different spelling.
+        if self.capabilities.supports_thinking && body.get("reasoning_effort").is_none() {
+            if let Some(effort) = options.openai_reasoning_effort() {
+                body["reasoning_effort"] = json!(effort);
+            }
+        }
 
         // `_permit` holds the endpoint's concurrency slot until this scope
         // ends — which for this provider covers the NVCF 202 poll below, the
@@ -1558,6 +1556,7 @@ mod tests {
     #[test]
     fn test_format_messages_native_tool_result() {
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("call_abc", "file-reader")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1586,10 +1585,10 @@ mod tests {
             "http://localhost".to_string(),
         );
         let messages = adapter.format_messages(&ctx);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "tool");
-        assert_eq!(messages[0]["tool_call_id"], "call_abc");
-        assert_eq!(messages[0]["content"], "result data");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_abc");
+        assert_eq!(messages[1]["content"], "result data");
     }
 
     #[test]

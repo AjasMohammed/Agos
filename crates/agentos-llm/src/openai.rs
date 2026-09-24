@@ -18,6 +18,27 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// True when `model` is an OpenAI reasoning model — one that takes
+/// `reasoning_effort`, requires `max_completion_tokens` in place of
+/// `max_tokens`, and rejects any `temperature` other than 1.
+///
+/// o1 is deliberately excluded: it reasons, but predates `reasoning_effort`
+/// and 400s on it. An unknown id is treated as a normal chat model, which is
+/// the shape that never hard-fails.
+fn is_reasoning_model(model: &str) -> bool {
+    // `gpt-5-chat-latest` is the non-reasoning GPT-5 variant — it 400s on
+    // `reasoning_effort` and, unlike its siblings, does honour a temperature
+    // override. It has to lose the prefix match, not win it.
+    if model.contains("-chat") {
+        return false;
+    }
+    // ponytail: prefix match, not a model catalogue — a new reasoning family
+    // just misses the dial until its prefix is added, instead of 400ing.
+    ["o3", "o4", "o5", "gpt-5"]
+        .iter()
+        .any(|p| model.starts_with(p))
+}
+
 /// OpenAI API adapter for models like gpt-4o, gpt-3.5-turbo, etc.
 pub struct OpenAICore {
     client: Client,
@@ -42,24 +63,13 @@ impl OpenAICore {
 
     /// Create a new OpenAI adapter with a custom base URL.
     pub fn with_base_url(api_key: SecretString, model: String, base_url: String) -> Self {
-        let table = default_pricing_table();
-        let pricing = table
-            .iter()
-            .find(|p| p.provider == "openai" && p.model == model)
-            .or_else(|| {
-                table
-                    .iter()
-                    .find(|p| p.provider == "openai" && p.model == "*")
-            })
-            .cloned()
-            .unwrap_or(ModelPricing {
-                provider: "openai".to_string(),
-                model: model.clone(),
-                input_per_1k: 0.0,
-                output_per_1k: 0.0,
-            });
+        let pricing = crate::lookup_pricing(&default_pricing_table(), "openai", &model);
         // Hoisted: `base_url` is moved into the struct literal below.
         let concurrency = crate::retry::concurrency_limiter_for(&base_url);
+        // Declared per model, not per adapter: `gpt-4o` genuinely does not
+        // reason, and the one caller that reads this flag treats it as "this
+        // endpoint accepts a reasoning dial".
+        let reasoning = is_reasoning_model(&model);
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -80,7 +90,7 @@ impl OpenAICore {
                 supports_streaming: true,
                 supports_parallel_tools: true,
                 supports_prompt_caching: false,
-                supports_thinking: false,
+                supports_thinking: reasoning,
                 supports_structured_output: true,
             },
             pricing,
@@ -106,7 +116,7 @@ impl OpenAICore {
     fn format_messages(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
         let mut messages = Vec::new();
 
-        for entry in context.active_entries() {
+        for entry in context.wire_entries().iter().map(|e| &**e) {
             match entry.role {
                 ContextRole::ToolResult => {
                     // Check for native tool result metadata (provider tool_call_id).
@@ -556,14 +566,41 @@ impl LLMCore for OpenAICore {
         if options.json_mode {
             body["response_format"] = json!({"type": "json_object"});
         }
+        let reasoning = is_reasoning_model(&self.model);
         if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
+            // Reasoning models accept temperature 1 only and 400 on anything
+            // else. Drop the override rather than fail the turn, matching how
+            // the Anthropic adapter handles the same constraint.
+            if !reasoning || (temp - 1.0_f32).abs() < f32::EPSILON {
+                body["temperature"] = json!(temp);
+            } else {
+                tracing::debug!(
+                    model = %self.model,
+                    requested = temp,
+                    "reasoning model takes temperature 1 only; dropping the override"
+                );
+            }
         }
         if let Some(max_tok) = options.max_tokens {
-            body["max_tokens"] = json!(max_tok);
+            // `max_tokens` is rejected outright by reasoning models, which
+            // want `max_completion_tokens` — the same number, but counting
+            // reasoning tokens alongside the visible answer.
+            let key = if reasoning {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            body[key] = json!(max_tok);
         }
         if let Some(seed) = options.seed {
             body["seed"] = json!(seed);
+        }
+        // Reasoning depth. The API rejects the parameter on non-reasoning
+        // models, so it only ever rides on ids the gate recognises.
+        if reasoning {
+            if let Some(effort) = options.openai_reasoning_effort() {
+                body["reasoning_effort"] = json!(effort);
+            }
         }
 
         // `_permit` holds the endpoint's concurrency slot until this scope
@@ -1392,6 +1429,89 @@ mod tests {
         server.join().expect("server thread should complete");
     }
 
+    /// The three reasoning-model request rules only hold if the keys land in
+    /// the body under the right names: `reasoning_effort` at the root,
+    /// `max_completion_tokens` in place of `max_tokens`, and no `temperature`
+    /// at all. A misplaced or misnamed key compiles, passes every helper test,
+    /// and 400s in production.
+    #[tokio::test]
+    async fn reasoning_model_request_body_carries_effort_and_completion_tokens() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel::<Value>();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let req_body = read_http_body(&mut stream);
+            let req_json: Value = serde_json::from_str(&req_body).expect("valid JSON body");
+            tx.send(req_json).expect("send request body to test");
+
+            let response_body = json!({
+                "choices": [{"message": {"content": "Done."}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let adapter = OpenAICore::with_base_url(
+            SecretString::new("fake-key".into()),
+            "o3".into(),
+            format!("http://{}", addr),
+        );
+
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![ContentPart::Text {
+                text: "Solve it".to_string(),
+            }],
+            metadata: None,
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        adapter
+            .infer_with_options(
+                &ctx,
+                &[],
+                &InferenceOptions {
+                    // `max` is an Anthropic-only rung and has to arrive as `high`.
+                    thinking_effort: Some("max".to_string()),
+                    thinking_budget_tokens: Some(100_000),
+                    max_tokens: Some(2_048),
+                    temperature: Some(0.2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("inference should succeed");
+
+        let captured = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("captured request");
+        assert_eq!(captured["reasoning_effort"], "high");
+        assert_eq!(captured["max_completion_tokens"], 2_048);
+        assert!(captured.get("max_tokens").is_none());
+        assert!(captured.get("temperature").is_none());
+        // The token budget is Anthropic's shape and must not leak out here.
+        assert!(captured.get("thinking").is_none());
+
+        server.join().expect("server thread should complete");
+    }
+
     #[test]
     fn test_stop_reason_tool_calls() {
         let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
@@ -1470,6 +1590,7 @@ mod tests {
     #[test]
     fn test_format_messages_native_tool_result() {
         let mut ctx = ContextWindow::new(5);
+        ctx.push(crate::tool_call_turn(&[("call_abc123", "file-reader")]));
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             parts: vec![ContentPart::Text {
@@ -1495,10 +1616,10 @@ mod tests {
         let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4".into());
         let messages = adapter.format_messages(&ctx);
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "tool");
-        assert_eq!(messages[0]["tool_call_id"], "call_abc123");
-        assert_eq!(messages[0]["content"], r#"{"status": "ok"}"#);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_abc123");
+        assert_eq!(messages[1]["content"], r#"{"status": "ok"}"#);
     }
 
     #[test]
@@ -1525,6 +1646,29 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"], "Tool Result:\nstatus: ok");
+    }
+
+    /// `reasoning_effort` is a 400 on a non-reasoning model and o1 predates
+    /// the parameter, so the gate has to exclude both.
+    #[test]
+    fn reasoning_gate_covers_o_series_and_gpt5_only() {
+        for model in ["o3", "o3-mini", "o4-mini", "o5", "gpt-5", "gpt-5.1-mini"] {
+            assert!(is_reasoning_model(model), "{model} takes reasoning_effort");
+        }
+        for model in [
+            "gpt-4o",
+            "gpt-4.1",
+            "o1",
+            "o1-preview",
+            "chatgpt-4o-latest",
+            // Carries the gpt-5 prefix but is the non-reasoning variant.
+            "gpt-5-chat-latest",
+        ] {
+            assert!(
+                !is_reasoning_model(model),
+                "{model} rejects reasoning_effort"
+            );
+        }
     }
 
     #[test]

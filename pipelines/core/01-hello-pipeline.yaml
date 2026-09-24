@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 01 — Hello Pipeline: the smallest pipeline that does anything.
+#
+#   agentos pipeline install ~/.agentos/pipelines/core/01-hello-pipeline.yaml
+#   agentos pipeline run hello-pipeline --agent <your-agent> --input "quantum computing"
+#
+# One agent step. Whatever you pass to --input lands in {{input}}; whatever the
+# step named by `output:` produces is the pipeline's result.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: hello-pipeline
+version: "1.0.0"
+description: "Smallest possible pipeline — one agent step."
+
+steps:
+  # `id` is how other steps refer to this one. Unique within the pipeline.
+  - id: explain
+    # `{{agent}}` resolves to the agent you pass to --agent, so this template
+    # runs unedited. Replace it with a literal agent name (see `agentos agent
+    # list`) when a step should always run as one specific agent.
+    agent: "{{agent}}"
+    # `{{input}}` is the --input string. Anything the agent writes back becomes
+    # the value of `output_var`.
+    task: "Explain this in three short paragraphs, for a smart beginner: {{input}}"
+    output_var: explanation
+    # Wall-clock cap for this step. It fails (not the whole run) when it expires
+    # — what happens next is the `on_failure` policy, default `fail`.
+    timeout_minutes: 5
+
+# Which variable is the pipeline's final result. Without this the run completes
+# with an empty output.
+output: explanation

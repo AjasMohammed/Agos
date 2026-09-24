@@ -66,7 +66,7 @@ impl Kernel {
         trace_id: TraceID,
         user_message: &str,
         session_id: Option<&str>,
-        scope: ChatTurnScope,
+        scope: &ChatTurnScope,
     ) -> Result<(), String> {
         if let HookResult::Abort(reason) = self
             .hook_registry
@@ -77,7 +77,7 @@ impl Kernel {
         }
         let origin = match scope {
             ChatTurnScope::Full => "chat",
-            ChatTurnScope::ConvoTurn => "convo",
+            ChatTurnScope::ConvoTurn { .. } => "convo",
         };
         self.record_chat_episode(EpisodeRecordInput {
             task_id: &task_id,

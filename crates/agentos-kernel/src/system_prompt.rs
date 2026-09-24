@@ -36,6 +36,12 @@ pub fn local_timezone_str() -> String {
 pub struct SystemPromptContext {
     /// The agent's registered name (e.g., "analyst", "security-monitor").
     pub agent_name: String,
+    /// Absolute path of the agent's home directory (`data_dir/agents/<name>/`),
+    /// from `agentos_tools::traits::agent_home_dir`. Rendered in the `## Files`
+    /// block: the file tools echo only the relative path they were given, so an
+    /// agent asked where a file landed has no other source for the base and
+    /// invents one. Empty → the block falls back to the relative form.
+    pub agent_home: String,
     /// Free-text description from `AgentProfile.description`.
     pub agent_description: String,
     /// Role names assigned to this agent (from `AgentProfile.roles`).
@@ -70,10 +76,21 @@ pub struct SystemPromptContext {
     /// Rendered as a `## Files` block so the agent knows what it may reach
     /// instead of guessing (or assuming it is confined to its home dir).
     pub granted_folders: GrantedFolders,
+    /// The conversation's shared directory, on a convo turn. Both participants
+    /// see the same absolute path, and it is the only one either can hand the
+    /// other: agent homes are private. Without this block an agent writes into
+    /// its home, hands over a path the peer cannot open, and the pair deadlocks
+    /// asking each other for permissions neither can grant (2026-09-21).
+    /// `None` → the block is skipped entirely.
+    pub shared_workspace: Option<String>,
     /// True when no human is reading the reply: event-triggered or autonomous
     /// tasks. Chat turns pass `false`. A bool (not the trigger detail) so the
     /// cached prompt prefix has only two variants.
     pub unattended: bool,
+    /// Installed skills this agent is granted (`skill:<name>/:x`), sorted by
+    /// name so the rendered block is stable across turns and stays inside the
+    /// Anthropic prompt-cache prefix. Empty vec → the block is skipped.
+    pub skills: Vec<SkillHint>,
 }
 
 /// Host folders an agent may address with absolute paths, split by mode.
@@ -93,6 +110,16 @@ impl GrantedFolders {
             write: to_strings(&ws.writable),
         }
     }
+}
+
+/// One skill the agent may load, rendered into the `## Skills` block.
+/// Carries only what the agent needs to decide whether to pull the recipe.
+#[derive(Debug, Clone)]
+pub struct SkillHint {
+    /// Skill name — what the agent passes to `skill-prompt`.
+    pub name: String,
+    /// One-line description from the skill manifest. Trimmed at render time.
+    pub description: String,
 }
 
 /// One connected channel, rendered into the system prompt awareness block.
@@ -122,6 +149,31 @@ pub struct SubAgentContext {
 pub const MEMORY_NUDGE: &str = "[memory nudge] Before answering: is there anything durable from this session worth persisting? \
 Facts → `memory-write`, stable user preferences → `context-memory-update`, reusable multi-step workflow → `procedure-create`. \
 If nothing, continue silently.";
+
+/// Trim `text` to at most `max` chars, cutting on a word boundary and
+/// appending an ellipsis. Whitespace is collapsed so a manifest description
+/// spanning several lines cannot break the one-line list format.
+fn trim_to(text: &str, max: usize) -> String {
+    // Backticks and control chars are stripped, not escaped: a skill
+    // description is author-supplied (`SKILL.toml`, or an agent's
+    // `skill-create` payload) and lands verbatim inside every granted agent's
+    // cached prompt prefix, where a stray backtick breaks the `name` — desc
+    // rendering and a newline would forge a list row.
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c == '`' || c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let truncated: String = flat.chars().take(max).collect();
+    let cut = truncated.rfind(' ').unwrap_or(truncated.len());
+    format!(
+        "{}\u{2026}",
+        truncated[..cut].trim_end_matches(['.', ',', ';'])
+    )
+}
 
 pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     // A gateway adapter reaches its tools through native MCP tool calls, so
@@ -259,7 +311,9 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - Plan before acting. Your task has an iteration limit — use iterations efficiently. \
            Call `agent-self` to check remaining iterations and budget.\n\
          - Read every tool error, classify it (see Task Feasibility), and adjust before retrying.\n\
-         - Large tool outputs are truncated ([TRUNCATED]); the marker states the limit. Request smaller data or paginate.\n\
+         - Large tool outputs are reduced: [TRUNCATED] / [TOOL_RESULT_TRUNCATED] = tail cut; \
+           [TOOL_RESULT_ELIDED] = long values shortened, every field key kept \u{2014} an elided \
+           value is not a missing field. Request smaller data or paginate.\n\
          - If a tool returns 'awaiting_approval', your task is paused for human review.\n\
          - Priority when rules conflict: safety > task completion > correctness > efficiency.\n\
          - Respond directly if the answer is factual and no external state is needed \
@@ -373,8 +427,12 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     // ── Files: home dir + operator-granted host folders ───────────
     prompt.push_str(&format!(
         "\n\n## Files\n\
-         Relative paths = your home `agents/{}/`. Absolute paths only inside operator-granted folders",
-        ctx.agent_name
+         Relative paths = your home `{}`. Absolute paths only inside operator-granted folders",
+        if ctx.agent_home.is_empty() {
+            format!("agents/{}/", ctx.agent_name)
+        } else {
+            ctx.agent_home.clone()
+        }
     ));
     if ctx.granted_folders.read.is_empty() {
         prompt.push_str(": none granted now — say so, don't guess.");
@@ -392,6 +450,18 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     prompt.push_str(
         " `storage-zone-create` adds one EXISTING dir; `storage-zone-list` shows zones, not grants.",
     );
+
+    // ── Shared workspace: the one path both participants of a convo can open ──
+    if let Some(shared) = ctx.shared_workspace.as_deref() {
+        prompt.push_str(&format!(
+            "\n\n## Shared workspace\n\
+             `{shared}` — readable and writable by every participant in this conversation. \
+             Put anything the other participant must open, run or edit there and give them the \
+             absolute path. Your home is private: they cannot read it, and neither of you can \
+             grant the other access to it. For a folder outside this workspace use \
+             `workspace-request` — only the operator can widen access."
+        ));
+    }
 
     // ── Host inspection (compact — full prose in `agent-manual section=hal`) ──
     prompt.push_str(
@@ -415,6 +485,7 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - markdown \u{2192} reports (default) · slides \u{2192} decks, `---` between slides · \
            html \u{2192} custom layout; self-contained, inline CSS/JS, `data:` images only\n\
          Short answers and snippets stay in chat. Re-pass `artifact_id` to revise, not duplicate. \
+         A file on disk (image/audio/video/PDF) \u{2192} `file-publish`. \
          Detail: `agent-manual section=artifacts`.",
     );
 
@@ -521,6 +592,38 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         );
     }
 
+    // ── Skills (only the ones this agent is granted) ────────────
+    // Without this block the shipped playbooks were unreachable in practice:
+    // the only route to them was `agent-manual section=skills`, which nothing
+    // in the prompt names, so agents re-improvised recipes that ship with the
+    // install. Names + trimmed one-liners only — the recipe itself is pulled
+    // on demand.
+    if !ctx.skills.is_empty() {
+        const MAX_LISTED: usize = 6;
+        const DESC_MAX: usize = 52;
+        prompt.push_str(
+            "\n\n## Skills\n\
+             Installed playbooks. When one matches the request, load it first with \
+             `skill-prompt {\"name\":\"<skill>\"}` and follow it instead of improvising.",
+        );
+        for skill in ctx.skills.iter().take(MAX_LISTED) {
+            let desc = trim_to(&skill.description, DESC_MAX);
+            if desc.is_empty() {
+                write!(prompt, "\n- `{}`", skill.name).ok();
+            } else {
+                write!(prompt, "\n- `{}` \u{2014} {}", skill.name, desc).ok();
+            }
+        }
+        if ctx.skills.len() > MAX_LISTED {
+            write!(
+                prompt,
+                "\n- \u{2026} and {} more: `agent-manual section=skills`",
+                ctx.skills.len() - MAX_LISTED
+            )
+            .ok();
+        }
+    }
+
     // ── Scheduling ──────────────────────────────────────────────
     prompt.push_str(
         "\n\n## Scheduling\n\
@@ -545,10 +648,113 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
 mod tests {
     use super::*;
 
+    fn skills_ctx(skills: Vec<SkillHint>) -> SystemPromptContext {
+        SystemPromptContext {
+            agent_name: "analyst".into(),
+            agent_home: "/tmp/agents/analyst".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: true,
+            uses_tool_gateway: false,
+            granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
+            unattended: false,
+            skills,
+        }
+    }
+
+    fn hint(name: &str, desc: &str) -> SkillHint {
+        SkillHint {
+            name: name.into(),
+            description: desc.into(),
+        }
+    }
+
+    #[test]
+    fn skills_block_is_absent_without_granted_skills() {
+        let prompt = build_system_prompt(&skills_ctx(vec![]));
+        assert!(!prompt.contains("## Skills"));
+    }
+
+    #[test]
+    fn skills_block_lists_names_and_the_loader_call() {
+        let prompt = build_system_prompt(&skills_ctx(vec![
+            hint(
+                "researcher",
+                "Multi-step web research with source verification",
+            ),
+            hint(
+                "secops-monitor",
+                "Detects injection attacks and anomalous tool use",
+            ),
+        ]));
+        assert!(prompt.contains("## Skills"));
+        assert!(prompt.contains("`researcher`"));
+        assert!(prompt.contains("Multi-step web research"));
+        // The block is useless without the call that loads the recipe.
+        assert!(prompt.contains("skill-prompt"));
+    }
+
+    #[test]
+    fn skills_block_caps_the_list_and_points_at_the_manual() {
+        let skills: Vec<SkillHint> = (0..12)
+            .map(|i| hint(&format!("skill-{i:02}"), "does a thing"))
+            .collect();
+        let prompt = build_system_prompt(&skills_ctx(skills));
+        assert!(prompt.contains("`skill-05`"));
+        assert!(!prompt.contains("`skill-06`"));
+        assert!(prompt.contains("and 6 more"));
+        assert!(prompt.contains("agent-manual section=skills"));
+    }
+
+    #[test]
+    fn skills_block_flattens_and_trims_long_descriptions() {
+        let long = "A very long description that runs well past the rendered budget \n\
+                    and also spans several lines in the manifest file itself";
+        let prompt = build_system_prompt(&skills_ctx(vec![hint("verbose", long)]));
+        let line = prompt
+            .lines()
+            .find(|l| l.starts_with("- `verbose`"))
+            .expect("skill line");
+        assert!(line.len() < 110, "line too long: {line}");
+        assert!(line.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn test_files_block_states_absolute_home() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "OSS".into(),
+            agent_home: "/home/ajas/.agentos/data/agents/OSS".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: true,
+            uses_tool_gateway: false,
+            granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
+            unattended: false,
+            skills: vec![],
+        });
+        // The absolute base must be spelled out — a bare `agents/OSS/` leaves the
+        // agent to guess the prefix, and it guesses `/home/<user>/agents/OSS/`.
+        assert!(prompt.contains("your home `/home/ajas/.agentos/data/agents/OSS`"));
+        assert!(!prompt.contains("`agents/OSS/`"));
+    }
+
     #[test]
     fn test_basic_prompt_contains_agent_name() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "analyst".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -559,7 +765,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("You are analyst, an AI agent in AgentOS"));
         assert!(!prompt.contains("Sub-Agent Context"));
@@ -569,6 +777,7 @@ mod tests {
     fn test_prompt_includes_roles_and_description() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "monitor".into(),
+            agent_home: String::new(),
             agent_description: "Watches for security anomalies.".into(),
             agent_roles: vec!["security".into(), "auditor".into()],
             custom_instructions: None,
@@ -579,7 +788,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("Roles: security, auditor."));
         assert!(prompt.contains("Watches for security anomalies."));
@@ -589,6 +800,7 @@ mod tests {
     fn test_prompt_includes_custom_instructions_section() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "custom".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: Some("Always answer with a brief checklist.".into()),
@@ -599,7 +811,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("## Agent Custom Instructions"));
         assert!(prompt.contains("Always answer with a brief checklist."));
@@ -609,6 +823,7 @@ mod tests {
     fn test_prompt_does_not_contain_model_name() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "test-agent".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -619,7 +834,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         // Must not leak model details
         assert!(!prompt.contains("llama"));
@@ -632,6 +849,7 @@ mod tests {
     fn test_sub_agent_context_injected() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "worker".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -641,7 +859,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
             sub_agent: Some(SubAgentContext { spawn_depth: 2 }),
         });
         assert!(prompt.contains("## Sub-Agent Context"));
@@ -660,6 +880,7 @@ mod tests {
     fn test_sub_agent_at_max_depth() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "leaf".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -669,7 +890,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
             sub_agent: Some(SubAgentContext {
                 spawn_depth: MAX_SPAWN_DEPTH,
             }),
@@ -686,6 +909,7 @@ mod tests {
     fn test_user_adaptation_section_removed() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "child".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -695,7 +919,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
             sub_agent: Some(SubAgentContext { spawn_depth: 1 }),
         });
         assert!(!prompt.contains("## User Adaptation"));
@@ -709,6 +935,7 @@ mod tests {
     fn test_final_tag_includes_path_line_convention() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "strict".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -719,7 +946,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("path:line"));
         assert!(prompt.contains("clickable link"));
@@ -748,6 +977,7 @@ mod tests {
     fn default_prompt() -> String {
         build_system_prompt(&SystemPromptContext {
             agent_name: "test".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -758,7 +988,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         })
     }
 
@@ -805,6 +1037,7 @@ mod tests {
     fn test_tools_section_omitted_for_native_tool_calling() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "native".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -815,7 +1048,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("Call tools with JSON blocks"));
@@ -826,6 +1061,7 @@ mod tests {
     fn native_prompt() -> String {
         build_system_prompt(&SystemPromptContext {
             agent_name: "agent".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -836,7 +1072,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         })
     }
 
@@ -1015,6 +1253,7 @@ mod tests {
     fn test_final_tag_section_omitted_by_default() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "default".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1025,7 +1264,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(!prompt.contains("## Output Format"));
         assert!(!prompt.contains("<final>"));
@@ -1038,6 +1279,7 @@ mod tests {
     fn test_final_tag_section_present_when_enforced() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "strict".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1048,7 +1290,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("## Output Format"));
         assert!(prompt.contains("<final>"));
@@ -1061,6 +1305,7 @@ mod tests {
     fn test_output_format_tool_guidance_matches_mode() {
         let fallback_prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "fallback".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1071,12 +1316,15 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(fallback_prompt.contains("go in their own ```json blocks"));
 
         let native_prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "native".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1087,7 +1335,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(native_prompt.contains("provider's native tool-calling protocol"));
     }
@@ -1096,6 +1346,7 @@ mod tests {
     fn test_channels_block_omitted_when_empty() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "no-channels".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1106,7 +1357,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(!prompt.contains("## Channels"));
         assert!(!prompt.contains("channel-send"));
@@ -1116,6 +1369,7 @@ mod tests {
     fn test_channels_block_lists_connected() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "agent".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1135,7 +1389,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("## Channels"));
         assert!(prompt.contains("telegram-main (telegram)"));
@@ -1154,6 +1410,7 @@ mod tests {
             .collect();
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "many".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1164,7 +1421,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("ch-0"));
         assert!(prompt.contains("ch-4"));
@@ -1185,6 +1444,7 @@ mod tests {
     fn test_gateway_mode_maps_names_to_invoke_tool() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "cc".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1195,7 +1455,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: true,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
         });
         assert!(prompt.contains("mcp__agentos__"));
         // Every other section names bare hyphenated tools (`memory-write`,
@@ -1237,7 +1499,10 @@ mod tests {
         // measured the real worst case. This does: every optional block on, on
         // each of the three tool-calling branches.
         //
-        // Ceiling raised 9000 -> 10000 knowingly. The gateway branch is the
+        // Ceiling raised 9000 -> 10000 -> 11200 knowingly. The last raise is
+        // the `## Skills` block measured at its cap; the gateway branch was
+        // already at 10357 chars without it, and the block costs ~650 at its
+        // cap (MAX_LISTED rows x DESC_MAX). Trim prose before raising again. The gateway branch is the
         // largest because it carries the `invoke_tool` name mapping, which is a
         // correctness requirement (without it a claude-code agent is told to
         // call tools it cannot reach), not prose. Long-form docs still belong in
@@ -1250,6 +1515,7 @@ mod tests {
         ] {
             let prompt = build_system_prompt(&SystemPromptContext {
                 agent_name: "agent".into(),
+                agent_home: String::new(),
                 agent_description: "A maximal test agent.".into(),
                 agent_roles: vec!["worker".into()],
                 custom_instructions: None,
@@ -1262,11 +1528,21 @@ mod tests {
                 native_tool_calling: native,
                 uses_tool_gateway: gateway,
                 granted_folders: GrantedFolders::default(),
+                shared_workspace: None,
                 unattended: false,
+                // Worst case: the block renders at its cap (MAX_LISTED rows,
+                // each description trimmed to DESC_MAX) plus the overflow line.
+                skills: (0..12)
+                    .map(|i| SkillHint {
+                        name: format!("a-skill-named-{i:02}"),
+                        description:
+                            "A description long enough to be trimmed at the rendered budget".into(),
+                    })
+                    .collect(),
                 sub_agent: Some(SubAgentContext { spawn_depth: 1 }),
             });
             assert!(
-                prompt.len() < 10_300,
+                prompt.len() < 11_200,
                 "{label} prompt too large: {} chars",
                 prompt.len()
             );
@@ -1292,6 +1568,7 @@ mod tests {
     fn test_sub_agent_run_line_never_claims_a_human_reader() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "worker".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1301,7 +1578,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
             sub_agent: Some(SubAgentContext { spawn_depth: 1 }),
         });
         assert!(prompt.contains("Run: sub-agent"));
@@ -1312,6 +1591,7 @@ mod tests {
     fn test_unattended_run_never_waits_on_a_question() {
         let mut ctx = SystemPromptContext {
             agent_name: "test".into(),
+            agent_home: String::new(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
@@ -1322,7 +1602,9 @@ mod tests {
             native_tool_calling: true,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: true,
+            skills: vec![],
         };
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("Run: UNATTENDED"));
@@ -1357,6 +1639,7 @@ mod tests {
     fn test_prompt_is_compact() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "test".into(),
+            agent_home: String::new(),
             agent_description: "A test agent for unit testing.".into(),
             agent_roles: vec!["tester".into()],
             custom_instructions: None,
@@ -1366,7 +1649,9 @@ mod tests {
             native_tool_calling: false,
             uses_tool_gateway: false,
             granted_folders: GrantedFolders::default(),
+            shared_workspace: None,
             unattended: false,
+            skills: vec![],
             sub_agent: Some(SubAgentContext { spawn_depth: 1 }),
         });
         // Even with all optional sections, stays well under context budget (~2200 tokens).

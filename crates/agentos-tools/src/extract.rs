@@ -1200,7 +1200,7 @@ fn truncation_marker(cap: usize, real_total: Option<u64>) -> String {
 }
 
 /// Build a minimal single-page PDF containing `text`, so tests in this crate
-/// and in `agentos-web` need no binary fixture checked into the repo.
+/// and downstream crates need no binary fixture checked into the repo.
 #[doc(hidden)]
 pub fn minimal_pdf_fixture(text: &str) -> Vec<u8> {
     let content = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");

@@ -27,12 +27,30 @@ impl Kernel {
         prompt: String,
         detached: bool,
         bounded: bool,
+        // The agent that scheduled this work, when it isn't the operator.
+        schedule_creator: Option<AgentID>,
     ) -> Result<TaskID, AgentOSError> {
-        // Reject duplicate background task names to keep name-based lookup unambiguous.
-        if self.background_pool.get_by_name(&name).await.is_some() {
-            return Err(AgentOSError::KernelError {
-                reason: format!("Background task '{}' already exists", name),
-            });
+        // Reject a name only while a task holding it is still live. Finished
+        // entries linger in the pool for an hour (and a cancelled one's pool
+        // state never leaves Queued), so checking mere presence failed every
+        // recurring schedule firing more often than hourly. The scheduler, not
+        // the pool, knows whether a task is still live.
+        for existing in self.background_pool.named(&name).await {
+            let live = self
+                .scheduler
+                .get_task(&existing.id)
+                .await
+                .is_some_and(|t| {
+                    !matches!(
+                        t.state,
+                        TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                    )
+                });
+            if live {
+                return Err(AgentOSError::KernelError {
+                    reason: format!("Background task '{}' already exists", name),
+                });
+            }
         }
 
         let registry = self.agent_registry.read().await;
@@ -41,7 +59,12 @@ impl Kernel {
             .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.clone()))?
             .clone();
 
-        let mut target_permissions = registry.compute_effective_permissions(&agent.id);
+        let mut target_permissions = clamp_to_schedule_creator(
+            &registry,
+            agent.id,
+            registry.compute_effective_permissions(&agent.id),
+            schedule_creator,
+        );
         drop(registry);
 
         // Bounded tasks (schedule-fired RunTask, etc.) cap iterations to prevent
@@ -132,7 +155,7 @@ impl Kernel {
                 agent_name,
                 task_prompt: prompt,
                 state: TaskState::Queued,
-                started_at: None,
+                started_at: Some(chrono::Utc::now()),
                 completed_at: None,
                 result: None,
                 detached,
@@ -153,7 +176,7 @@ impl Kernel {
         detach: bool,
     ) -> KernelResponse {
         match self
-            .create_background_task(name.clone(), agent_name, task, detach, false)
+            .create_background_task(name.clone(), agent_name, task, detach, false, None)
             .await
         {
             Ok(id) => {
@@ -243,6 +266,28 @@ impl Kernel {
                 message: format!("Background task '{}' not found", name),
             }
         }
+    }
+}
+
+/// Permissions for work that agent `creator` scheduled to run as agent `target`.
+///
+/// A schedule fires long after the creating task (and its token) are gone, so
+/// the delegation clamp `scope_child_task` can't be used. Same rule, applied at
+/// fire time: a cross-agent schedule runs with `target ∩ creator` — it can never
+/// do more than the agent that asked for it could do itself *right now*.
+/// Operator-created (`None`) and self-targeted schedules are unchanged. A
+/// creator that no longer exists has no permissions, so the result is empty.
+pub(crate) fn clamp_to_schedule_creator(
+    registry: &crate::agent_registry::AgentRegistry,
+    target: AgentID,
+    target_permissions: PermissionSet,
+    creator: Option<AgentID>,
+) -> PermissionSet {
+    match creator {
+        Some(c) if c != target => {
+            target_permissions.intersect_with(&registry.compute_effective_permissions(&c))
+        }
+        _ => target_permissions,
     }
 }
 

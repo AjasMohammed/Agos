@@ -90,7 +90,7 @@ description = "Optional fixed args passed to the tool when mode='tool'."
 
 [payload_schema.properties.agent_name]
 type = "string"
-description = "Target agent (name or AgentID) for mode='task' / mode='tool'. Defaults to the calling agent."
+description = "Agent (name or AgentID) that runs the scheduled work. Defaults to the calling agent. Targeting another agent runs with only the permissions both of you hold."
 
 [sandbox]
 network       = false

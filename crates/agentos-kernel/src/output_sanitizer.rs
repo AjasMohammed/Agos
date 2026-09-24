@@ -1040,6 +1040,13 @@ pub fn rewrite_error_payload(text: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.len() > ERROR_REWRITE_MAX_LEN {
         return None;
     }
+    // Provider error bodies are one line (or a JSON/HTML document). A multi-line
+    // plain-text answer is the model talking — e.g. a numbered list that happens
+    // to mention "maximum context length" and "HTTP 404" was replaced wholesale
+    // with a fake "Context too large" in the stored transcript.
+    if trimmed.contains('\n') && !trimmed.starts_with('{') && !trimmed.starts_with('<') {
+        return None;
+    }
 
     // JSON API error: {"error": {"type": "...", "message": "..."}} or {"error": "..."}
     if trimmed.starts_with('{') {
@@ -1069,7 +1076,10 @@ pub fn rewrite_error_payload(text: &str) -> Option<String> {
     if trimmed.len() < 512
         && (lower.contains("context length exceeded")
             || lower.contains("prompt is too long")
-            || lower.contains("maximum context length")
+            // Prose describes a model's maximum context length too; the provider
+            // error also says what the request overflowed with.
+            || (lower.contains("maximum context length")
+                && (lower.contains("however") || lower.contains("resulted in")))
             || lower.contains("request_too_large")
             || lower.contains("request too large")
             || lower.contains("exceeds model context window"))
@@ -1217,7 +1227,18 @@ fn is_http_error_line(text: &str) -> bool {
             && code.chars().all(|c| c.is_ascii_digit())
             && (code.starts_with('4') || code.starts_with('5'))
         {
-            return true;
+            // "Error 500: …", "HTTP/1.1 502 Bad Gateway" — but not prose like
+            // "Error 404 means the page is missing": after the code comes a
+            // separator or a capitalised reason phrase.
+            let tail = text
+                .find(code.as_str())
+                .map(|i| &text[i + 3..])
+                .unwrap_or_default();
+            return tail.is_empty()
+                || tail.starts_with([':', '-', '{'])
+                || tail
+                    .strip_prefix(' ')
+                    .is_some_and(|t| t.starts_with(|c: char| c.is_ascii_uppercase() || c == '{'));
         }
     }
     false
@@ -2406,6 +2427,21 @@ mod tests {
             let msg = out.unwrap();
             assert!(msg.contains("Context too large"), "msg: {msg}");
         }
+    }
+
+    /// A correct answer was stored as "Context too large for this model" because it
+    /// mentioned a model's maximum context length.
+    #[test]
+    fn error_rewrite_leaves_answers_about_errors_alone() {
+        for text in [
+            "1. HTTP 404 means the requested resource could not be found on the server.\n2. GPT-4o's maximum context length is about 128k tokens.",
+            "GPT-4o's maximum context length is about 128k tokens.",
+            "Error 404 means the page does not exist.",
+            "HTTP 404 means the requested resource could not be found.",
+        ] {
+            assert!(rewrite_error_payload(text).is_none(), "rewrote: {text}");
+        }
+        assert!(rewrite_error_payload("Error 404 Not Found").is_some());
     }
 
     #[test]

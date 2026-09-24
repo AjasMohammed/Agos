@@ -32,7 +32,12 @@ impl Kernel {
             }
         };
         let tool_name = manifest.manifest.name.clone();
-        match self.tool_registry.write().await.register(manifest) {
+        match self
+            .tool_registry
+            .write()
+            .await
+            .register_untrusted(manifest)
+        {
             Ok(id) => KernelResponse::Success {
                 data: Some(serde_json::json!({
                     "tool_id": id.to_string(),
@@ -66,7 +71,12 @@ impl Kernel {
             }
         };
         let tool_name = manifest.manifest.name.clone();
-        match self.tool_registry.write().await.register(manifest) {
+        match self
+            .tool_registry
+            .write()
+            .await
+            .register_untrusted(manifest)
+        {
             Ok(id) => {
                 tracing::info!(tool_name = %tool_name, tool_id = %id, "Tool hot-loaded");
                 KernelResponse::Success {

@@ -1,7 +1,7 @@
 /// LINE Messaging API channel adapter.
 ///
 /// Outbound: POST to LINE Reply API using a reply token from the inbound webhook.
-/// Inbound: HTTP webhook at `/api/channels/line` in agentos-web, HMAC-SHA256 verified.
+/// Inbound: HMAC-SHA256 verification lives here; no HTTP route serves it yet.
 use crate::types::{ChannelCapabilities, DeliveryReceipt, InboundMessage, OutboundMessage};
 use crate::{ChannelAdapter, ChannelHealth};
 use agentos_http::{client, HttpProfile};

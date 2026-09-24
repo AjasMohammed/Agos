@@ -46,7 +46,7 @@ The core idea: instead of wrapping LLMs around existing operating systems (like 
 - **Agents are peers** — every connected agent is aware of and can collaborate with others
 - **Secrets are first-class** — API keys and credentials are encrypted at rest, never exposed to agents directly
 
-AgentOS runs inside a Docker container, has no graphical interface for humans, exposes a CLI and optional Web UI for management, and allows multiple LLMs to be connected and routed simultaneously.
+AgentOS runs inside a Docker container, has no graphical interface for humans, exposes a CLI and an optional REST API (used by the React panel) for management, and allows multiple LLMs to be connected and routed simultaneously.
 
 ### Core Principles
 
@@ -123,8 +123,8 @@ Inter-process messaging   →    Agent-to-Agent Message Bus
 │                          AgentOS Container                          │
 │                                                                     │
 │  ┌───────────────┐   ┌─────────────────┐   ┌─────────────────────┐  │
-│  │ Intent Shell  │   │    Web UI        │   │  CLI / agentctl     │  │
-│  │ (REPL / API)  │   │  (Axum / HTMX)  │   │                     │  │
+│  │ Intent Shell  │   │    REST API      │   │  CLI / agentctl     │  │
+│  │ (REPL / API)  │   │  (agentos-api)  │   │                     │  │
 │  └──────┬────────┘   └────────┬─────────┘   └──────────┬──────────┘  │
 │         └────────────────────┴──────────────────────────┘            │
 │                               │                                      │
@@ -462,18 +462,6 @@ agentctl status
 agentctl audit logs --last 100
 ```
 
-### Web UI
-
-A minimal management dashboard (Axum backend + HTMX frontend):
-
-- **Dashboard**: Active tasks, connected agents, tool registry, system health
-- **Agent Manager**: Connect, configure, set permissions, view agent profiles
-- **Task Inspector**: Real-time intent stream, context window viewer, tool call timeline
-- **Tool Manager**: Browse, install, remove, and inspect tools
-- **Secrets Manager**: Add, view (metadata only), and revoke credentials
-- **Audit Log**: Searchable, filterable log of every intent message and tool execution
-- **Agent Communication View**: Visual graph of agent interactions and message history
-
 ---
 
 ## Security Model
@@ -578,7 +566,7 @@ agentctl secret rotate OPENAI_API_KEY
 
 - API keys are **never** passed as CLI arguments (shell history exposure)
 - API keys are **never** stored in `docker-compose.yml` or `.env` files
-- API keys are **never** visible to any tool, agent, or web UI
+- API keys are **never** visible to any tool, agent, or API client
 - Secrets are **zeroed from memory** immediately after use
 
 ---
@@ -1151,7 +1139,7 @@ COPY --from=builder /build/target/release/agentos-kernel /usr/bin/
 COPY --from=builder /build/tools/core/ /opt/agentos/tools/core/
 
 VOLUME ["/opt/agentos/data", "/opt/agentos/tools/user", "/opt/agentos/vault"]
-EXPOSE 8080   # Web UI
+EXPOSE 8080   # REST API
 EXPOSE 9090   # Kernel API (internal)
 
 ENTRYPOINT ["/usr/bin/agentos-kernel"]
@@ -1298,7 +1286,7 @@ When the container restarts, agents must re-establish identity without re-enteri
 - [ ] WASM tool support via Wasmtime
 - [ ] Tool Registry (local first, then hosted)
 - [ ] `agentd` supervisor and cron scheduler
-- [ ] Web UI (Axum + HTMX)
+- [ ] REST API + React panel
 
 ### Phase 6 — Hardening & Release (Weeks 21+)
 - [ ] Secrets vault master key bootstrap options (passphrase KDF, TPM)

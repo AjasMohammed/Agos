@@ -3,8 +3,8 @@
 //!
 //! The kernel downloads media bytes (it has the bot token via the vault) and
 //! hands them to an `AttachmentSink`, which persists them and returns an opaque
-//! file id the agent can later resolve. The `agentos-web` server backs this
-//! with its `FileStore`; CLI/test builds use [`NoopAttachmentSink`], which
+//! file id the agent can later resolve. Kernel boot backs this with the
+//! `FileStore`; tests use [`NoopAttachmentSink`], which
 //! declines — media then surfaces to the agent as a text note only.
 //!
 //! This mirrors the `agentos_llm::ImageResolver` injection pattern: the kernel

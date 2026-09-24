@@ -539,15 +539,23 @@ impl EpisodicStore {
         limit.min(i64::MAX as usize) as i64
     }
 
-    /// Delete a single episodic entry by its row id. Offloads to blocking thread pool.
-    pub async fn delete(&self, id: i64) -> Result<(), AgentOSError> {
+    /// Delete a single episodic entry by its row id, scoped to the owning agent.
+    /// Row ids are sequential, so an unscoped delete would let any agent with
+    /// `memory.episodic:w` wipe another agent's history by enumeration. A row
+    /// owned by someone else reports "not found", same as a missing one.
+    /// Offloads to blocking thread pool.
+    pub async fn delete(&self, id: i64, agent_id: &AgentID) -> Result<(), AgentOSError> {
         let db = self.db.clone();
+        let agent_id_str = agent_id.as_uuid().to_string();
         tokio::task::spawn_blocking(move || {
             let conn = db.lock().map_err(|_| {
                 AgentOSError::StorageError("Failed to lock episodic db for delete".to_string())
             })?;
             let deleted = conn
-                .execute("DELETE FROM episodic_events WHERE id = ?1", params![id])
+                .execute(
+                    "DELETE FROM episodic_events WHERE id = ?1 AND agent_id = ?2",
+                    params![id, agent_id_str],
+                )
                 .map_err(|e| {
                     AgentOSError::StorageError(format!("Failed to delete episode: {}", e))
                 })?;
@@ -1069,5 +1077,30 @@ mod tests {
             .await
             .expect_err("expected permission denied for non-owner agent");
         assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_delete_is_scoped_to_owning_agent() {
+        let dir = TempDir::new().unwrap();
+        let store = EpisodicStore::open(dir.path()).unwrap();
+        let owner = AgentID::new();
+        let other = AgentID::new();
+
+        store
+            .record(EpisodeRecordInput {
+                task_id: &TaskID::new(),
+                agent_id: &owner,
+                entry_type: EpisodeType::UserPrompt,
+                content: "hello",
+                summary: None,
+                metadata: None,
+                trace_id: &TraceID::new(),
+            })
+            .await
+            .unwrap();
+
+        // Fresh DB: the row id is 1. Another agent guessing it must not delete it.
+        assert!(store.delete(1, &other).await.is_err());
+        assert!(store.delete(1, &owner).await.is_ok());
     }
 }

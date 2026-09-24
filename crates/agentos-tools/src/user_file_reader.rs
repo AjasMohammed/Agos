@@ -376,21 +376,67 @@ async fn materialize(
     // Keyed by file id, so repeated calls converge on one path an agent can
     // re-derive across turns — and so the sweep that prunes an upload knows
     // which directory to remove with it.
-    let dir = context.agent_files_dir()?.join("inbox").join(&record.id);
-    let dest = dir.join(record.handle_file_name());
+    if uuid::Uuid::parse_str(&record.id).is_err() {
+        return Err(fail(format!("invalid file id '{}'", record.id)));
+    }
+    let home = context.agent_files_dir()?;
+    let dir = home.join("inbox").join(&record.id);
+    let file_name = record.handle_file_name();
+    let dest = dir.join(&file_name);
 
     let src = source.to_path_buf();
-    let (dir_c, dest_c) = (dir.clone(), dest.clone());
+    let dir_c = dir.clone();
     let expected = record.size;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&dir_c).map_err(|e| format!("create handle dir: {e}"))?;
+        // The agent's home is writable by its own shell, so `inbox` or `inbox/<id>`
+        // may be a planted symlink; following it would let this kernel-privileged
+        // mkdir/link/copy land anywhere on the host. Create each level without
+        // following links (`create_dir_all` would mkdir through a planted `inbox`
+        // link before any check), then require the real path to be exactly the
+        // expected one.
+        std::fs::create_dir_all(&home).map_err(|e| format!("create agent home: {e}"))?;
+        for level in [home.join("inbox"), dir_c.clone()] {
+            match std::fs::create_dir(&level) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("create handle dir: {e}")),
+            }
+            let meta = std::fs::symlink_metadata(&level).map_err(|e| format!("handle dir: {e}"))?;
+            if !meta.is_dir() {
+                return Err("handle dir is not a real directory".to_string());
+            }
+        }
+        // ponytail: check-then-use; a symlink swapped in after this check still
+        // wins the race. openat2(RESOLVE_BENEATH) closes it if that matters.
+        let home_real = std::fs::canonicalize(&home).map_err(|e| format!("agent home: {e}"))?;
+        let dir_real = std::fs::canonicalize(&dir_c).map_err(|e| format!("handle dir: {e}"))?;
+        let expected_dir = home_real
+            .join("inbox")
+            .join(dir_c.file_name().unwrap_or_default());
+        if dir_real != expected_dir {
+            return Err("handle dir resolves outside the agent home".to_string());
+        }
+        let dest_c = dir_real.join(&file_name);
         // Idempotent: a handle already the right size is the same bytes, since
-        // the id it is filed under names one immutable upload.
-        if let Ok(meta) = std::fs::metadata(&dest_c) {
+        // the id it is filed under names one immutable upload. `symlink_metadata`
+        // so a planted link at the handle path is replaced, never followed.
+        if let Ok(meta) = std::fs::symlink_metadata(&dest_c) {
             if meta.is_file() && meta.len() == expected {
                 return Ok(());
             }
             std::fs::remove_file(&dest_c).map_err(|e| format!("replace stale handle: {e}"))?;
+        }
+        // A hard link is the same inode as the upload, so the agent's own
+        // write-side file tools (`file-writer`, `file-editor`) could rewrite the
+        // operator's file in place through this path, leaving the registry row's
+        // size and mime describing content that is gone. Uploads are never
+        // rewritten by the server, so drop the write bit — on `src`, a
+        // kernel-owned path: chmod on `dest` would follow a symlink the agent
+        // plants between the remove above and the link below.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444));
         }
         // Hard link when both live on the same device — the normal deployment,
         // where uploads and agent homes are both under data_dir — so a 50 MiB
@@ -409,29 +455,28 @@ async fn materialize(
             // Cross-device (or a filesystem with no links): copy. Via a temp file
             // and a rename so a concurrent caller either sees no handle or the
             // finished one, never a half-written prefix it would then trust.
+            // `create_new` is O_EXCL, which never follows a planted link, and the
+            // mode is set on the open handle (fchmod), never by path.
             Err(_) => {
-                let tmp = dir_c.join(format!(".{}.part", uuid::Uuid::new_v4()));
-                let copied = std::fs::copy(&src, &tmp);
-                if let Err(e) = copied {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(format!("materialize file: {e}"));
-                }
-                if let Err(e) = std::fs::rename(&tmp, &dest_c) {
+                let tmp = dir_real.join(format!(".{}.part", uuid::Uuid::new_v4()));
+                let copied = (|| -> std::io::Result<()> {
+                    let mut out = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&tmp)?;
+                    std::io::copy(&mut std::fs::File::open(&src)?, &mut out)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        out.set_permissions(std::fs::Permissions::from_mode(0o444))?;
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = copied.and_then(|()| std::fs::rename(&tmp, &dest_c)) {
                     let _ = std::fs::remove_file(&tmp);
                     return Err(format!("materialize file: {e}"));
                 }
             }
-        }
-        // A hard link is the same inode as the upload, so the agent's own
-        // write-side file tools (`file-writer`, `file-editor`) could rewrite the
-        // operator's file in place through this path, leaving the registry row's
-        // size and mime describing content that is gone. Uploads are never
-        // rewritten by the server, so dropping the write bit on the shared inode
-        // costs nothing and closes that.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dest_c, std::fs::Permissions::from_mode(0o444));
         }
         Ok(())
     })
@@ -498,6 +543,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -711,6 +757,40 @@ mod tests {
     }
 
     /// A sender-chosen name is the filename half of a path this tool creates.
+    /// The agent's shell can write its own home, so it can plant `inbox/<id>` as a
+    /// symlink. Handle materialization runs as the kernel user and must not follow
+    /// it, or an agent-authored upload could be linked into e.g. a systemd unit dir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_refuses_a_planted_inbox_symlink() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let id = register(dir.path(), "agentos.service", "text/plain", b"x", "");
+        let c = ctx(dir.path());
+        let inbox = c.agent_files_dir().unwrap().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::os::unix::fs::symlink(outside.path(), inbox.join(&id)).unwrap();
+
+        let res = UserFileReader::new()
+            .execute(
+                serde_json::json!({ "file_id": id, "mode": "handle" }),
+                c.clone(),
+            )
+            .await;
+        assert!(res.is_err(), "followed a planted symlink: {res:?}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+
+        // `inbox` itself as the link: nothing may be mkdir'd through it either.
+        std::fs::remove_file(inbox.join(&id)).unwrap();
+        std::fs::remove_dir(&inbox).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &inbox).unwrap();
+        let res = UserFileReader::new()
+            .execute(serde_json::json!({ "file_id": id, "mode": "handle" }), c)
+            .await;
+        assert!(res.is_err(), "followed a planted inbox symlink: {res:?}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
     #[tokio::test]
     async fn handle_contains_a_traversing_name() {
         let dir = TempDir::new().unwrap();

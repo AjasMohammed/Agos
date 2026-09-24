@@ -67,9 +67,11 @@ minisign -Vm agentos-<target> -P "$(cat packaging/signing/agentos-release.pub)"
 sha256sum -c agentos-<target>.sha256
 ```
 
-The [one-line installer](./quickstart.md) verifies the SHA-256 checksum (mandatory) and the
-minisign signature (when a `.sig` is available) before executing the binary — it refuses to
-install on a verification failure. An **SBOM** (CycloneDX `bom.json`) is attached to every
+The [one-line installer](./quickstart.md) verifies the SHA-256 checksum and the minisign
+signature before executing the binary — it refuses to install on a verification failure, and
+also when no `minisign`/`rsign` is present to check the signature with (override with
+`AGENTOS_SKIP_SIG_VERIFY=1`, which leaves you trusting a checksum served from the same host
+as the binary). An **SBOM** (CycloneDX `bom.json`) is attached to every
 GitHub release for dependency scanning.
 
 ## Reporting a vulnerability

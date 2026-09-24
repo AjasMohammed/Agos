@@ -170,7 +170,7 @@ agentos notifications read <notification-id>
 agentos notifications respond <notification-id> --response "Yes, delete them"
 ```
 
-From the web UI: navigate to the **Notifications** section in the sidebar and click **Reply** on any pending question.
+Over HTTP: `POST /api/v1/notifications/<id>/respond` — see [[23-REST API Reference]]. Requires `[api] enabled = true`.
 
 ---
 

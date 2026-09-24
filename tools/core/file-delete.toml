@@ -4,10 +4,11 @@ risk_class = "exec_capable"
 [manifest]
 name        = "file-delete"
 version     = "1.0.0"
-description = "Deletes a file under your home dir or inside a write-granted folder after acquiring an exclusive write lock. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Refuses to delete directories. Path traversal is blocked via canonicalize + starts_with check."
+description = "Deletes a file under your home dir or inside a write-granted folder after acquiring an exclusive write lock. Relative paths resolve under the agent's own home dir; absolute paths are accepted inside operator-granted host folders (see agent-self granted_folders or the ## Files prompt block). Deleted entries are moved to .trash/ in your home dir for ~72h: the result carries trash_path, and file-move from that path restores it . A directory, or a file over 10 MiB, on a different filesystem from your home cannot be kept: the call fails with nothing deleted, and permanent=true deletes it with no undo. Deleting a path inside .trash/ removes it permanently. Directories require recursive=true; your home dir and granted folder roots can never be deleted. Path traversal is blocked via canonicalize + starts_with check."
 author      = "agentos-core"
 trust_tier  = "core"
 category    = "fs"
+search_hints = ["delete a file", "remove a file", "rm", "delete a directory", "rm -rf", "empty the trash"]
 
 [capabilities_required]
 permissions = ["fs.user_data:w", "fs.workspace:w"]
@@ -25,7 +26,15 @@ required = ["path"]
 
 [payload_schema.properties.path]
 type = "string"
-description = "File path: relative (under your home dir) or absolute inside a write-granted folder"
+description = "File or directory path: relative (under your home dir) or absolute inside a write-granted folder"
+[payload_schema.properties.permanent]
+type = "boolean"
+default = false
+description = "Skip .trash and delete with no undo"
+[payload_schema.properties.recursive]
+type = "boolean"
+default = false
+description = "Required to delete a directory and everything inside it"
 
 [sandbox]
 network       = false

@@ -135,6 +135,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 
@@ -144,11 +145,14 @@ mod tests {
             name: name.to_string(),
             description: "Deploy the ingest service safely".to_string(),
             preconditions: vec![],
+            inputs: vec![],
             steps: vec![ProcedureStep {
                 order: 0,
                 action: "Call 'shell-exec'".to_string(),
                 tool: Some("shell-exec".to_string()),
                 expected_outcome: None,
+                input: None,
+                output_var: None,
             }],
             postconditions: vec![],
             success_count: 1,

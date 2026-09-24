@@ -42,6 +42,57 @@ pub struct NotificationSummary {
     pub escalation_id: Option<u64>,
 }
 
+/// One row of the notification routing matrix.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ApiNotificationEvent {
+    /// Stable key: `approval`, `task_complete`, `task_failed`, `question`,
+    /// `agent_message`, `system_alert`, `status_update`.
+    pub key: String,
+    pub label: String,
+    pub description: String,
+}
+
+/// One column of the matrix: a delivery target the kernel can reach.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ApiRouteChannel {
+    /// Matrix key: a channel instance id (`telegram-main`) or a builtin
+    /// delivery kind (`desktop`, `cli`, `web`, `webhook`, `slack`).
+    pub key: String,
+    /// Channel kind, for iconography.
+    pub kind: String,
+    pub label: String,
+    /// False when the adapter is registered but currently cannot deliver
+    /// (e.g. `notify-send` missing, Telegram chat id not yet discovered).
+    pub available: bool,
+}
+
+/// A single `(event, channel) -> mode` cell.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ApiRouteRule {
+    pub event: String,
+    pub channel: String,
+    /// `always` | `never` | `when_away`.
+    pub mode: String,
+}
+
+/// The whole matrix: axes, current rules, and what `when_away` resolves to now.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ApiNotificationRoutes {
+    pub events: Vec<ApiNotificationEvent>,
+    pub channels: Vec<ApiRouteChannel>,
+    /// Only cells that differ from the default; an absent cell means `always`.
+    pub rules: Vec<ApiRouteRule>,
+    /// True while a control-panel WebSocket is connected — `when_away` rules
+    /// are muted exactly while this is true.
+    pub panel_connected: bool,
+}
+
+/// Partial update: cells not listed are left untouched.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SetRoutesRequest {
+    pub rules: Vec<ApiRouteRule>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

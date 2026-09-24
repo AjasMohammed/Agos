@@ -378,7 +378,7 @@ impl EventBus {
                     subscription_id = %sub.id,
                     filter = raw_filter,
                     error = %err,
-                    "Failed to parse event subscription filter; applying fail-open policy"
+                    "Failed to parse event subscription filter; subscription will not fire until the filter is fixed"
                 );
                 Some(CompiledFilter::Invalid)
             }
@@ -389,7 +389,9 @@ impl EventBus {
         match sub.compiled_filter.as_ref() {
             None => true,
             Some(CompiledFilter::Parsed(expr)) => evaluate_filter(expr, payload),
-            Some(CompiledFilter::Invalid) => true,
+            // Fail closed: a narrow filter the parser can't read must not
+            // turn into a subscription to every event of its type.
+            Some(CompiledFilter::Invalid) => false,
         }
     }
 
@@ -789,6 +791,17 @@ pub fn parse_event_type(name: &str) -> Option<EventType> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, t)| *t)
+}
+
+/// Creation-time check for a subscription payload filter. An unparseable
+/// filter never matches, so reject it where the caller can still see why.
+pub fn validate_filter(filter_str: &str) -> Result<(), String> {
+    parse_filter(filter_str).map(|_| ()).map_err(|e| {
+        format!(
+            "Invalid filter '{filter_str}': {e}. Use `field OP value` clauses joined by AND; \
+             OR is not supported, so for alternatives use `field IN ['a', 'b']`."
+        )
+    })
 }
 
 pub fn parse_filter(filter_str: &str) -> Result<EventFilterExpr, String> {
@@ -1639,6 +1652,18 @@ mod tests {
         )));
     }
 
+    /// An agent once wrote this OR filter; the grammar has no OR, so it failed to
+    /// parse and was applied fail-open — every SystemHealth event woke the agent.
+    /// Matching now fails closed (`test_invalid_payload_filter_fails_closed`);
+    /// creation rejects it outright with a usable hint.
+    #[test]
+    fn unparseable_filter_is_rejected_up_front() {
+        let raw = "event_name == 'MemoryPressure' or event_name == 'CPUSpikeDetected'";
+        let err = validate_filter(raw).unwrap_err();
+        assert!(err.contains("IN ["), "hint missing: {err}");
+        assert!(validate_filter("event_name IN ['MemoryPressure', 'CPUSpikeDetected']").is_ok());
+    }
+
     #[test]
     fn test_parse_filter_simple_number_clause() {
         let expr = parse_filter("cpu_percent > 85").expect("must parse");
@@ -2001,7 +2026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalid_payload_filter_fails_open() {
+    async fn test_invalid_payload_filter_fails_closed() {
         let bus = EventBus::new();
         let sub = make_subscription_with_payload_filter(
             AgentID::new(),
@@ -2013,7 +2038,7 @@ mod tests {
 
         let event =
             make_event_with_payload(EventType::CPUSpikeDetected, json!({ "cpu_percent": 70 }));
-        assert_eq!(bus.evaluate_subscriptions(&event).await.len(), 1);
+        assert_eq!(bus.evaluate_subscriptions(&event).await.len(), 0);
     }
 
     // ── Missing-operator tests added after Phase 07 review ────────────

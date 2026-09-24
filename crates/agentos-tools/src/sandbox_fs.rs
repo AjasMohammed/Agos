@@ -145,6 +145,49 @@ pub fn grants_outside<'a>(
     })
 }
 
+/// Bind an agent's live storage zones into a sandbox.
+///
+/// Zones are the kernel's dynamic directory grants — the conversation shared
+/// workspace is one. Every file tool honours them; a sandbox that does not makes
+/// "write the script" succeed and "run the script" fail with a path error, which
+/// reads as a missing file rather than a missing bind. That is exactly how the
+/// 2026-09-21 convo deadlock presented, through three operator approvals.
+///
+/// Skips: anything already inside `home` (bound by the caller), any zone that
+/// *contains* `data_dir` (it would bind the vault, the audit log and every agent
+/// home — the [`grants_outside`] rule), and any path that no longer exists,
+/// because bwrap aborts the whole call on a missing bind rather than skipping it.
+/// Returns the paths actually bound, for the caller to log.
+pub fn bind_zones(
+    mut sandbox: Sandbox,
+    zones: &[(PathBuf, agentos_types::ZoneAccessLevel)],
+    home: &Path,
+    data_dir: &Path,
+) -> (Sandbox, Vec<PathBuf>) {
+    let mut bound = Vec::new();
+    for (path, access) in zones {
+        if path.starts_with(home) {
+            continue;
+        }
+        if grants_outside(std::slice::from_ref(path), data_dir)
+            .next()
+            .is_none()
+        {
+            continue; // warned by `grants_outside`
+        }
+        if !path.exists() {
+            tracing::warn!(zone = %path.display(), "sandbox: zone path missing; not binding it");
+            continue;
+        }
+        sandbox = match access {
+            agentos_types::ZoneAccessLevel::ReadOnly => sandbox.bind_ro(path),
+            agentos_types::ZoneAccessLevel::ReadWrite => sandbox.bind_rw(path),
+        };
+        bound.push(path.clone());
+    }
+    (sandbox, bound)
+}
+
 /// `PATH` inside every sandbox. The kernel's own `PATH` is never inherited:
 /// its entries (pyenv shims, nvm, `~/.local/bin`) live under the masked
 /// `/home` and would not resolve anyway.

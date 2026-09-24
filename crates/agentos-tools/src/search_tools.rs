@@ -380,6 +380,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tool_categories: Some(vec!["core".into()]),
+            shared_dir: None,
         };
 
         // "read" matches BOTH tools by keyword, but only `core` is allowed.

@@ -33,6 +33,7 @@ const STATELESS_TOOL_NAMES: &[&str] = &[
     // Writes an artifact blob + a FileStore row under data_dir. Same class as
     // file-writer: plain fs + sqlite, no kernel context injection.
     "artifact-write",
+    "file-publish",
     "memory-block-write",
     "memory-block-read",
     "memory-block-list",
@@ -84,6 +85,10 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "hardware-set-desired",
     "agent-message",
     "task-delegate",
+    // Emits a `_kernel_action`; the run needs the procedural store, the tool
+    // registry, the capability engine and the pipeline engine, none of which a
+    // sandbox child has.
+    "procedure-run",
     "task-spawn-async",
     "agent-call",
     "agent-list",
@@ -94,6 +99,11 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "escalation-status",
     "notify-user",
     "channel-send",
+    // Raises an escalation and reads the grant registry back — kernel only.
+    "workspace-request",
+    // Built by the kernel from `[tts]`; a sandbox child has neither that config
+    // nor a route to a loopback speech server.
+    "speak",
     "ask-user",
     "spawn-agent",
     "await-agents",
@@ -281,6 +291,7 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     // Comms
     "notify-user",
     "ask-user",
+    "workspace-request",
     "agent-message",
     "schedule-once",
     "schedule-recurring",
@@ -302,6 +313,7 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     // read inline. Must be in the default list: the whole point is that
     // the agent reaches for it without being told the tool exists.
     "artifact-write",
+    "file-publish",
     // Scratchpad — agent working memory. Required for any recipe that
     // needs dedup state across recurring schedule fires (see alert-builder).
     "scratch-read",
@@ -451,6 +463,7 @@ fn build_stateless_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentO
         "file-diff" => Box::new(crate::file_diff::FileDiff::new()),
         "data-parser" => Box::new(crate::data_parser::DataParser::new()),
         "artifact-write" => Box::new(crate::artifact_write::ArtifactWriteTool::new()),
+        "file-publish" => Box::new(crate::file_publish::FilePublishTool::new()),
         "memory-block-write" => Box::new(crate::memory_block_write::MemoryBlockWriteTool::new()),
         "memory-block-read" => Box::new(crate::memory_block_read::MemoryBlockReadTool::new()),
         "memory-block-list" => Box::new(crate::memory_block_list::MemoryBlockListTool::new()),

@@ -370,10 +370,7 @@ async fn cmd_serve(
     let data_dir = std::path::PathBuf::from(&config.tools.data_dir);
 
     let tool_runner = Arc::new(ToolRunner::new(&data_dir).map_err(|e| anyhow::anyhow!(e))?);
-    let executor = Arc::new(ToolRunnerExecutor {
-        runner: tool_runner,
-        data_dir,
-    });
+    let executor = Arc::new(ToolRunnerExecutor::new(tool_runner, data_dir));
 
     match transport {
         "stdio" => {
@@ -415,10 +412,7 @@ async fn cmd_tools(config_path: &str) -> anyhow::Result<()> {
     let config = agentos_kernel::config::load_config(std::path::Path::new(config_path))?;
     let data_dir = std::path::PathBuf::from(&config.tools.data_dir);
     let runner = ToolRunner::new(&data_dir).map_err(|e| anyhow::anyhow!(e))?;
-    let executor = ToolRunnerExecutor {
-        runner: Arc::new(runner),
-        data_dir,
-    };
+    let executor = ToolRunnerExecutor::new(Arc::new(runner), data_dir);
 
     let tools = executor.list_tools().await;
     if tools.is_empty() {
@@ -441,7 +435,7 @@ async fn cmd_call(config_path: &str, tool_name: &str, input_json: &str) -> anyho
     let config = agentos_kernel::config::load_config(std::path::Path::new(config_path))?;
     let data_dir = std::path::PathBuf::from(&config.tools.data_dir);
     let runner = Arc::new(ToolRunner::new(&data_dir).map_err(|e| anyhow::anyhow!(e))?);
-    let executor = ToolRunnerExecutor { runner, data_dir };
+    let executor = ToolRunnerExecutor::new(runner, data_dir);
 
     let args: serde_json::Value = serde_json::from_str(input_json)
         .map_err(|e| anyhow::anyhow!("Invalid JSON input: {}", e))?;
@@ -818,7 +812,7 @@ fn operator_permissions() -> agentos_types::PermissionSet {
     p.grant("agent.".into(), true, false, true, None);
     // Data and pipeline tools.
     p.grant("data.".into(), true, true, false, None);
-    // Artifacts (artifact_write). Note `"fs:"` above does NOT cover this:
+    // Artifacts (artifact_write, file_publish). Note `"fs:"` above does NOT cover this:
     // `check()` is a prefix match and "fs.artifacts" does not start with "fs:".
     p.grant("fs.artifacts".into(), true, true, false, None);
     // Scheduling: schedule.job (schedule_*), schedule.timer (set_timer,
@@ -866,6 +860,19 @@ impl McpAuthValidator for BearerTokenAuth {
 struct ToolRunnerExecutor {
     runner: Arc<ToolRunner>,
     data_dir: std::path::PathBuf,
+    /// Tools the operator answered "always approve" for. Process lifetime only:
+    /// a new `mcp serve` asks again.
+    always_approved: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl ToolRunnerExecutor {
+    fn new(runner: Arc<ToolRunner>, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            runner,
+            data_dir,
+            always_approved: Default::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -880,6 +887,40 @@ impl McpToolExecutor for ToolRunnerExecutor {
                 name,
             })
             .collect()
+    }
+
+    /// Anything above read-only is put to the operator first. There is no
+    /// kernel here — no ToolPre hook, no escalation manager — so the MCP server
+    /// asks the human behind the client (approve / always approve / deny) and
+    /// refuses the call when it cannot ask.
+    async fn approval_prompt(&self, name: &str, args: &serde_json::Value) -> Option<String> {
+        use agentos_types::RiskClass;
+        let name = self.runner.resolve_tool_name(name)?; // unknown tool: `execute` rejects it
+        let risk = agentos_kernel::core_manifests::embedded_risk_class(&name, args);
+        if matches!(
+            risk,
+            RiskClass::ReadonlyScoped | RiskClass::ReadonlyExternal
+        ) || self.always_approved.lock().ok()?.contains(&name)
+        {
+            return None;
+        }
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .map(|a| format!(" ({a})"))
+            .unwrap_or_default();
+        Some(format!(
+            "Allow this MCP client to run AgentOS tool '{name}'{action}? Risk: {risk:?}."
+        ))
+    }
+
+    async fn approve_always(&self, name: &str, _args: &serde_json::Value) {
+        if let (Some(name), Ok(mut set)) = (
+            self.runner.resolve_tool_name(name),
+            self.always_approved.lock(),
+        ) {
+            set.insert(name);
+        }
     }
 
     async fn list_resources(&self) -> Vec<agentos_mcp::McpResourceDef> {
@@ -989,8 +1030,9 @@ impl McpToolExecutor for ToolRunnerExecutor {
             agent_id: AgentID::new(),
             trace_id: TraceID::new(),
             // mcp serve is an operator-invoked local command: grant broad access
-            // to all core tool categories.  SSRF protection for network resources
-            // is enforced by PermissionSet::is_denied() regardless of these grants.
+            // to all core tool categories. What actually runs is decided by the
+            // approval gate (`approval_prompt`); SSRF is enforced inside the
+            // tools' shared HTTP client, not by these grants.
             permissions: operator_permissions(),
             vault: None,
             hal: None,
@@ -1006,6 +1048,7 @@ impl McpToolExecutor for ToolRunnerExecutor {
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         };
 
         self.runner

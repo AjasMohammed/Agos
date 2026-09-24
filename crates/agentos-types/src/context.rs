@@ -845,6 +845,83 @@ impl ContextWindow {
             .collect()
     }
 
+    /// Active entries as they must go to a provider: every native tool call
+    /// answered by a tool result, and no tool result without its call.
+    ///
+    /// Compaction, eviction, summarization and aborted parallel batches each
+    /// remove entries without regard to pairing. A split pair makes every later
+    /// request of the task a provider 400, so adapters build messages from this
+    /// instead of `active_entries`: orphan results are dropped and unanswered
+    /// calls get a synthetic "result no longer in context" entry right after their turn.
+    pub fn wire_entries(&self) -> Vec<std::borrow::Cow<'_, ContextEntry>> {
+        use std::borrow::Cow;
+        let active = self.active_entries();
+        let calls_of = |e: &ContextEntry| -> Vec<(String, String)> {
+            e.metadata
+                .as_ref()
+                .and_then(|m| m.assistant_tool_calls.as_ref())
+                .and_then(|v| v.as_array())
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .filter_map(|c| {
+                            let id = c.get("id")?.as_str()?.to_string();
+                            let name = c
+                                .get("tool_name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            Some((id, name))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let result_id = |e: &ContextEntry| -> Option<String> {
+            (e.role == ContextRole::ToolResult)
+                .then(|| e.metadata.as_ref()?.tool_call_id.clone())
+                .flatten()
+        };
+        let call_ids: std::collections::HashSet<String> = active
+            .iter()
+            .filter(|e| e.role == ContextRole::Assistant)
+            .flat_map(|e| calls_of(e).into_iter().map(|(id, _)| id))
+            .collect();
+        let result_ids: std::collections::HashSet<String> =
+            active.iter().filter_map(|e| result_id(e)).collect();
+
+        let mut out = Vec::with_capacity(active.len());
+        for e in active {
+            if result_id(e).is_some_and(|id| !call_ids.contains(&id)) {
+                continue;
+            }
+            out.push(Cow::Borrowed(e));
+            if e.role != ContextRole::Assistant {
+                continue;
+            }
+            for (id, name) in calls_of(e) {
+                if result_ids.contains(&id) {
+                    continue;
+                }
+                let mut stub = ContextEntry::from_text(
+                    ContextRole::ToolResult,
+                    "Result no longer in context. This call may already have run: verify \
+                     before repeating any side effect.",
+                );
+                stub.metadata = Some(ContextMetadata {
+                    tool_name: Some(name),
+                    tool_id: None,
+                    intent_id: None,
+                    tokens_estimated: None,
+                    tool_call_id: Some(id),
+                    assistant_tool_calls: None,
+                });
+                out.push(Cow::Owned(stub));
+            }
+        }
+        out
+    }
+
     /// Move entries between partitions.
     pub fn set_partition(&mut self, partition: ContextPartition) {
         // Set the partition for the most recent non-system entry
@@ -1637,6 +1714,69 @@ mod tests {
             notice.text().contains("11"),
             "Should show cumulative count 11, got: {}",
             notice.text()
+        );
+    }
+
+    /// Compaction split a parallel-call turn from its results: providers reject
+    /// the next request outright, which bricked the task for good.
+    #[test]
+    fn wire_entries_repairs_split_tool_pairs() {
+        let with_meta = |role, text: &str, call_id: Option<&str>, calls| {
+            let mut e = ContextEntry::from_text(role, text);
+            e.metadata = Some(ContextMetadata {
+                tool_name: None,
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: call_id.map(String::from),
+                assistant_tool_calls: calls,
+            });
+            e
+        };
+        let mut window = ContextWindow::new(100);
+        window.push(with_meta(
+            ContextRole::ToolResult,
+            "orphan",
+            Some("c"),
+            None,
+        ));
+        window.push(with_meta(
+            ContextRole::Assistant,
+            "calling a and b",
+            None,
+            Some(serde_json::json!([
+                {"id": "a", "tool_name": "file-reader"},
+                {"id": "b", "tool_name": "web-fetch"}
+            ])),
+        ));
+        window.push(with_meta(
+            ContextRole::ToolResult,
+            "a result",
+            Some("a"),
+            None,
+        ));
+
+        let wire = window.wire_entries();
+        let ids: Vec<(ContextRole, Option<String>)> = wire
+            .iter()
+            .map(|e| {
+                (
+                    e.role,
+                    e.metadata.as_ref().and_then(|m| m.tool_call_id.clone()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                (ContextRole::Assistant, None),
+                (ContextRole::ToolResult, Some("b".into())),
+                (ContextRole::ToolResult, Some("a".into())),
+            ]
+        );
+        assert_eq!(
+            wire[1].metadata.as_ref().unwrap().tool_name.as_deref(),
+            Some("web-fetch")
         );
     }
 

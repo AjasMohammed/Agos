@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -107,6 +107,9 @@ pub struct AgentConvo {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// How the thread was born: `"operator"` (UI/API) or `"dm"` (agent-message).
+    /// Rows written before the column existed read `"operator"`.
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -148,6 +151,35 @@ impl ConvoStore {
              CREATE INDEX IF NOT EXISTS idx_convo_turns_convo
                  ON convo_turns(convo_id, turn_number);",
         )?;
+
+        // Additive migration: `kind` marks how the thread was born ('operator'
+        // from the UI/API, 'dm' from an agent-message), `dm_key` is the
+        // canonical pair key that makes an agent-to-agent thread continuous,
+        // `dm_expires_at` is that session's wall-clock deadline. Probe-then-
+        // ALTER rather than a version table: the columns are additive and
+        // default-safe.
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(agent_convos)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        if !columns.iter().any(|c| c == "kind") {
+            conn.execute_batch(
+                "ALTER TABLE agent_convos ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator';",
+            )?;
+        }
+        if !columns.iter().any(|c| c == "dm_key") {
+            conn.execute_batch("ALTER TABLE agent_convos ADD COLUMN dm_key TEXT;")?;
+        }
+        if !columns.iter().any(|c| c == "dm_expires_at") {
+            conn.execute_batch("ALTER TABLE agent_convos ADD COLUMN dm_expires_at TEXT;")?;
+        }
+        // NOT unique: a pair accumulates one row per session. The lookup wants
+        // the newest row for a key, so index the key with the ordering column.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_convos_dm_key
+                 ON agent_convos(dm_key, updated_at DESC) WHERE dm_key IS NOT NULL;",
+        )?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             live_runs: Mutex::new(HashSet::new()),
@@ -164,7 +196,7 @@ impl ConvoStore {
     ///
     /// NOT called from [`Self::open`], and that placement is load-bearing: this
     /// cannot tell an orphan from another *live* process's in-flight convo, and
-    /// `agentos web serve` boots a second `Kernel` against the same data dir. A
+    /// a second `agentos start` boots another `Kernel` against the same data dir. A
     /// reconcile at open would wipe every running conversation before that second
     /// process failed its single-instance check and exited. Call it only once the
     /// bus socket bind has proved no other kernel is live.
@@ -205,7 +237,7 @@ impl ConvoStore {
     pub fn get_convo(&self, id: &str) -> Result<Option<AgentConvo>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, topic, participants, max_turns, status, created_at, updated_at
+            "SELECT id, topic, participants, max_turns, status, created_at, updated_at, kind
              FROM agent_convos WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -226,21 +258,25 @@ impl ConvoStore {
                 status: row.get(4)?,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
+                kind: row.get(7)?,
             }))
         } else {
             Ok(None)
         }
     }
 
-    pub fn list_convos(&self) -> Result<Vec<AgentConvo>, rusqlite::Error> {
+    /// Most-recent-first, capped at 100. `kind` filters to `"dm"` or
+    /// `"operator"`; `None` returns every conversation.
+    pub fn list_convos(&self, kind: Option<&str>) -> Result<Vec<AgentConvo>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, topic, participants, max_turns, status, created_at, updated_at
+            "SELECT id, topic, participants, max_turns, status, created_at, updated_at, kind
              FROM agent_convos
+             WHERE ?1 IS NULL OR kind = ?1
              ORDER BY updated_at DESC
              LIMIT 100",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![kind], |row| {
             let participants_json: String = row.get(2)?;
             let participants: Vec<String> = match serde_json::from_str(&participants_json) {
                 Ok(v) => v,
@@ -257,6 +293,7 @@ impl ConvoStore {
                 status: row.get(4)?,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
+                kind: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -293,6 +330,220 @@ impl ConvoStore {
         )?;
         tx.commit()?;
         Ok(turn_number as u32)
+    }
+
+    /// Canonical key for the one DM thread shared by a pair of agents,
+    /// order-independent.
+    ///
+    /// `|` is safe as a separator: `commands::agent::is_valid_agent_name` allows
+    /// only alphanumerics, `-`, `_` and `.`, so no name can contain it or forge
+    /// a key. Case is preserved — agent names match case-sensitively everywhere
+    /// else.
+    pub fn dm_key(a: &str, b: &str) -> String {
+        let mut names = [a, b];
+        names.sort_unstable();
+        format!("{}|{}", names[0], names[1])
+    }
+
+    /// True when this process has a live runner for `convo_id`.
+    ///
+    /// `claim_resume` refuses both for a live runner and for a row merely
+    /// stuck at `running`; callers that must tell those apart ask here.
+    pub fn is_live(&self, convo_id: &str) -> bool {
+        self.live_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(convo_id)
+    }
+
+    /// The pair's current DM session, opened on demand.
+    ///
+    /// Returns `(convo_id, created)`; `created` lets the caller skip
+    /// `claim_resume`, since a fresh row is already `running`.
+    ///
+    /// Reuse rules, in order:
+    ///  1. a session this process is actively running (`is_live`) — liveness
+    ///     beats expiry, or a second thread would open under a running loop;
+    ///  2. the newest session whose `dm_expires_at` is still in the future and
+    ///     which has not been closed;
+    ///  3. otherwise a new session.
+    ///
+    /// The SELECT and the INSERT run in one transaction on the single
+    /// `Mutex<Connection>`, so two simultaneous first messages cannot open two
+    /// sessions in-process.
+    ///
+    /// `dm_expires_at` is written once, here. It is never moved by a turn —
+    /// only an operator extension moves it (`extend_dm`).
+    pub fn find_or_create_dm(
+        &self,
+        a: &str,
+        b: &str,
+        max_turns: u32,
+        ttl_secs: u64,
+    ) -> Result<(String, bool), rusqlite::Error> {
+        let key = Self::dm_key(a, b);
+        let now = chrono::Utc::now();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+
+        let newest: Option<(String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT id, dm_expires_at, status FROM agent_convos
+                 WHERE dm_key = ?1 ORDER BY updated_at DESC LIMIT 1",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        if let Some((id, expires_at, status)) = newest {
+            let live = self
+                .live_runs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&id);
+            let unexpired = status == "running"
+                && expires_at
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_some_and(|t| t > now);
+            // A finished session inside its lifetime is still the pair's
+            // current session: `claim_resume` reopens it for more turns. Only
+            // the clock, or an explicit close, ends a session.
+            let reusable_complete = status == "complete"
+                && expires_at
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_some_and(|t| t > now);
+            if live || unexpired || reusable_complete {
+                tx.commit()?;
+                return Ok((id, false));
+            }
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let mut participants = [a, b];
+        participants.sort_unstable();
+        let participants_json = serde_json::to_string(&participants)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let expires_at = (now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339();
+        tx.execute(
+            "INSERT INTO agent_convos
+                 (id, topic, participants, max_turns, status, created_at, updated_at,
+                  kind, dm_key, dm_expires_at)
+             VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?5, 'dm', ?6, ?7)",
+            params![
+                id,
+                format!(
+                    "Direct messages between {} and {}",
+                    participants[0], participants[1]
+                ),
+                participants_json,
+                max_turns,
+                now.to_rfc3339(),
+                key,
+                expires_at
+            ],
+        )?;
+        tx.commit()?;
+        Ok((id, true))
+    }
+
+    /// One line about this pair's earlier sessions, for the prompt header of a
+    /// DM session. `None` for operator convos and for a pair's first session.
+    ///
+    /// Read by `convo_runner::run_convo` itself, so no call site gains a
+    /// parameter. Stable for the whole session, which keeps the prompt header
+    /// prefix-cacheable.
+    pub fn dm_history_note(&self, convo_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let key: Option<String> = conn
+            .query_row(
+                "SELECT dm_key FROM agent_convos WHERE id = ?1",
+                params![convo_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(key) = key else { return Ok(None) };
+
+        let (count, last): (i64, Option<String>) = conn.query_row(
+            "SELECT COUNT(*), MAX(updated_at) FROM agent_convos
+             WHERE dm_key = ?1 AND id != ?2",
+            params![key, convo_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if count == 0 {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Earlier sessions with this agent: {count}{}. \
+             Use memory-search if you need what was said.",
+            last.map(|t| format!(" (the last ended {t})"))
+                .unwrap_or_default()
+        )))
+    }
+
+    /// DM sessions whose clock has run out while they are still running.
+    ///
+    /// Only `running` rows matter: a `complete` / `stopped` / `error` session is
+    /// already over, and its lapsed deadline is enforced passively by
+    /// `find_or_create_dm`, which will not reuse it.
+    pub fn expired_running_dm_sessions(
+        &self,
+    ) -> Result<Vec<(String, Vec<String>)>, rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, participants FROM agent_convos
+             WHERE kind = 'dm' AND status = 'running'
+               AND dm_expires_at IS NOT NULL AND dm_expires_at <= ?1",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            let participants_json: String = row.get(1)?;
+            let participants: Vec<String> =
+                serde_json::from_str(&participants_json).unwrap_or_default();
+            Ok((row.get::<_, String>(0)?, participants))
+        })?;
+        rows.collect()
+    }
+
+    /// This convo's DM deadline, if it has one. Operator convos return `None`.
+    ///
+    /// Read as its own query rather than added to [`AgentConvo`]: that struct is
+    /// serialized onto the REST surface, and the deadline is only wanted by the
+    /// runner when it sizes the shared workspace's lifetime.
+    pub fn dm_deadline(
+        &self,
+        convo_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT dm_expires_at FROM agent_convos WHERE id = ?1",
+                params![convo_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(raw.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&chrono::Utc))
+        }))
+    }
+
+    /// Push a DM session's deadline out by `secs` from now.
+    ///
+    /// Used to grant an operator's extension, and to hold a session open while
+    /// the extension question is pending so the next sweep cannot ask twice.
+    pub fn extend_dm(&self, convo_id: &str, secs: u64) -> Result<(), rusqlite::Error> {
+        let until = (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE agent_convos SET dm_expires_at = ?1 WHERE id = ?2 AND dm_key IS NOT NULL",
+            params![until, convo_id],
+        )?;
+        Ok(())
     }
 
     /// Register a live runner for `convo_id`. `None` if one is already running in
@@ -539,5 +790,195 @@ mod resume_tests {
         drop(store.begin_run(&id).expect("runner"));
         assert_eq!(store.get_convo(&id).unwrap().unwrap().status, "error");
         assert_eq!(store.claim_resume(&id, 2).unwrap(), 2);
+    }
+
+    // ── DM sessions ──────────────────────────────────────────────────────
+
+    fn dm_store() -> (tempfile::TempDir, Arc<ConvoStore>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(ConvoStore::open(&dir.path().join("c.db")).expect("open"));
+        (dir, store)
+    }
+
+    #[test]
+    fn dm_key_is_order_independent() {
+        assert_eq!(
+            ConvoStore::dm_key("OSS", "Sandae"),
+            ConvoStore::dm_key("Sandae", "OSS")
+        );
+        assert_eq!(ConvoStore::dm_key("Sandae", "OSS"), "OSS|Sandae");
+    }
+
+    #[test]
+    fn find_or_create_dm_reuses_an_unexpired_session() {
+        let (_d, store) = dm_store();
+        let (first, created) = store.find_or_create_dm("Sandae", "OSS", 6, 3600).unwrap();
+        assert!(created);
+        // Swapped argument order must land on the same session.
+        let (second, created_again) = store.find_or_create_dm("OSS", "Sandae", 6, 3600).unwrap();
+        assert_eq!(first, second);
+        assert!(!created_again);
+
+        let convo = store.get_convo(&first).unwrap().unwrap();
+        assert_eq!(convo.kind, "dm");
+        assert_eq!(
+            convo.participants,
+            vec!["OSS".to_string(), "Sandae".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_expired_session_opens_a_new_one() {
+        let (_d, store) = dm_store();
+        let (first, _) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        let (second, created) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        assert_ne!(first, second);
+        assert!(created);
+        assert_eq!(store.list_convos(Some("dm")).unwrap().len(), 2);
+    }
+
+    /// Liveness beats expiry: a second thread must not open under a running loop.
+    #[test]
+    fn a_live_session_is_reused_even_when_expired() {
+        let (_d, store) = dm_store();
+        let (first, _) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        let _guard = store.begin_run(&first).expect("runner");
+        let (second, created) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        assert_eq!(first, second);
+        assert!(!created);
+    }
+
+    /// The deadline is a fixed lifetime — only an operator extension moves it.
+    #[test]
+    fn add_turn_leaves_the_deadline_alone() {
+        let (_d, store) = dm_store();
+        let (id, _) = store.find_or_create_dm("A", "B", 6, 3600).unwrap();
+        let before = dm_expires_at(&store, &id);
+        assert!(before.is_some());
+        for _ in 0..3 {
+            store.add_turn(&id, "A", "hello", 0).unwrap();
+        }
+        assert_eq!(dm_expires_at(&store, &id), before);
+
+        store.extend_dm(&id, 7200).unwrap();
+        assert_ne!(dm_expires_at(&store, &id), before);
+
+        // An operator convo has no dm_key, so it never gains a deadline.
+        let op = store
+            .create_convo("t", &["A".into(), "B".into()], 2)
+            .unwrap();
+        store.extend_dm(&op, 3600).unwrap();
+        assert_eq!(dm_expires_at(&store, &op), None);
+    }
+
+    fn dm_expires_at(store: &ConvoStore, id: &str) -> Option<String> {
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT dm_expires_at FROM agent_convos WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dm_and_operator_threads_coexist_and_filter() {
+        let (_d, store) = dm_store();
+        let op = store
+            .create_convo("debate", &["A".into(), "B".into()], 4)
+            .unwrap();
+        let (dm, _) = store.find_or_create_dm("A", "B", 6, 3600).unwrap();
+
+        assert_eq!(store.get_convo(&op).unwrap().unwrap().kind, "operator");
+        assert_eq!(store.list_convos(None).unwrap().len(), 2);
+
+        let dms = store.list_convos(Some("dm")).unwrap();
+        assert_eq!(dms.len(), 1);
+        assert_eq!(dms[0].id, dm);
+        let ops = store.list_convos(Some("operator")).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].id, op);
+    }
+
+    #[test]
+    fn dm_history_note_counts_earlier_sessions() {
+        let (_d, store) = dm_store();
+        let op = store
+            .create_convo("t", &["A".into(), "B".into()], 2)
+            .unwrap();
+        assert_eq!(store.dm_history_note(&op).unwrap(), None);
+
+        let (first, _) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        // A pair's first session has nothing to point back to.
+        assert_eq!(store.dm_history_note(&first).unwrap(), None);
+
+        let (second, _) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        let note = store.dm_history_note(&second).unwrap().expect("note");
+        assert!(
+            note.contains("Earlier sessions with this agent: 1"),
+            "{note}"
+        );
+
+        let (third, _) = store.find_or_create_dm("A", "B", 6, 0).unwrap();
+        let note = store.dm_history_note(&third).unwrap().expect("note");
+        assert!(
+            note.contains("Earlier sessions with this agent: 2"),
+            "{note}"
+        );
+        assert!(note.contains("memory-search"), "{note}");
+    }
+
+    #[test]
+    fn expired_running_sessions_are_swept_but_finished_ones_are_not() {
+        let (_d, store) = dm_store();
+        let (live, _) = store.find_or_create_dm("A", "B", 6, 3600).unwrap();
+        let (lapsed, _) = store.find_or_create_dm("C", "D", 6, 0).unwrap();
+        let (done, _) = store.find_or_create_dm("E", "F", 6, 0).unwrap();
+        store.set_status(&done, "complete").unwrap();
+        // Operator convos have no deadline and must never be swept.
+        store
+            .create_convo("t", &["A".into(), "B".into()], 2)
+            .unwrap();
+
+        let expired = store.expired_running_dm_sessions().unwrap();
+        let ids: Vec<_> = expired.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec![lapsed.as_str()]);
+        assert!(!ids.contains(&live.as_str()));
+
+        let (_, participants) = &expired[0];
+        assert_eq!(participants, &vec!["C".to_string(), "D".to_string()]);
+
+        // Extending it takes it back out of the sweep.
+        store.extend_dm(&lapsed, 3600).unwrap();
+        assert!(store.expired_running_dm_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_live_tracks_begin_run() {
+        let (_d, store) = dm_store();
+        let (id, _) = store.find_or_create_dm("A", "B", 6, 3600).unwrap();
+        assert!(!store.is_live(&id));
+        {
+            let _guard = store.begin_run(&id).expect("runner");
+            assert!(store.is_live(&id));
+        }
+        assert!(!store.is_live(&id));
+    }
+
+    /// Re-opening an existing database must not lose rows or re-run the ALTERs.
+    #[test]
+    fn migration_is_idempotent_on_an_existing_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("c.db");
+        let id = {
+            let store = ConvoStore::open(&path).expect("open");
+            store
+                .create_convo("t", &["A".to_string(), "B".to_string()], 2)
+                .expect("create")
+        };
+        let store = ConvoStore::open(&path).expect("reopen");
+        let convo = store.get_convo(&id).unwrap().unwrap();
+        assert_eq!(convo.kind, "operator");
+        assert_eq!(convo.topic, "t");
     }
 }

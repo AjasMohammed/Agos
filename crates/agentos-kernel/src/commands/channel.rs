@@ -649,6 +649,9 @@ impl Kernel {
         }
 
         self.channel_listener_registry.stop(&id).await;
+        // Slack/Discord/WhatsApp inbound adapters live in the ChannelManager;
+        // without this they kept delivering after a disconnect.
+        self.channel_manager.deregister(&id.to_string()).await;
         // Remove the delivery adapter from NotificationRouter so outbound deliveries
         // stop and the adapter Vec doesn't grow unboundedly on repeated connect/disconnect.
         self.notification_router
@@ -659,6 +662,19 @@ impl Kernel {
             return KernelResponse::Error {
                 message: format!("Failed to deregister channel: {e}"),
             };
+        }
+
+        // Drop this channel's notification routing rules — the channel is gone,
+        // and stale rows would otherwise accumulate across connect/disconnect
+        // cycles and silently apply to a future channel that reuses the id.
+        // (The channel *update* path deliberately keeps them: same id, same
+        // channel, rebuilt adapter.)
+        if let Err(e) = self
+            .notification_routes
+            .forget_channel(&id.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, channel = %id, "Failed to drop notification routes for disconnected channel");
         }
         self.refresh_connected_channels_snapshot().await;
 

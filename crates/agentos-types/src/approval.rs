@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 /// | Mode        | ReadonlyScoped | ReadonlyExternal | WriteAgentState | WriteScoped | ExecCapable | ControlPlane | Interactive |
 /// |-------------|:--------------:|:----------------:|:---------------:|:-----------:|:-----------:|:------------:|:-----------:|
 /// | `Auto`      | allow          | allow            | allow           | allow       | allow       | **prompt**   | allow       |
-/// | `AskEdit`   | allow          | allow            | allow           | prompt      | prompt      | prompt       | prompt      |
-/// | `AskAlways` | allow          | prompt           | prompt          | prompt      | prompt      | prompt       | prompt      |
-/// | `Deny`      | allow          | deny             | deny            | deny        | deny        | deny         | deny        |
+/// | `AskEdit`   | allow          | allow            | allow           | prompt      | prompt      | prompt       | allow       |
+/// | `AskAlways` | allow          | prompt           | prompt          | prompt      | prompt      | prompt       | allow       |
+/// | `Deny`      | allow          | deny             | deny            | deny        | deny        | deny         | allow       |
 ///
 /// `ControlPlane` always prompts under non-`Deny` modes — kernel admin actions
 /// must surface even when the operator has opted into auto-approval.

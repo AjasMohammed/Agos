@@ -29,6 +29,7 @@ pub mod context_injector;
 pub mod context_memory_store;
 pub mod convo_runner;
 pub mod convo_store;
+pub mod convo_workspace;
 pub mod core_manifests;
 pub mod cost_tracker;
 pub mod delivery_router;
@@ -68,6 +69,7 @@ pub mod memory_extraction;
 pub mod metrics;
 pub mod network_safety;
 pub mod notification_router;
+pub mod notification_routes;
 pub mod oauth_flow;
 pub mod org_store;
 pub mod otel_exporter;
@@ -76,10 +78,12 @@ pub mod pairing_store;
 pub mod personalization_feedback;
 pub mod plugin_registry;
 pub mod policy_engine;
+pub(crate) mod procedure_compile;
 pub mod rate_limit;
 pub mod recommendation_engine;
 pub mod recommendations_store;
 pub mod resource_arbiter;
+pub mod resource_guard;
 pub mod retrieval_gate;
 pub mod risk_classifier;
 pub mod router;
@@ -133,6 +137,7 @@ pub use context_compiler::ContextCompiler;
 pub use kernel::{
     is_unreplayable_assistant_turn, resolve_boot_vault_passphrase, ChatStreamEvent, Kernel,
 };
+pub use notification_routes::{RouteMatrix, RouteMode};
 pub use otel_exporter::OtelExporter;
 pub use retrieval_gate::{
     IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,

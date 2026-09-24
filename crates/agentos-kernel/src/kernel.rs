@@ -877,7 +877,15 @@ pub struct Kernel {
     /// (see `KernelMcpExecutor::execute_with_hooks`).
     ///
     /// Maintained by `convo_runner::run_convo` around each turn's inference.
-    pub convo_turn_agents: Arc<RwLock<std::collections::HashSet<AgentID>>>,
+    /// Agents currently taking a conversation turn → that turn's state.
+    ///
+    /// Carries the shared workspace path and whether this turn has already
+    /// interrupted the operator, because the claude-code MCP gateway executes
+    /// tools outside the chat loop and can see neither `ChatTurnScope` nor the
+    /// loop-local budget. Without it the per-turn limit fails open for that one
+    /// adapter class — the same shape of hole the tool-withhold check in
+    /// `claude_mcp_gateway` exists to close.
+    pub convo_turn_agents: Arc<RwLock<HashMap<AgentID, ConvoTurnState>>>,
     /// Onboarding tasks of newly connected agents that have not been announced
     /// yet, keyed by task ID with the pending `AgentAdded` payload.
     ///
@@ -912,6 +920,12 @@ pub struct Kernel {
     /// Unified notification router — dispatches UserMessages to delivery adapters
     /// and persists them to the user inbox.
     pub notification_router: Arc<crate::notification_router::NotificationRouter>,
+    /// Operator-controlled routing matrix: which notification event kinds
+    /// reach which delivery channels.
+    pub notification_routes: Arc<crate::notification_routes::RouteMatrix>,
+    /// Live control-panel WebSocket connections. Incremented by the API's WS
+    /// layer; read by the routing matrix to resolve `when_away` rules.
+    pub panel_sessions: Arc<std::sync::atomic::AtomicUsize>,
     /// Agent-facing notification inbox for scheduled/event/background deliveries.
     pub agent_inbox: Arc<crate::agent_inbox::AgentInbox>,
     /// Agent-facing peer message inbox.
@@ -953,6 +967,17 @@ pub struct Kernel {
     /// and reading it per use means those gateways start working the moment
     /// wiring happens.
     pub(crate) self_weak: Arc<std::sync::Mutex<Option<Weak<Kernel>>>>,
+    /// Conversation ids whose turn loop should start. Sent from the DM path in
+    /// `kernel_action`, drained by the convo-runner pump spawned in
+    /// `wire_inbound_chat_bridge`.
+    ///
+    /// A channel rather than a direct `tokio::spawn` because the runner calls
+    /// back into tool dispatch, which can reach `append_dm_turn` again — a
+    /// cycle rustc cannot compute `Send` through. The pump sits outside that
+    /// cycle, so the spawned future is concrete.
+    pub(crate) convo_run_tx: tokio::sync::mpsc::Sender<String>,
+    /// Receiver half of [`Self::convo_run_tx`], taken once at wiring.
+    pub(crate) pending_convo_run_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
     /// Pending receiver consumed once by `wire_inbound_chat_bridge` to spawn the InboundRouter.
     /// Stored here so the router is guaranteed to start after the bridge is wired.
     pub(crate) pending_inbound_rx: std::sync::Mutex<
@@ -1254,6 +1279,15 @@ pub const CONVO_TURN_MAX_TOOL_ITERATIONS: u32 = 8;
 /// Deliberately NOT withheld: memory, scratchpad, search, file and HAL tools. A
 /// convo turn may look things up; it may not reach out.
 ///
+/// `ask-user` was on this list until 2026-09-21 and is deliberately off it now.
+/// It differs from every entry above in direction: it has exactly one
+/// destination — the operator, who is already watching this transcript — it
+/// needs no chat stream (`ask_user_blocking` goes through the notification
+/// inbox), and it is bounded by a timeout with an `auto_denied` default. Two
+/// agents deadlocked over a permission neither could grant, and the one call
+/// that could have ended it was refused by this list. The per-turn budget in
+/// both chat loops keeps it from becoming a transport.
+///
 /// KNOWN CEILING: this gates tools by name, so an agent holding `process.exec`
 /// can still reach the outside world through `shell-exec` (curl, mail), and
 /// `http-client` can POST despite its `readonly_external` class. The list stops
@@ -1266,10 +1300,10 @@ pub const CONVO_WITHHELD_TOOL_NAMES: &[&str] = &[
     "a2a-delegate",
     "notify-user",
     "channel-send",
-    "ask-user",
     // Spawning and delegation.
     "spawn-agent",
-    "spawn-async",
+    "task-spawn-async",
+    "start-conversation",
     "task-delegate",
     "await-agents",
     "poll-agent",
@@ -1294,12 +1328,41 @@ pub const CONVO_WITHHELD_TOOL_NAMES: &[&str] = &[
 /// `Default` is deliberately NOT derived: this is a containment type, and a
 /// derived default would silently hand `Full` to any future struct field or
 /// `..Default::default()`. Every construction site states which it means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatTurnScope {
     /// Ordinary chat: the agent's full permitted tool set.
     Full,
     /// One turn of a multi-agent conversation.
-    ConvoTurn,
+    ConvoTurn {
+        /// The conversation's shared directory, when one could be minted.
+        /// Every participant sees the same path: it is the only place either
+        /// can put a file the other is able to open, since agent homes are
+        /// private. Rendered into the system prompt and named by path-refusal
+        /// messages. `None` = this turn has no shared workspace.
+        shared_dir: Option<PathBuf>,
+    },
+}
+
+/// Per-agent state for the conversation turn currently running.
+#[derive(Debug, Clone, Default)]
+pub struct ConvoTurnState {
+    /// The conversation's shared workspace, when one was minted.
+    pub shared_dir: Option<std::path::PathBuf>,
+    /// Whether this turn has already parked on the operator (`ask-user` or
+    /// `workspace-request`). One per turn.
+    pub operator_interrupted: bool,
+}
+
+/// True when a conversation turn may not call `tool_name`.
+///
+/// Free function because the claude-code MCP gateway has to ask the question
+/// without holding a scope value.
+///
+/// Normalized like `is_tool_blocked_for_schedule`: `ToolRunner::execute`
+/// auto-corrects `_` → `-` at dispatch, so matching the raw name alone would
+/// let `agent_message` past this gate and then run `agent-message`.
+pub fn convo_withholds(tool_name: &str) -> bool {
+    CONVO_WITHHELD_TOOL_NAMES.contains(&tool_name.replace('_', "-").as_str())
 }
 
 impl ChatTurnScope {
@@ -1309,11 +1372,16 @@ impl ChatTurnScope {
     /// tool from the offered array is not enforcement, because models routinely
     /// emit names that were never offered.
     pub fn withholds(&self, tool_name: &str) -> bool {
-        // Normalized like `is_tool_blocked_for_schedule`: `ToolRunner::execute`
-        // auto-corrects `_` → `-` at dispatch, so matching the raw name alone
-        // would let `agent_message` past this gate and then run `agent-message`.
-        matches!(self, Self::ConvoTurn)
-            && CONVO_WITHHELD_TOOL_NAMES.contains(&tool_name.replace('_', "-").as_str())
+        matches!(self, Self::ConvoTurn { .. }) && convo_withholds(tool_name)
+    }
+
+    /// The conversation's shared directory, for the prompt block and for the
+    /// remedy hint on a path refusal. `None` outside a convo turn.
+    pub fn shared_dir(&self) -> Option<&Path> {
+        match self {
+            Self::Full => None,
+            Self::ConvoTurn { shared_dir } => shared_dir.as_deref(),
+        }
     }
 
     /// Narrow the configured per-turn iteration cap for this scope. Never widens
@@ -1321,7 +1389,7 @@ impl ChatTurnScope {
     pub fn max_tool_iterations(&self, configured: u32) -> u32 {
         match self {
             Self::Full => configured,
-            Self::ConvoTurn => configured.min(CONVO_TURN_MAX_TOOL_ITERATIONS),
+            Self::ConvoTurn { .. } => configured.min(CONVO_TURN_MAX_TOOL_ITERATIONS),
         }
     }
 
@@ -1330,6 +1398,19 @@ impl ChatTurnScope {
     /// It has to say what to do *instead*, or the model spends the remaining
     /// iterations retrying the same call.
     pub fn withheld_tool_message(&self, tool_name: &str) -> String {
+        // Since the DM-session reroute this is literally true for
+        // `agent-message`: the other participant is already in this thread and
+        // the reply is delivered as its next turn.
+        if tool_name.replace('_', "-") == "agent-message" {
+            // Keeps the canonical "not available inside an agent conversation"
+            // marker every withheld-tool refusal carries, then says the part
+            // that is specific to this one.
+            return "Tool 'agent-message' is not available inside an agent conversation — \
+                    you are already in a conversation with this agent. Reply with plain \
+                    text instead; your reply is delivered to them as the next turn of \
+                    this thread."
+                .to_string();
+        }
         format!(
             "Tool '{tool_name}' is not available inside an agent conversation. \
              Reply with plain text instead — your reply is delivered to the other \
@@ -1389,6 +1470,33 @@ fn chat_intent_flag(t: IntentType) -> IntentTypeFlag {
 
 pub const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
     "_(no response from model — the provider returned an empty answer; please retry)_";
+
+/// The whole turn's user-visible text, not just the last iteration's.
+///
+/// A tool-using turn speaks once per iteration ("let me check…", then the
+/// answer). Both chat loops stream every piece to the client but used to
+/// persist only the iteration that ended the loop, so the transcript kept the
+/// last sentence and dropped everything the agent said before it (2026-09-20:
+/// an agent that spoke five times showed one line on refetch).
+///
+/// `note` is the degraded-exit suffix (iteration cap, circuit breaker, …).
+fn turn_answer(spoken: &[String], note: Option<&str>) -> String {
+    let body = spoken
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let body = if body.is_empty() {
+        EMPTY_LLM_ANSWER_PLACEHOLDER
+    } else {
+        &body
+    };
+    match note {
+        Some(note) => format!("{body}\n\n{note}"),
+        None => body.to_string(),
+    }
+}
 
 /// Prefix of the assistant row `channel_chat_bridge` stores for a failed turn.
 pub const FAILED_TURN_PREFIX: &str = "(turn failed:";
@@ -1669,6 +1777,49 @@ pub(crate) fn tool_result_is_error(result: &serde_json::Value) -> bool {
     result.get("error").is_some_and(|e| !e.is_null())
 }
 
+/// Install every `*.yaml` under `dir` that does not already occupy its name.
+///
+/// Split out of [`Kernel::seed_starter_pipelines`] so it can be tested without
+/// booting a kernel. Returns how many were newly installed; a file that cannot
+/// be read or parsed is logged and skipped rather than failing the boot.
+fn install_starter_pipelines(dir: &Path, store: &agentos_pipeline::PipelineStore) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No seeded templates (source build, or the operator deleted them).
+        Err(_) => return 0,
+    };
+    let mut installed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+        let yaml = match std::fs::read_to_string(&path) {
+            Ok(yaml) => yaml,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Unreadable starter pipeline");
+                continue;
+            }
+        };
+        let definition = match agentos_pipeline::PipelineDefinition::from_yaml(&yaml) {
+            Ok(definition) => definition,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Invalid starter pipeline");
+                continue;
+            }
+        };
+        match store.create_pipeline(&definition.name, &definition.version, &yaml) {
+            Ok(true) => installed += 1,
+            // Name already taken — the operator's own copy wins.
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(pipeline = %definition.name, error = %e, "Failed to install starter pipeline");
+            }
+        }
+    }
+    installed
+}
+
 impl Kernel {
     /// Escalations raised for `agent_id`, as an `EscalationQuery` the
     /// `escalation-status` tool can read.
@@ -1814,6 +1965,57 @@ impl Kernel {
             .collect()
     }
 
+    /// Skills this agent may load, for the system prompt's `## Skills` block.
+    ///
+    /// Filtered by the same `skill:<name>/:x` grant `skill-prompt` and
+    /// `agent-manual section=skills` enforce, so the prompt never advertises a
+    /// skill the agent would be refused. Sorted by name: the block sits inside
+    /// the Anthropic prompt-cache prefix, and snapshot order is not stable.
+    pub(crate) async fn skill_hints_for(
+        &self,
+        permissions: &agentos_types::PermissionSet,
+    ) -> Vec<crate::system_prompt::SkillHint> {
+        let guard = self.installed_skills_snapshot.read().await;
+        let mut hints: Vec<crate::system_prompt::SkillHint> = guard
+            .iter()
+            .filter(|s| {
+                permissions.check(
+                    &agentos_types::skill_permission_resource(&s.name),
+                    agentos_types::PermissionOp::Execute,
+                )
+            })
+            .map(|s| crate::system_prompt::SkillHint {
+                name: s.name.clone(),
+                description: s.description.clone(),
+            })
+            .collect();
+        hints.sort_by(|a, b| a.name.cmp(&b.name));
+        hints
+    }
+
+    /// Resolve a configured skill directory.
+    ///
+    /// A relative path (the shipped default, `skills/core`) resolves against
+    /// the *asset root* — the parent of `tools.data_dir`, which is where
+    /// `agentos-cli` extracts the embedded `config/`, `skills/core/` and
+    /// `plugins/core/` bundles (see `embedded::extract_assets_if_needed`, and
+    /// the identical `parent()` used for plugin discovery). Resolving against
+    /// the process cwd instead made the loaded set depend on where the kernel
+    /// happened to be started from. Absolute paths are used verbatim.
+    pub(crate) fn resolve_skill_dir(data_dir: &Path, configured: &str) -> PathBuf {
+        let p = Path::new(configured);
+        if p.is_absolute() {
+            return p.to_path_buf();
+        }
+        // An empty parent (`data_dir` is a bare relative name) would put us
+        // back on a cwd-relative path, which is the bug being fixed.
+        let root = match data_dir.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => data_dir,
+        };
+        root.join(p)
+    }
+
     /// Refresh the agent-manual's installed-skills snapshot from the live
     /// `SkillRegistry`. Called from `cmd_skill_install` / `cmd_skill_remove`
     /// so the manual's `skills` section reflects reality without the manual
@@ -1833,6 +2035,35 @@ impl Kernel {
     /// Called once during `boot()` after the kernel struct is constructed.  For each
     /// active channel in `UserChannelRegistry`, the corresponding delivery adapter is
     /// rebuilt (credentials re-fetched from vault) and its listener task is started.
+    /// Install the starter pipeline templates the CLI seeds into
+    /// `<data_dir>/../pipelines/core/`, so the Pipelines list is not empty on a
+    /// fresh install and an operator can read a working definition before
+    /// writing one.
+    ///
+    /// Uses `create_pipeline`, which fails on the `name` primary key rather than
+    /// replacing: a template the operator has since edited and re-installed
+    /// under the same name is never overwritten by the shipped copy. A template
+    /// they *removed* does come back on the next boot — the cost of having no
+    /// tombstone, and `pipeline remove` still works until then.
+    ///
+    /// A malformed or unreadable file is logged and skipped; boot never fails
+    /// over a template.
+    async fn seed_starter_pipelines(&self) {
+        let base = self.data_dir.parent().unwrap_or(&self.data_dir);
+        let dir = base.join("pipelines/core");
+        let store = self.pipeline_engine.store_arc();
+
+        // Directory walk plus SQLite writes — off the async runtime.
+        let installed =
+            tokio::task::spawn_blocking(move || install_starter_pipelines(&dir, &store))
+                .await
+                .unwrap_or(0);
+
+        if installed > 0 {
+            tracing::info!("Installed {} starter pipelines", installed);
+        }
+    }
+
     async fn restore_channels(&self) {
         // Snapshot before any listener starts, so a message arriving during boot
         // cannot be mistaken for one the previous kernel died on.
@@ -2249,7 +2480,7 @@ impl Kernel {
         &self,
         agent_id: &AgentID,
         session_id: Option<&str>,
-        scope: ChatTurnScope,
+        scope: &ChatTurnScope,
     ) -> Vec<ToolManifest> {
         const CHAT_MANIFEST_EXTRA_BUDGET: usize = 25;
         // Floor on usage-rank score to suppress boundary churn at the cap edge.
@@ -2511,18 +2742,56 @@ impl Kernel {
     ///
     /// Read by the claude-code MCP gateway, whose tool calls bypass the chat
     /// loop entirely and therefore cannot see the loop's `ChatTurnScope`.
-    pub async fn set_convo_turn(&self, agent_id: AgentID, active: bool) {
+    pub async fn set_convo_turn(
+        &self,
+        agent_id: AgentID,
+        active: Option<Option<std::path::PathBuf>>,
+    ) {
         let mut guard = self.convo_turn_agents.write().await;
-        if active {
-            guard.insert(agent_id);
-        } else {
-            guard.remove(&agent_id);
+        match active {
+            Some(shared_dir) => {
+                guard.insert(
+                    agent_id,
+                    ConvoTurnState {
+                        shared_dir,
+                        operator_interrupted: false,
+                    },
+                );
+            }
+            None => {
+                guard.remove(&agent_id);
+            }
         }
     }
 
     /// True while `agent_id` is taking a conversation turn.
     pub async fn is_in_convo_turn(&self, agent_id: &AgentID) -> bool {
-        self.convo_turn_agents.read().await.contains(agent_id)
+        self.convo_turn_agents.read().await.contains_key(agent_id)
+    }
+
+    /// The conversation shared workspace for an agent mid-turn, for callers
+    /// that execute outside the chat loop and so never see `ChatTurnScope`.
+    pub async fn convo_turn_shared_dir(&self, agent_id: &AgentID) -> Option<std::path::PathBuf> {
+        self.convo_turn_agents
+            .read()
+            .await
+            .get(agent_id)
+            .and_then(|s| s.shared_dir.clone())
+    }
+
+    /// Claim this turn's single operator interruption. `true` = the caller may
+    /// ask; `false` = something already did. Outside a convo turn there is no
+    /// budget and this always returns `true`.
+    ///
+    /// One per turn, shared by `ask-user` and `workspace-request`: both park the
+    /// turn on a human, and a parked turn holds the conversation, its status and
+    /// the LLM slot. Volume is not the only cost — occupancy is.
+    pub async fn claim_operator_interruption(&self, agent_id: &AgentID) -> bool {
+        let mut guard = self.convo_turn_agents.write().await;
+        match guard.get_mut(agent_id) {
+            Some(state) => !std::mem::replace(&mut state.operator_interrupted, true),
+            None => true,
+        }
     }
 
     /// Reset a claude-code agent's gateway tool-call buffer at the start of a
@@ -2579,7 +2848,7 @@ impl Kernel {
         tool_name: &str,
         payload: &serde_json::Value,
         result_str: &str,
-    ) -> String {
+    ) -> (String, bool) {
         use crate::injection_scanner::ThreatLevel;
 
         let scan = self.injection_scanner.scan(result_str);
@@ -2648,7 +2917,10 @@ impl Kernel {
             .await;
         }
 
-        chat_taint_envelope(tool_name, result_str, &scan)
+        // `true` = the scanner replaced the payload wholesale, so the caller must
+        // not append an elision notice claiming its fields are still present.
+        let blocked = scan.max_threat == Some(ThreatLevel::High);
+        (chat_taint_envelope(tool_name, result_str, &scan), blocked)
     }
 
     /// Pre-inference cost gate for the chat paths — the `validate_model` +
@@ -2830,7 +3102,7 @@ impl Kernel {
 
         // Build system prompt from the canonical builder — same structure as task execution.
         let chat_candidates = self
-            .build_chat_tool_manifests(&agent_id, session_id, scope)
+            .build_chat_tool_manifests(&agent_id, session_id, &scope)
             .await;
         // The claude-code gateway ignores the native array — skip ranking.
         let (mut llm_tool_manifests, mut deferred_pool) = if llm.uses_tool_gateway() {
@@ -2852,9 +3124,20 @@ impl Kernel {
                     .collect(),
                 Err(_) => Vec::new(),
             };
+        // Same grant filter the skill tools enforce. `agent_permissions` is
+        // already the effective set (direct + role grants + denies), so a
+        // skill granted through a role counts and a scoped-out one does not.
+        let chat_skill_hints = self.skill_hints_for(&agent_permissions).await;
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
+                agent_home: agentos_tools::traits::agent_home_dir(
+                    &self.data_dir,
+                    Some(agent_name),
+                    &agent_id,
+                )
+                .to_string_lossy()
+                .into_owned(),
                 agent_description,
                 agent_roles,
                 custom_instructions: agent_system_prompt,
@@ -2867,7 +3150,9 @@ impl Kernel {
                 granted_folders: crate::system_prompt::GrantedFolders::from_paths(
                     &self.workspace_paths_for_agent(&agent_id),
                 ),
+                shared_workspace: scope.shared_dir().map(|p| p.to_string_lossy().into_owned()),
                 unattended: false,
+                skills: chat_skill_hints,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -2984,6 +3269,17 @@ impl Kernel {
         const REPEAT_TOOL_ERROR_LIMIT: u32 = 1_000_000;
         const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 1_000_000;
         const DEDUP_STREAK_LIMIT: u32 = 1_000_000;
+        // Re-armed for conversation turns only. Ordinary chat keeps the
+        // disabled threshold above and leans on the iteration cap; a convo turn
+        // has 8 iterations and owes the transcript one utterance, so three
+        // identical failures ARE its budget. On 2026-09-21 four convo turns
+        // ended on "Maximum tool call limit reached", every one of them
+        // re-probing a path that could not resolve — the dedup cache never
+        // catches that, because it replays successes, not failures.
+        let repeat_tool_error_limit: u32 = match scope {
+            ChatTurnScope::Full => REPEAT_TOOL_ERROR_LIMIT,
+            ChatTurnScope::ConvoTurn { .. } => 3,
+        };
         let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
             std::collections::HashMap::new();
         let mut empty_text_streak_signature: Option<String> = None;
@@ -3011,6 +3307,9 @@ impl Kernel {
         let mut executed_tool_calls: ChatSessionDedupCache = HashMap::new();
         let mut consecutive_dedup_count: u32 = 0;
         const SESSION_DEDUP_CACHE_CAP: usize = 128;
+        // One operator question per conversation turn. Unbounded, a parked pair
+        // could open a blocking question every iteration and turn the inbox
+        // into their private transport.
 
         // ONE task id for the whole turn, used by everything: episodic rows,
         // TaskStart/TaskEnd hooks, the background review, the capability token,
@@ -3027,19 +3326,20 @@ impl Kernel {
         // see `chat_turn_end`.
         let mut turn_degraded = false;
         let mut empty_answer_retried = false;
-        // W3: `visible_text` is iteration-scoped, and unlike the streaming path
-        // nothing has reached the user yet — the returned `final_answer` is the
-        // turn's only output. Keep the last non-empty one so a mid-turn bail
-        // reports the answer the model already produced instead of the
-        // "provider returned an empty answer; please retry" placeholder.
-        let mut last_visible_text = String::new();
+        // Every iteration's user-visible text, in order. `visible_text` is
+        // iteration-scoped and the returned `final_answer` is this path's only
+        // output, so a turn that speaks between tool calls has to carry all of
+        // it — keeping just the last piece dropped everything the agent said
+        // earlier in the turn (2026-09-20). Also what a mid-turn bail reports,
+        // instead of the "provider returned an empty answer" placeholder.
+        let mut spoken: Vec<String> = Vec::new();
         self.chat_turn_begin(
             agent_id,
             turn_task_id,
             turn_trace_id,
             new_message,
             session_id,
-            scope,
+            &scope,
         )
         .await?;
 
@@ -3063,10 +3363,7 @@ impl Kernel {
                 // nothing to lose, still fails hard.
                 if iterations > 1 {
                     turn_degraded = true;
-                    if last_visible_text.trim().is_empty() {
-                        break format!("{}\n\n[Note: {}]", EMPTY_LLM_ANSWER_PLACEHOLDER, msg);
-                    }
-                    break format!("{}\n\n[Note: {}]", last_visible_text, msg);
+                    break turn_answer(&spoken, Some(&format!("[Note: {msg}]")));
                 }
                 self.chat_turn_failed(
                     agent_id,
@@ -3153,7 +3450,7 @@ impl Kernel {
             let visible_text =
                 self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
             if !visible_text.trim().is_empty() {
-                last_visible_text = visible_text.clone();
+                spoken.push(visible_text.clone());
             }
 
             // Fold in any tool calls the claude-code subprocess made via the MCP
@@ -3229,17 +3526,7 @@ impl Kernel {
 
             if iterations >= chat_max_tool_iterations {
                 turn_degraded = true;
-                let trimmed = visible_text.trim();
-                if trimmed.is_empty() {
-                    break format!(
-                        "{}\n\n[Note: Maximum tool call limit reached.]",
-                        EMPTY_LLM_ANSWER_PLACEHOLDER
-                    );
-                }
-                break format!(
-                    "{}\n\n[Note: Maximum tool call limit reached.]",
-                    visible_text
-                );
+                break turn_answer(&spoken, Some("[Note: Maximum tool call limit reached.]"));
             }
 
             // Reset the meta-tool streak when the model produces real
@@ -3300,11 +3587,11 @@ impl Kernel {
                             "Aborting chat loop: model stuck calling same tool(s) with no text"
                         );
                         turn_degraded = true;
-                        break format!(
-                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
-                            EMPTY_LLM_ANSWER_PLACEHOLDER,
-                            signature,
-                            empty_text_streak_count,
+                        break turn_answer(
+                            &spoken,
+                            Some(&format!(
+                                "[Note: aborted — model called {signature} {empty_text_streak_count}x with no text. Likely stuck. Try rephrasing or use a stronger model.]"
+                            )),
                         );
                     }
                 } else {
@@ -3334,10 +3621,11 @@ impl Kernel {
                             "Aborting chat loop: meta-tool discovery streak exceeded"
                         );
                         turn_degraded = true;
-                        break format!(
-                            "{}\n\n[Note: aborted — model spent {} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]",
-                            EMPTY_LLM_ANSWER_PLACEHOLDER,
-                            meta_tool_streak_count,
+                        break turn_answer(
+                            &spoken,
+                            Some(&format!(
+                                "[Note: aborted — model spent {meta_tool_streak_count} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]"
+                            )),
                         );
                     }
                 } else {
@@ -3569,6 +3857,9 @@ impl Kernel {
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
                         tool_categories: None,
+                        // Named by path refusals: an agent told only "not found"
+                        // retries; one told where the shared workspace is moves.
+                        shared_dir: scope.shared_dir().map(std::path::Path::to_path_buf),
                     };
 
                     let start = std::time::Instant::now();
@@ -3578,7 +3869,31 @@ impl Kernel {
                     // call it is not allowed to make either. Enforced here and not
                     // only by omission from the offered manifest list, because
                     // models emit names that were never offered.
-                    let mut tool_result = if scope.withholds(tool_name) {
+                    // One operator interruption per conversation turn, shared by
+                    // `ask-user` and `workspace-request`. Both park the turn on
+                    // a human, and a parked turn holds the conversation, its
+                    // status and the LLM slot — volume is not the only cost.
+                    // Claimed through the kernel so the claude-code gateway,
+                    // which never sees this loop, spends the same budget.
+                    let operator_interruption = matches!(scope, ChatTurnScope::ConvoTurn { .. })
+                        && matches!(
+                            tool_name.replace('_', "-").as_str(),
+                            "ask-user" | "workspace-request"
+                        );
+                    let mut tool_result = if operator_interruption
+                        && !self.claim_operator_interruption(&agent_id).await
+                    {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            agent_id = %agent_id,
+                            "Second operator interruption in one convo turn refused"
+                        );
+                        serde_json::json!({
+                            "error": "You already interrupted the operator once this turn. \
+                                      Their answer, or the timeout, arrives before your next turn — \
+                                      continue with what you have."
+                        })
+                    } else if scope.withholds(tool_name) {
                         tracing::warn!(
                             tool = %tool_name,
                             ?scope,
@@ -3828,7 +4143,7 @@ impl Kernel {
                         let key = (tool_name.clone(), err_sig.clone());
                         let count = repeated_tool_errors.entry(key).or_insert(0);
                         *count += 1;
-                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                        if *count >= repeat_tool_error_limit {
                             repeat_error_abort = Some(format!(
                                 "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
                                 tool_name, count, err_sig
@@ -3845,25 +4160,38 @@ impl Kernel {
                         duration_ms,
                     });
 
-                    // Truncate large tool results to 4 KB (char-boundary safe).
-                    let result_str = {
-                        let full = serde_json::to_string_pretty(&tool_result).unwrap_or_default();
-                        if full.len() > 4096 {
-                            let mut boundary = 4096;
-                            while boundary > 0 && !full.is_char_boundary(boundary) {
-                                boundary -= 1;
-                            }
-                            format!("{}...[truncated]", &full[..boundary])
-                        } else {
-                            full
-                        }
-                    };
+                    // Reduce oversized results by value size, not byte offset.
+                    // A head-cut of pretty JSON keeps whatever the serializer
+                    // emitted first — for a mail read that is 5 KB of ARC/DKIM
+                    // base64 — drops the fields anyone wanted, and leaves the
+                    // model a severed object it reads as "field not present".
+                    let tool_cap = agentos_tools::sanitize::output_budget_chars(
+                        llm.capabilities().context_window_tokens as usize,
+                    );
+                    let (rendered, elision) =
+                        agentos_tools::sanitize::render_within_budget(&tool_result, tool_cap);
+                    if elision.did_elide() {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            original_chars = elision.original_chars,
+                            limit_chars = tool_cap,
+                            values_shortened = elision.elided_leaves,
+                            bytes_elided = elision.elided_bytes,
+                            "Tool result elided before context injection"
+                        );
+                    }
+                    // Guard for the payload the elider cannot reduce (an object
+                    // with thousands of keys). Applied to the payload only —
+                    // the taint wrapper and the notice are system overhead and
+                    // must not push the JSON back under the knife.
+                    let result_str =
+                        agentos_tools::sanitize::truncate_if_needed(&rendered, tool_cap);
 
                     // SEC-07 / MEM-01: scan + `<user_data>` taint wrap before
                     // the output enters the context window, exactly as the task
                     // path does. §22 of the system prompt promises the agent
                     // that untrusted content arrives wrapped.
-                    let result_str = self
+                    let (mut result_str, blocked) = self
                         .chat_wrap_tool_result(
                             agent_id,
                             chat_task_id,
@@ -3873,6 +4201,14 @@ impl Kernel {
                             &result_str,
                         )
                         .await;
+                    // Outside the `<user_data>` wrapper on purpose: this is the
+                    // kernel speaking, and an agent told to ignore instructions
+                    // inside `<user_data>` is right to ignore it in there.
+                    if elision.did_elide() && !blocked {
+                        result_str.push_str(&agentos_tools::sanitize::elision_notice(
+                            tool_name, &elision, tool_cap,
+                        ));
+                    }
 
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
@@ -3907,7 +4243,7 @@ impl Kernel {
                         "Aborting chat loop: repeat tool-error circuit breaker tripped"
                     );
                     turn_degraded = true;
-                    break format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
+                    break turn_answer(&spoken, Some(note.as_str()));
                 }
             } else {
                 // No tool call — this is the final answer.
@@ -3947,11 +4283,13 @@ impl Kernel {
                     );
                     // The user got nothing. Same reason as the loop guards: the
                     // producers must not learn a procedure from a turn that
-                    // produced no answer.
-                    turn_degraded = true;
-                    EMPTY_LLM_ANSWER_PLACEHOLDER.to_string()
+                    // produced no answer. A silent LAST iteration after the
+                    // model already spoke is not that — `spoken` still holds a
+                    // real answer, so only a wholly silent turn is degraded.
+                    turn_degraded = spoken.is_empty();
+                    turn_answer(&spoken, None)
                 } else {
-                    visible_text
+                    turn_answer(&spoken, None)
                 };
                 tracing::info!(
                     target: "agentos::chat",
@@ -4104,7 +4442,7 @@ impl Kernel {
         };
 
         let chat_candidates = self
-            .build_chat_tool_manifests(&agent_id, session_id, scope)
+            .build_chat_tool_manifests(&agent_id, session_id, &scope)
             .await;
         // The claude-code gateway ignores the native array — skip ranking.
         let (mut llm_tool_manifests, mut deferred_pool) = if llm.uses_tool_gateway() {
@@ -4126,9 +4464,20 @@ impl Kernel {
                     .collect(),
                 Err(_) => Vec::new(),
             };
+        // Same grant filter the skill tools enforce. `agent_permissions` is
+        // already the effective set (direct + role grants + denies), so a
+        // skill granted through a role counts and a scoped-out one does not.
+        let chat_skill_hints = self.skill_hints_for(&agent_permissions).await;
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
+                agent_home: agentos_tools::traits::agent_home_dir(
+                    &self.data_dir,
+                    Some(agent_name),
+                    &agent_id,
+                )
+                .to_string_lossy()
+                .into_owned(),
                 agent_description,
                 agent_roles,
                 custom_instructions: agent_system_prompt,
@@ -4141,7 +4490,9 @@ impl Kernel {
                 granted_folders: crate::system_prompt::GrantedFolders::from_paths(
                     &self.workspace_paths_for_agent(&agent_id),
                 ),
+                shared_workspace: scope.shared_dir().map(|p| p.to_string_lossy().into_owned()),
                 unattended: false,
+                skills: chat_skill_hints,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -4258,6 +4609,17 @@ impl Kernel {
         const REPEAT_TOOL_ERROR_LIMIT: u32 = 1_000_000;
         const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 1_000_000;
         const DEDUP_STREAK_LIMIT: u32 = 1_000_000;
+        // Re-armed for conversation turns only. Ordinary chat keeps the
+        // disabled threshold above and leans on the iteration cap; a convo turn
+        // has 8 iterations and owes the transcript one utterance, so three
+        // identical failures ARE its budget. On 2026-09-21 four convo turns
+        // ended on "Maximum tool call limit reached", every one of them
+        // re-probing a path that could not resolve — the dedup cache never
+        // catches that, because it replays successes, not failures.
+        let repeat_tool_error_limit: u32 = match scope {
+            ChatTurnScope::Full => REPEAT_TOOL_ERROR_LIMIT,
+            ChatTurnScope::ConvoTurn { .. } => 3,
+        };
         let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
             std::collections::HashMap::new();
         let mut empty_text_streak_signature: Option<String> = None;
@@ -4276,6 +4638,9 @@ impl Kernel {
         let mut executed_tool_calls: ChatSessionDedupCache = HashMap::new();
         let mut consecutive_dedup_count: u32 = 0;
         const SESSION_DEDUP_CACHE_CAP: usize = 128;
+        // One operator question per conversation turn. Unbounded, a parked pair
+        // could open a blocking question every iteration and turn the inbox
+        // into their private transport.
 
         // ONE task id for the whole turn, used by everything: episodic rows,
         // TaskStart/TaskEnd hooks, the background review, the capability token,
@@ -4299,7 +4664,7 @@ impl Kernel {
                 turn_trace_id,
                 new_message,
                 session_id,
-                scope,
+                &scope,
             )
             .await
         {
@@ -4319,6 +4684,11 @@ impl Kernel {
         // stopped in iteration 3 still keeps what iterations 1-2 streamed.
         let mut streamed_visible = String::new();
         let mut reader_gone = false;
+        // Every iteration's user-visible text, in order. The client sees each
+        // piece live, but `Done.answer` is what gets persisted and refetched,
+        // and keeping only the last iteration's text dropped everything the
+        // agent said before its closing line (2026-09-20).
+        let mut spoken: Vec<String> = Vec::new();
 
         let final_answer = loop {
             // The reader left mid-answer — the browser Stop button aborts the
@@ -4380,7 +4750,7 @@ impl Kernel {
                 // circuit breaker below; only iteration 1 still fails hard.
                 if iterations > 1 {
                     turn_degraded = true;
-                    let answer = format!("{}\n\n[Note: {}]", EMPTY_LLM_ANSWER_PLACEHOLDER, msg);
+                    let answer = turn_answer(&spoken, Some(&format!("[Note: {msg}]")));
                     let _ = send_stream_event(
                         &tx,
                         ChatStreamEvent::Done {
@@ -4669,6 +5039,9 @@ impl Kernel {
             // multi-turn tool-calling rounds do not lose chain-of-thought.
             let visible_text =
                 self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
+            if !visible_text.trim().is_empty() {
+                spoken.push(visible_text.clone());
+            }
 
             // Surface tool calls the claude-code subprocess made via the MCP
             // gateway this iteration: append them for persistence AND emit live
@@ -4815,18 +5188,7 @@ impl Kernel {
 
             if iterations >= chat_max_tool_iterations {
                 turn_degraded = true;
-                let visible_trimmed = visible_text.trim();
-                let answer = if visible_trimmed.is_empty() {
-                    format!(
-                        "{}\n\n[Note: Maximum tool call limit reached.]",
-                        EMPTY_LLM_ANSWER_PLACEHOLDER
-                    )
-                } else {
-                    format!(
-                        "{}\n\n[Note: Maximum tool call limit reached.]",
-                        visible_text
-                    )
-                };
+                let answer = turn_answer(&spoken, Some("[Note: Maximum tool call limit reached.]"));
                 let _ = send_stream_event(
                     &tx,
                     ChatStreamEvent::Done {
@@ -4901,11 +5263,11 @@ impl Kernel {
                             "Aborting chat loop: model stuck calling same tool(s) with no text"
                         );
                         turn_degraded = true;
-                        let answer = format!(
-                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
-                            EMPTY_LLM_ANSWER_PLACEHOLDER,
-                            signature,
-                            empty_text_streak_count,
+                        let answer = turn_answer(
+                            &spoken,
+                            Some(&format!(
+                                "[Note: aborted — model called {signature} {empty_text_streak_count}x with no text. Likely stuck. Try rephrasing or use a stronger model.]"
+                            )),
                         );
                         let _ = send_stream_event(
                             &tx,
@@ -4943,10 +5305,11 @@ impl Kernel {
                             "Aborting chat loop: meta-tool discovery streak exceeded"
                         );
                         turn_degraded = true;
-                        let answer = format!(
-                            "{}\n\n[Note: aborted — model spent {} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]",
-                            EMPTY_LLM_ANSWER_PLACEHOLDER,
-                            meta_tool_streak_count,
+                        let answer = turn_answer(
+                            &spoken,
+                            Some(&format!(
+                                "[Note: aborted — model spent {meta_tool_streak_count} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]"
+                            )),
                         );
                         let _ = send_stream_event(
                             &tx,
@@ -5198,6 +5561,9 @@ impl Kernel {
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
                         tool_categories: None,
+                        // Named by path refusals: an agent told only "not found"
+                        // retries; one told where the shared workspace is moves.
+                        shared_dir: scope.shared_dir().map(std::path::Path::to_path_buf),
                     };
 
                     let start = std::time::Instant::now();
@@ -5207,7 +5573,31 @@ impl Kernel {
                     // call it is not allowed to make either. Enforced here and not
                     // only by omission from the offered manifest list, because
                     // models emit names that were never offered.
-                    let mut tool_result = if scope.withholds(tool_name) {
+                    // One operator interruption per conversation turn, shared by
+                    // `ask-user` and `workspace-request`. Both park the turn on
+                    // a human, and a parked turn holds the conversation, its
+                    // status and the LLM slot — volume is not the only cost.
+                    // Claimed through the kernel so the claude-code gateway,
+                    // which never sees this loop, spends the same budget.
+                    let operator_interruption = matches!(scope, ChatTurnScope::ConvoTurn { .. })
+                        && matches!(
+                            tool_name.replace('_', "-").as_str(),
+                            "ask-user" | "workspace-request"
+                        );
+                    let mut tool_result = if operator_interruption
+                        && !self.claim_operator_interruption(&agent_id).await
+                    {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            agent_id = %agent_id,
+                            "Second operator interruption in one convo turn refused"
+                        );
+                        serde_json::json!({
+                            "error": "You already interrupted the operator once this turn. \
+                                      Their answer, or the timeout, arrives before your next turn — \
+                                      continue with what you have."
+                        })
+                    } else if scope.withholds(tool_name) {
                         tracing::warn!(
                             tool = %tool_name,
                             ?scope,
@@ -5387,18 +5777,32 @@ impl Kernel {
                     }
                     let duration_ms = start.elapsed().as_millis() as u64;
 
-                    let result_str = {
-                        let full = serde_json::to_string_pretty(&tool_result).unwrap_or_default();
-                        if full.len() > 4096 {
-                            let mut boundary = 4096;
-                            while boundary > 0 && !full.is_char_boundary(boundary) {
-                                boundary -= 1;
-                            }
-                            format!("{}...[truncated]", &full[..boundary])
-                        } else {
-                            full
-                        }
-                    };
+                    // Reduce oversized results by value size, not byte offset.
+                    // A head-cut of pretty JSON keeps whatever the serializer
+                    // emitted first — for a mail read that is 5 KB of ARC/DKIM
+                    // base64 — drops the fields anyone wanted, and leaves the
+                    // model a severed object it reads as "field not present".
+                    let tool_cap = agentos_tools::sanitize::output_budget_chars(
+                        llm.capabilities().context_window_tokens as usize,
+                    );
+                    let (rendered, elision) =
+                        agentos_tools::sanitize::render_within_budget(&tool_result, tool_cap);
+                    if elision.did_elide() {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            original_chars = elision.original_chars,
+                            limit_chars = tool_cap,
+                            values_shortened = elision.elided_leaves,
+                            bytes_elided = elision.elided_bytes,
+                            "Tool result elided before context injection"
+                        );
+                    }
+                    // Guard for the payload the elider cannot reduce (an object
+                    // with thousands of keys). Applied to the payload only —
+                    // the taint wrapper and the notice are system overhead and
+                    // must not push the JSON back under the knife.
+                    let result_str =
+                        agentos_tools::sanitize::truncate_if_needed(&rendered, tool_cap);
 
                     let result_preview = {
                         let s = serde_json::to_string(&tool_result).unwrap_or_default();
@@ -5467,7 +5871,7 @@ impl Kernel {
                         let key = (tool_name.clone(), err_sig.clone());
                         let count = repeated_tool_errors.entry(key).or_insert(0);
                         *count += 1;
-                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                        if *count >= repeat_tool_error_limit {
                             repeat_error_abort = Some(format!(
                                 "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
                                 tool_name, count, err_sig
@@ -5499,7 +5903,7 @@ impl Kernel {
                     // the output enters the context window, exactly as the task
                     // path does. §22 of the system prompt promises the agent
                     // that untrusted content arrives wrapped.
-                    let result_str = self
+                    let (mut result_str, blocked) = self
                         .chat_wrap_tool_result(
                             agent_id,
                             chat_task_id,
@@ -5509,6 +5913,14 @@ impl Kernel {
                             &result_str,
                         )
                         .await;
+                    // Outside the `<user_data>` wrapper on purpose: this is the
+                    // kernel speaking, and an agent told to ignore instructions
+                    // inside `<user_data>` is right to ignore it in there.
+                    if elision.did_elide() && !blocked {
+                        result_str.push_str(&agentos_tools::sanitize::elision_notice(
+                            tool_name, &elision, tool_cap,
+                        ));
+                    }
 
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
@@ -5543,7 +5955,7 @@ impl Kernel {
                         "Aborting chat loop: repeat tool-error circuit breaker tripped"
                     );
                     turn_degraded = true;
-                    let answer = format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
+                    let answer = turn_answer(&spoken, Some(note.as_str()));
                     let _ = send_stream_event(
                         &tx,
                         ChatStreamEvent::Done {
@@ -5593,11 +6005,13 @@ impl Kernel {
                         "Chat streaming LLM returned empty final answer; substituting placeholder"
                     );
                     // See the non-streaming path: an empty answer is a degraded
-                    // turn, not a success.
-                    turn_degraded = true;
-                    EMPTY_LLM_ANSWER_PLACEHOLDER.to_string()
+                    // turn, not a success — unless the model already spoke
+                    // earlier this turn, in which case `spoken` holds a real
+                    // answer and only the closing line is missing.
+                    turn_degraded = spoken.is_empty();
+                    turn_answer(&spoken, None)
                 } else {
-                    visible_text
+                    turn_answer(&spoken, None)
                 };
                 tracing::info!(
                     target: "agentos::chat",
@@ -5789,6 +6203,9 @@ impl Kernel {
     /// Replaces bare `.ok()` calls that silently swallow audit write failures.
     pub(crate) fn audit_log(&self, entry: agentos_audit::AuditEntry) {
         if let Err(e) = self.audit.append(entry) {
+            // A dropped audit entry is an integrity failure; surface it as a
+            // metric, not only as a log line nobody is watching.
+            crate::metrics::record_audit_append_failure();
             tracing::error!(error = %e, "Failed to write audit log entry");
         }
     }
@@ -5900,6 +6317,15 @@ impl Kernel {
 
         // 1.5 Run pre-flight system health checks before any subsystem init
         preflight_checks(&config)?;
+
+        // Establish the pressure level before anything starts writing, so the
+        // health server never reports ready on a disk that is already full.
+        if config.resource_guard.enabled {
+            let data_dir_probe = std::path::PathBuf::from(&config.tools.data_dir);
+            if let Err(e) = crate::resource_guard::tick(&data_dir_probe, &config.resource_guard) {
+                tracing::warn!(error = %e, "Initial resource guard measurement failed");
+            }
+        }
 
         // Ensure directories exist. The vault directory is created with 0o700 on Unix
         // so other users on the same host cannot list or access the vault parent directory.
@@ -6030,18 +6456,54 @@ impl Kernel {
         hal.register(Box::new(ServicesDriver::new()));
         hal.register(Box::new(MountsDriver::new()));
         hal.register(Box::new(OpenFilesDriver::new()));
+
+        // Peripheral drivers: compiled in by feature, registered only when the
+        // host has the hardware + service (`agentos_hal::probe_peripherals`),
+        // unless `[hal] force_enable` / `[hal] disable` say otherwise. An
+        // unregistered driver's tool manifest is dropped after tool load, so
+        // the agent never sees a tool that cannot run.
+        let peripheral_probes = tokio::task::spawn_blocking(agentos_hal::probe_peripherals)
+            .await
+            .unwrap_or_default();
+        let wanted = |name: &str| -> bool {
+            if config.hal.disable.iter().any(|d| d == name) {
+                return false;
+            }
+            config.hal.force_enable.iter().any(|d| d == name)
+                || peripheral_probes
+                    .iter()
+                    .any(|p| p.driver == name && p.present)
+        };
+        for name in config.hal.force_enable.iter().chain(&config.hal.disable) {
+            if !agentos_hal::PERIPHERAL_DRIVERS.contains(&name.as_str()) {
+                tracing::warn!(
+                    driver = %name,
+                    known = ?agentos_hal::PERIPHERAL_DRIVERS,
+                    "Unknown driver in [hal] force_enable/disable; ignored"
+                );
+            }
+        }
         #[cfg(all(feature = "bluetooth", target_os = "linux"))]
-        hal.register(Box::new(BluetoothDriver::new()));
+        if wanted("bluetooth") {
+            hal.register(Box::new(BluetoothDriver::new()));
+        }
         #[cfg(all(feature = "audio", target_os = "linux"))]
-        hal.register(Box::new(AudioDriver::with_consent_store(Arc::clone(
-            &capture_consent,
-        ))));
+        if wanted("audio") {
+            hal.register(Box::new(AudioDriver::with_consent_store(Arc::clone(
+                &capture_consent,
+            ))));
+        }
         #[cfg(all(feature = "display", target_os = "linux"))]
-        hal.register(Box::new(DisplayDriver::new()));
+        if wanted("display") {
+            hal.register(Box::new(DisplayDriver::new()));
+        }
         #[cfg(all(feature = "printer", target_os = "linux"))]
-        hal.register(Box::new(PrinterDriver::new()));
+        if wanted("printer") {
+            hal.register(Box::new(PrinterDriver::new()));
+        }
+        // An empty allowlist makes raw-usb deny everything; don't advertise it.
         #[cfg(all(feature = "raw-usb", target_os = "linux"))]
-        {
+        if wanted("raw-usb") && !config.hal.raw_usb.allow.is_empty() {
             // The raw-USB driver is fail-closed: with an empty allowlist every
             // open/read/write/control is denied. `[hal.raw_usb] allow` is the
             // only way to make it usable.
@@ -6065,13 +6527,38 @@ impl Kernel {
             hal.register(Box::new(raw_usb));
         }
         #[cfg(all(feature = "usb-storage", target_os = "linux"))]
-        hal.register(Box::new(UsbStorageDriver::new()));
+        if wanted("usb-storage") {
+            hal.register(Box::new(UsbStorageDriver::new()));
+        }
         #[cfg(all(feature = "webcam", target_os = "linux"))]
-        hal.register(Box::new(WebcamDriver::with_consent_store(Arc::clone(
-            &capture_consent,
-        ))));
+        if wanted("webcam") {
+            hal.register(Box::new(WebcamDriver::with_consent_store(Arc::clone(
+                &capture_consent,
+            ))));
+        }
         #[cfg(all(feature = "wifi", target_os = "linux"))]
-        hal.register(Box::new(WifiDriver::new()));
+        if wanted("wifi") {
+            hal.register(Box::new(WifiDriver::new()));
+        }
+        for probe in &peripheral_probes {
+            let registered = hal.has_driver(probe.driver);
+            let why = if registered {
+                probe.reason.as_str()
+            } else if config.hal.disable.iter().any(|d| d == probe.driver) {
+                "disabled by [hal] disable"
+            } else if wanted(probe.driver) {
+                "not compiled into this build (or raw-usb allowlist empty)"
+            } else {
+                probe.reason.as_str()
+            };
+            tracing::info!(
+                driver = probe.driver,
+                registered,
+                present = probe.present,
+                reason = why,
+                "HAL peripheral"
+            );
+        }
 
         // Register log reader with app logs only - audit log is not exposed to agents
         let app_logs = HashMap::new();
@@ -6138,6 +6625,16 @@ impl Kernel {
             Path::new(&config.tools.user_tools_dir),
             crl,
         )?));
+        {
+            // Hide peripheral tools whose HAL driver was not registered on this
+            // host, before the schema registry and tool indexes are built.
+            let mut registry = tool_registry.write().await;
+            for (tool, driver) in crate::tool_registry::PERIPHERAL_TOOL_DRIVERS {
+                if !hal.has_driver(driver) && registry.remove(tool).is_ok() {
+                    tracing::info!(tool, driver, "Tool hidden: HAL driver not registered");
+                }
+            }
+        }
 
         // 5.5 Build schema registry from tool manifests. Examples are validated
         // against the schema at load — drift is a loud boot failure.
@@ -6369,6 +6866,18 @@ impl Kernel {
         // Register scratchpad tools
         tool_runner.register_scratchpad_tools(scratchpad_store.clone());
 
+        // speak: constructed here because its endpoint is `[tts]` config, never
+        // agent input.
+        tool_runner.register(Box::new(agentos_tools::SpeakTool::new(config.tts.clone())));
+
+        // audio: re-registered over the TTS-less one `ToolRunner::new` installed
+        // so `action="speak"` reaches the operator's `[tts]` endpoint. Same
+        // reason as `speak` above — the endpoint is config, never agent input.
+        // `register` is a keyed insert, so this replaces rather than duplicates.
+        tool_runner.register(Box::new(agentos_tools::AudioTool::with_tts(
+            config.tts.clone(),
+        )));
+
         // host-package-install: replace the placeholder registered by
         // ToolRunner::new with one configured from `[tools.host_package]`.
         // When `enabled = false` we install with an empty allowlist + no
@@ -6473,11 +6982,16 @@ impl Kernel {
         // Build skill registry, loading from configured skill directories.
         // Done here (before tool runner registration) so the `skill-create`
         // tool can be wired up with a live installer reference.
+        // Relative skill dirs resolve against `data_dir`, NOT the process cwd.
+        // The CLI extracts the embedded `skills/core/` into `data_dir`
+        // (`agentos-cli/src/embedded.rs`), so a cwd-relative read silently
+        // loaded whatever stale copy happened to sit next to the working
+        // directory the kernel was started from.
+        let core_skills_dir = Self::resolve_skill_dir(&data_dir, &config.skills.core_skills_dir);
+        let user_skills_dir = Self::resolve_skill_dir(&data_dir, &config.skills.user_skills_dir);
         let skill_registry = {
             let mut sr = agentos_skills::SkillRegistry::new();
-            let core_skills_dir = Path::new(&config.skills.core_skills_dir);
-            let user_skills_dir = Path::new(&config.skills.user_skills_dir);
-            match sr.load_from_dir(core_skills_dir) {
+            match sr.load_from_dir(&core_skills_dir) {
                 Ok(n) if n > 0 => {
                     tracing::info!(count = n, dir = %core_skills_dir.display(), "Loaded core skills")
                 }
@@ -6486,7 +7000,7 @@ impl Kernel {
                     tracing::warn!(error = %e, dir = %core_skills_dir.display(), "Failed to scan core skills directory")
                 }
             }
-            match sr.load_from_dir(user_skills_dir) {
+            match sr.load_from_dir(&user_skills_dir) {
                 Ok(n) if n > 0 => {
                     tracing::info!(count = n, dir = %user_skills_dir.display(), "Loaded user skills")
                 }
@@ -6536,7 +7050,7 @@ impl Kernel {
                     std::sync::Arc::clone(&installed_skills_shared),
                 ));
             tool_runner.register_skill_create(
-                std::path::PathBuf::from(&config.skills.user_skills_dir),
+                user_skills_dir.clone(),
                 skill_installer,
                 std::sync::Arc::clone(&installed_skills_shared),
             );
@@ -6983,9 +7497,14 @@ impl Kernel {
                                         usage_hints: None,
                                         tags: vec![],
                                     };
-                                    {
-                                        let mut reg = tool_registry.write().await;
-                                        let _ = reg.register(manifest);
+                                    // A name another server (or a core tool) already holds
+                                    // is skipped, as `mcp attach` does: registering the
+                                    // adapter anyway would run one server's tool under
+                                    // the other's manifest and grant.
+                                    let registered = tool_registry.write().await.register(manifest);
+                                    if let Err(e) = registered {
+                                        tracing::warn!(mcp_server = %record.name, error = %e, "Skipping persisted MCP tool");
+                                        continue;
                                     }
 
                                     // Register into ToolRunner via dynamic path so
@@ -7203,7 +7722,7 @@ impl Kernel {
         // kernel holds the socket, so from here we know no other process owns
         // this data dir. Only now is it safe to settle conversations left
         // `running` by a previous process — doing it at `ConvoStore::open` would
-        // let a second boot (`agentos web serve` boots its own Kernel) wipe every
+        // let a second boot (another `agentos start` on this data dir) wipe every
         // live conversation before failing this bind and exiting.
         {
             let store = Arc::clone(&convo_store);
@@ -7296,7 +7815,7 @@ impl Kernel {
         // Per-agent gateway tool-call buffers (populated when a claude-code agent
         // connects and its MCP gateway starts).
         let claude_gateway_tool_calls = Arc::new(RwLock::new(HashMap::new()));
-        let convo_turn_agents = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let convo_turn_agents = Arc::new(RwLock::new(HashMap::new()));
         let pending_agent_announce = Arc::new(RwLock::new(HashMap::new()));
 
         // User filesystem grants: durable, runtime-mutable list of host directories
@@ -7341,7 +7860,24 @@ impl Kernel {
             data_dir.join("snapshots"),
             data_dir.clone(), // allowed_root: only paths within data_dir may be snapshotted
             72,               // hours
+            state_store.clone(),
         ));
+
+        // Adopt blobs written before the index was durable, and drop rows whose
+        // blob is gone. Without this, snapshots taken by a previous boot stay
+        // unreachable and their retention never fires.
+        match snapshot_manager.reconcile_on_boot().await {
+            Ok((0, 0)) => {}
+            Ok((adopted, dropped)) => tracing::info!(
+                adopted,
+                dropped,
+                "Adopted orphan snapshot blobs into the durable index"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "Snapshot reconciliation failed — rollback of pre-restart snapshots may be unavailable"
+            ),
+        }
 
         let trace_collector = Arc::new(
             crate::trace_collector::TraceCollector::new(&data_dir.join("traces.db"))
@@ -7373,6 +7909,11 @@ impl Kernel {
             .await;
         escalation_manager
             .set_capture_consent(Arc::clone(&capture_consent))
+            .await;
+        // Same reason, for filesystem access: an approved `workspace_access`
+        // escalation writes the grant before the caller is woken.
+        escalation_manager
+            .set_workspace_grants(Arc::clone(&workspace_grants), data_dir.clone())
             .await;
         let cost_tracker = Arc::new(crate::cost_tracker::CostTracker::with_state_store(Some(
             state_store.clone(),
@@ -7665,6 +8206,20 @@ impl Kernel {
             router
         };
 
+        // Operator routing matrix. Built after the router so it can be attached
+        // immediately: every notification fan-out consults it, and a window
+        // where it is missing would silently fall back to "deliver everything".
+        let panel_sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notification_routes = Arc::new(
+            crate::notification_routes::RouteMatrix::load(
+                Arc::clone(&state_store),
+                Arc::clone(&panel_sessions),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Notification route matrix init failed: {e}"))?,
+        );
+        notification_router.attach_routes(Arc::clone(&notification_routes));
+
         // Phase 6: Bidirectional channel protocol.
         let channel_registry = {
             let db_path = data_dir.join("user_channels.db");
@@ -7676,6 +8231,9 @@ impl Kernel {
         let channel_listener_registry =
             Arc::new(crate::user_channel_registry::ChannelListenerRegistry::new());
         let inbound_chat_bridge = Arc::new(crate::channel_chat_bridge::KernelChatBridge::new());
+        // Bounded: a flood of DM sessions should back-pressure the sender, not
+        // grow without limit. Each entry is one conversation id.
+        let (convo_run_tx, convo_run_rx) = tokio::sync::mpsc::channel::<String>(256);
         let (inbound_tx, inbound_rx) =
             tokio::sync::mpsc::channel::<crate::notification_router::InboundMessage>(512);
         // InboundRouter is spawned in `wire_inbound_chat_bridge` (after Arc::new(kernel))
@@ -7959,6 +8517,8 @@ impl Kernel {
             otel,
             event_bus,
             notification_router,
+            notification_routes,
+            panel_sessions,
             agent_inbox,
             agent_message_inbox,
             agent_inbox_writer,
@@ -7969,6 +8529,8 @@ impl Kernel {
             installed_skills_snapshot: installed_skills_shared,
             inbound_tx,
             inbound_chat_bridge,
+            convo_run_tx,
+            pending_convo_run_rx: std::sync::Mutex::new(Some(convo_run_rx)),
             pending_inbound_rx: std::sync::Mutex::new(Some(inbound_rx)),
             webhook_secrets: Arc::new(RwLock::new(HashMap::new())),
             connector_registry,
@@ -8243,6 +8805,10 @@ impl Kernel {
             }
         }
 
+        // Install the starter pipeline templates seeded beside the data dir, so
+        // a fresh install has something in the Pipelines list to read and run.
+        kernel.seed_starter_pipelines().await;
+
         // Restore bidirectional channels persisted from the previous run.
         kernel.restore_channels().await;
         kernel.refresh_connected_channels_snapshot().await;
@@ -8322,6 +8888,44 @@ impl Kernel {
         // Same wiring point, so subsystems built later (e.g. a per-agent MCP
         // gateway) can reach the kernel without a third thing to remember.
         *self.self_weak.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(self));
+        // Convo-runner pump: starts the turn loop for conversation ids posted
+        // by the DM path. Lives here, outside the runner's own call graph.
+        let convo_rx = self
+            .pending_convo_run_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut convo_rx) = convo_rx {
+            let kernel = Arc::downgrade(self);
+            tokio::spawn(async move {
+                while let Some(convo_id) = convo_rx.recv().await {
+                    let Some(kernel) = kernel.upgrade() else {
+                        break;
+                    };
+                    let store = Arc::clone(&kernel.convo_store);
+                    let id = convo_id.clone();
+                    let convo =
+                        match tokio::task::spawn_blocking(move || store.get_convo(&id)).await {
+                            Ok(Ok(Some(c))) => c,
+                            _ => {
+                                tracing::warn!(
+                                    convo_id,
+                                    "Conversation row vanished before its runner started"
+                                );
+                                continue;
+                            }
+                        };
+                    tokio::spawn(crate::convo_runner::run_convo_with_relay(
+                        kernel,
+                        convo.id,
+                        convo.topic,
+                        convo.participants,
+                        convo.max_turns,
+                    ));
+                }
+            });
+        }
+
         let rx = self
             .pending_inbound_rx
             .lock()
@@ -8980,6 +9584,41 @@ mod chat_taint_envelope_tests {
 }
 
 #[cfg(test)]
+mod turn_answer_tests {
+    use super::{turn_answer, EMPTY_LLM_ANSWER_PLACEHOLDER};
+
+    #[test]
+    fn keeps_every_piece_the_agent_spoke() {
+        let spoken = vec![
+            "Let me check the sinks.".to_string(),
+            "  ".to_string(),
+            "Playing it now.".to_string(),
+        ];
+        assert_eq!(
+            turn_answer(&spoken, None),
+            "Let me check the sinks.\n\nPlaying it now."
+        );
+    }
+
+    #[test]
+    fn a_wholly_silent_turn_is_the_placeholder() {
+        assert_eq!(turn_answer(&[], None), EMPTY_LLM_ANSWER_PLACEHOLDER);
+        assert_eq!(
+            turn_answer(&["   ".to_string()], Some("[Note: x]")),
+            format!("{EMPTY_LLM_ANSWER_PLACEHOLDER}\n\n[Note: x]")
+        );
+    }
+
+    #[test]
+    fn a_degraded_exit_keeps_the_text_and_appends_the_note() {
+        assert_eq!(
+            turn_answer(&["Half an answer.".to_string()], Some("[Note: capped]")),
+            "Half an answer.\n\n[Note: capped]"
+        );
+    }
+}
+
+#[cfg(test)]
 mod meta_tool_streak_tests {
     use super::iteration_is_all_meta;
 
@@ -9055,6 +9694,7 @@ mod preflight_tests {
                 health_bind: "127.0.0.1".to_string(),
                 per_agent_rate_limit: 0,
                 events: Default::default(),
+                convo: Default::default(),
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
@@ -9096,6 +9736,7 @@ mod preflight_tests {
             context_budget: agentos_types::TokenBudget::default(),
             context: ContextConfig::default(),
             health_monitor: HealthMonitorConfig::default(),
+            resource_guard: Default::default(),
             preflight: PreflightConfig {
                 min_free_disk_mb: min_free_mb,
                 check_db_writable: check_writable,
@@ -9109,7 +9750,6 @@ mod preflight_tests {
             otel: OtelConfig::default(),
             approval: Default::default(),
             api: Default::default(),
-            web: Default::default(),
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),
@@ -9117,6 +9757,8 @@ mod preflight_tests {
             storage: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            tts: Default::default(),
+            procedures: Default::default(),
             agent_heartbeat: Default::default(),
             agent_budget: Default::default(),
             hal: Default::default(),
@@ -9325,6 +9967,7 @@ mod vault_bootstrap_tests {
                 health_bind: "127.0.0.1".to_string(),
                 per_agent_rate_limit: 0,
                 events: Default::default(),
+                convo: Default::default(),
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
@@ -9369,6 +10012,7 @@ mod vault_bootstrap_tests {
             context_budget: agentos_types::TokenBudget::default(),
             context: ContextConfig::default(),
             health_monitor: HealthMonitorConfig::default(),
+            resource_guard: Default::default(),
             preflight: PreflightConfig::default(),
             logging: Default::default(),
             notifications: Default::default(),
@@ -9379,7 +10023,6 @@ mod vault_bootstrap_tests {
             otel: OtelConfig::default(),
             approval: Default::default(),
             api: Default::default(),
-            web: Default::default(),
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),
@@ -9387,6 +10030,8 @@ mod vault_bootstrap_tests {
             storage: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            tts: Default::default(),
+            procedures: Default::default(),
             agent_heartbeat: Default::default(),
             agent_budget: Default::default(),
             hal: Default::default(),
@@ -10038,5 +10683,108 @@ mod dedup_cache_tests {
             "file-reader",
             &json!({"content": "hello"})
         ));
+    }
+}
+
+#[cfg(test)]
+mod skill_dir_tests {
+    use super::*;
+
+    #[test]
+    fn relative_skill_dir_resolves_against_the_asset_root() {
+        // Regression: the kernel read `skills/core` relative to its cwd while
+        // the CLI extracts the embedded bundles next to `tools.data_dir`, so
+        // which skills loaded depended on where the kernel was started from.
+        // `data_dir` here is a real `tools.data_dir` value — the bundles land
+        // in its PARENT, same as plugin discovery.
+        let data_dir = Path::new("/home/u/.agentos/data");
+        assert_eq!(
+            Kernel::resolve_skill_dir(data_dir, "skills/core"),
+            PathBuf::from("/home/u/.agentos/skills/core")
+        );
+        assert_eq!(
+            Kernel::resolve_skill_dir(data_dir, "skills/user"),
+            PathBuf::from("/home/u/.agentos/skills/user")
+        );
+    }
+
+    #[test]
+    fn absolute_skill_dir_is_used_verbatim() {
+        let data_dir = Path::new("/home/u/.agentos/data");
+        assert_eq!(
+            Kernel::resolve_skill_dir(data_dir, "/opt/agentos/skills"),
+            PathBuf::from("/opt/agentos/skills")
+        );
+    }
+
+    #[test]
+    fn rootless_data_dir_falls_back_to_itself() {
+        // `parent()` of a bare relative dir is `""`; joining onto that would
+        // produce a cwd-relative path again, which is the bug being fixed.
+        assert_eq!(
+            Kernel::resolve_skill_dir(Path::new("/"), "skills/core"),
+            PathBuf::from("/skills/core")
+        );
+        assert_eq!(
+            Kernel::resolve_skill_dir(Path::new("data"), "skills/core"),
+            PathBuf::from("data/skills/core")
+        );
+    }
+}
+
+#[cfg(test)]
+mod starter_pipeline_tests {
+    use super::*;
+
+    fn template(name: &str) -> String {
+        format!(
+            "name: \"{name}\"\nversion: \"1.0.0\"\nsteps:\n  - id: s\n    agent: \"{{{{agent}}}}\"\n    task: \"do {{{{input}}}}\"\n    output_var: out\noutput: out\n"
+        )
+    }
+
+    #[test]
+    fn starter_templates_install_once_and_never_clobber_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            agentos_pipeline::PipelineStore::open(&dir.path().join("pipelines.db")).unwrap();
+        let templates = dir.path().join("pipelines/core");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(templates.join("01-a.yaml"), template("a")).unwrap();
+        std::fs::write(templates.join("02-b.yaml"), template("b")).unwrap();
+        // Not a template: must be ignored, not parsed.
+        std::fs::write(templates.join("README.md"), "# not yaml").unwrap();
+        // Malformed: skipped without failing the rest of the seed.
+        std::fs::write(templates.join("03-broken.yaml"), "name: [oops").unwrap();
+
+        assert_eq!(install_starter_pipelines(&templates, &store), 2);
+
+        // The operator edits one and installs their own version under the same
+        // name. The next boot must not overwrite it.
+        store
+            .install_pipeline("a", "9.9.9", &template("a"))
+            .unwrap();
+        assert_eq!(install_starter_pipelines(&templates, &store), 0);
+        let names: Vec<_> = store
+            .list_pipelines()
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.name, p.version))
+            .collect();
+        assert!(
+            names.contains(&("a".to_string(), "9.9.9".to_string())),
+            "{names:?}"
+        );
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_template_directory_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            agentos_pipeline::PipelineStore::open(&dir.path().join("pipelines.db")).unwrap();
+        assert_eq!(
+            install_starter_pipelines(&dir.path().join("nope"), &store),
+            0
+        );
     }
 }

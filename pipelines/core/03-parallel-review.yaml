@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 03 — Parallel Review: steps that run at the same time, then get merged.
+#
+#   agentos pipeline install ~/.agentos/pipelines/core/03-parallel-review.yaml
+#   agentos pipeline run parallel-review --agent <your-agent> --input "$(cat draft.md)"
+#
+# The engine executes in waves: every step whose dependencies are already
+# satisfied runs concurrently. Here the three review steps declare no
+# `depends_on`, so they form one wave and run together; `merge` waits for all
+# three. Three LLM calls in the time of one — and three times the cost, so keep
+# an eye on `agentos cost show`; the engine enforces no per-run cost cap.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: parallel-review
+version: "1.0.0"
+description: "Review a piece of text from three angles at once, then merge the notes."
+
+steps:
+  # ── Wave 1: no dependencies, so these three start simultaneously.
+  - id: review-clarity
+    agent: "{{agent}}"
+    task: "Review this for clarity and structure only. List concrete fixes, no praise.\n\n{{input}}"
+    output_var: clarity
+    timeout_minutes: 8
+
+  - id: review-accuracy
+    agent: "{{agent}}"
+    task: "Review this for factual accuracy and unsupported claims only. Quote each claim you doubt.\n\n{{input}}"
+    output_var: accuracy
+    timeout_minutes: 8
+
+  - id: review-audience
+    agent: "{{agent}}"
+    task: "Review this for audience fit: what does it assume the reader already knows?\n\n{{input}}"
+    output_var: audience
+    timeout_minutes: 8
+
+  # ── Wave 2: starts only once all three named steps have completed.
+  - id: merge
+    agent: "{{agent}}"
+    task: |
+      Three reviewers looked at the same draft. Merge their notes into one
+      prioritised list. Drop duplicates, and mark anything two reviewers
+      disagree about as [CONFLICT].
+
+      CLARITY:
+      {{clarity}}
+
+      ACCURACY:
+      {{accuracy}}
+
+      AUDIENCE:
+      {{audience}}
+    output_var: merged
+    depends_on: [review-clarity, review-accuracy, review-audience]
+    timeout_minutes: 10
+
+output: merged

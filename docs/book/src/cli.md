@@ -43,7 +43,6 @@ Commands:
   event            Manage event subscriptions and view event history
   identity         Manage agent cryptographic identities
   hal              Manage hardware device access (HAL)
-  web              Web UI server
   log              Control runtime logging (log level, format)
   healthz          Check if the kernel health endpoint is responding (used by Docker HEALTHCHECK)
   notifications    View and respond to agent notifications
@@ -2043,34 +2042,6 @@ Arguments:
 Options:
       --agent <AGENT>  Agent name to revoke access from
   -h, --help           Print help
-```
-
-## `agentos web`
-
-```text
-Web UI server
-
-Usage: agentos web <COMMAND>
-
-Commands:
-  serve  Start the web UI server
-  help   Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
-```
-
-### `agentos web serve`
-
-```text
-Start the web UI server
-
-Usage: agentos web serve [OPTIONS]
-
-Options:
-      --port <PORT>  Port to bind the web server on [default: 8080]
-      --host <HOST>  Host/IP to bind on [default: 127.0.0.1]
-  -h, --help         Print help
 ```
 
 ## `agentos log`

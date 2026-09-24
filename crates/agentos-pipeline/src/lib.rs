@@ -1,8 +1,10 @@
+pub mod bindings;
 pub mod definition;
 pub mod engine;
 pub mod store;
 pub mod types;
 
+pub use bindings::{render as render_bindings, Bindings};
 pub use definition::{PipelineDefinition, PipelineStep, StepAction};
 pub use engine::{PipelineEngine, PipelineExecutor};
 pub use store::{PipelineStore, PipelineSummary};

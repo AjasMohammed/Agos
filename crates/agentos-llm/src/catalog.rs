@@ -40,6 +40,13 @@ pub struct CatalogEntry {
     pub supports_prompt_caching: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_json_mode: Option<bool>,
+    /// Whether this provider takes a reasoning dial. When true, `CustomCore`
+    /// sends `reasoning_effort` on tasks that ask for thinking.
+    ///
+    /// It applies to **every** model in this entry's `models` list, so an
+    /// entry mixing reasoning and non-reasoning models (a `-reasoner` next to
+    /// a `-chat`) should leave it unset and use a separate entry, or override
+    /// per deployment with `extra_body`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_thinking: Option<bool>,
 

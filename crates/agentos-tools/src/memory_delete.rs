@@ -54,7 +54,7 @@ impl AgentTool for MemoryDelete {
             })?;
 
             self.episodic
-                .delete(id)
+                .delete(id, &context.agent_id)
                 .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "memory-delete".into(),
@@ -83,6 +83,19 @@ impl AgentTool for MemoryDelete {
                     "memory-delete requires string 'id' for semantic scope".into(),
                 )
             })?;
+
+            // Same scoping `memory-read` uses: another agent's entry is "not found".
+            if self
+                .semantic
+                .get_by_id_scoped(id, Some(&context.agent_id))
+                .await?
+                .is_none()
+            {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "memory.semantic".to_string(),
+                    operation: format!("delete '{id}': not found or not owned by this agent"),
+                });
+            }
 
             self.semantic
                 .delete(id)

@@ -237,7 +237,10 @@ impl Kernel {
                 let msg = e.to_string();
                 let task_state = self.scheduler.get_task(&task.id).await.map(|t| t.state);
                 let paused = is_pause_outcome(task_state, &msg);
-                if paused {
+                // Only from `Running`: a parent parked on its children may already
+                // have been requeued by a fast child, and forcing `Waiting` over
+                // that `Queued` would strand it.
+                if paused && task_state == Some(TaskState::Running) {
                     // `complete_task_failure` parks a Waiting task and returns without
                     // transitioning it, so the Waiting state has to be set here for the
                     // "Task paused:"-by-message case the executor never transitioned.
@@ -366,7 +369,7 @@ impl Kernel {
         }
     }
 
-    pub(crate) async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
+    pub async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
         // Fetch the task before transitioning state so we have prompt + parent info.
         let task_snapshot = self.scheduler.get_task(&task_id).await;
         // Kept separately: the snapshot is consumed by the notification arm below,
@@ -374,10 +377,15 @@ impl Kernel {
         let owner_agent_id = task_snapshot.as_ref().map(|t| t.agent_id);
         match self
             .scheduler
-            .update_state(&task_id, TaskState::Cancelled)
+            .update_state_if_not_terminal(&task_id, TaskState::Cancelled)
             .await
         {
-            Ok(_) => {
+            // A finished task stays finished: overwriting Complete with
+            // Cancelled re-sent a "cancelled" notice and re-ran the cleanup.
+            Ok(false) => KernelResponse::Error {
+                message: format!("Task '{task_id}' already finished; nothing to cancel"),
+            },
+            Ok(true) => {
                 // Send cancel notification to user inbox (root tasks only).
                 if let Some(task) = task_snapshot {
                     if Kernel::is_root_task(&task)
@@ -403,6 +411,11 @@ impl Kernel {
                         )
                         .await;
                     }
+                }
+                // A cancelled background child still has to report, or a parent
+                // parked on it waits out its whole timeout.
+                for waiter in self.scheduler.complete_dependency(task_id).await {
+                    let _ = self.scheduler.requeue(&waiter).await;
                 }
                 self.cleanup_task_subscriptions(&task_id).await;
                 // Cancel is cooperative: a task parked on an approval or an
@@ -607,35 +620,17 @@ impl Kernel {
             });
         }
 
-        // Register the dependency: parent waits on child.
-        self.scheduler
-            .add_dependency(parent_task.id, child_task.id)
-            .await;
-
-        // Register for cascade-cancel: cancelling the parent must cancel this
-        // delegated child too. add_dependency only tracks the wait edge; without
-        // this the child is orphaned when the parent is cancelled.
+        // Background delegation: the parent keeps working while the child runs.
+        // `register_child` covers cascade-cancel *and* marks the child as not
+        // yet reported; the child's result is injected into the parent's
+        // context when it finishes, and a parent that reaches its final answer
+        // first parks there until the report requeues it
+        // (`TaskScheduler::park_until_children_report`). No dependency edge —
+        // that wake fires for any `Waiting` parent, including one parked on an
+        // approval.
         self.scheduler
             .register_child(parent_task.id, child_task.id)
             .await;
-
-        // Park the parent BEFORE the child becomes runnable. `add_dependency`
-        // alone never blocked anyone: the child's `complete_dependency` →
-        // `requeue(parent)` wake is a deliberate no-op unless the parent is
-        // already `Waiting` (see `TaskScheduler::requeue`), so a `Running`
-        // parent consumed the edge and never observed the result. Parking
-        // before `enqueue` closes the window in which a fast child could
-        // finish while the parent is still `Running`.
-        //
-        // A caller with no scheduler-registered task (the chat path's synthetic
-        // task, the MCP gateway) cannot be parked — it stays fire-and-forget and
-        // reports `queued` so the returned status is never a lie.
-        let parked = matches!(
-            self.scheduler
-                .update_state_if_not_terminal(&parent_task.id, TaskState::Waiting)
-                .await,
-            Ok(true)
-        );
 
         let _ = self.scheduler.enqueue(child_task.clone()).await;
 
@@ -674,32 +669,18 @@ impl Kernel {
         )
         .await;
 
-        // `waiting_for_child` is the executor's signal to stop iterating (see
-        // `Kernel::parked_on_delegation`); the child's completion requeues us.
-        let (status, note) = if parked {
-            (
-                "waiting_for_child",
-                "You are paused until this child finishes; its output is delivered into your context and you resume automatically.",
-            )
-        } else {
-            (
-                "queued",
-                "Delegation is not blocking for this caller; poll with task-status.",
-            )
-        };
         Ok(serde_json::json!({
             "delegated_to": target_agent_name,
             "child_task_id": child_task.id.to_string(),
-            "status": status,
-            "note": note,
+            "status": "running_in_background",
+            "note": "The child runs in the background — keep working. Its output is delivered into your context when it finishes; if you finish first you are resumed automatically when it reports.",
         }))
     }
 
-    /// Fire-and-forget async spawn. No scheduler dependency is added so the spawning task
-    /// continues without waiting. When the child completes, `inject_sub_agent_result` in
-    /// `task_completion.rs` fires (triggered by `parent_task_id`) — but only if the spawner's
-    /// context window is still active. Use `poll-agent` with the returned task_id for reliable
-    /// status checks across task boundaries.
+    /// Background spawn: the spawning task continues without waiting. When the child
+    /// completes, `inject_sub_agent_result` in `task_completion.rs` delivers its output into
+    /// the spawner's context; a spawner that reaches its final answer first parks until the
+    /// child reports (see `handle_task_delegation`).
     pub(crate) async fn handle_spawn_async(
         &self,
         spawner_task: &AgentTask,
@@ -769,12 +750,11 @@ impl Kernel {
             chain_depth: spawner_task.event_chain_depth(),
         };
 
-        let _ = self.scheduler.enqueue(child_task.clone()).await;
-        // Register child for cascade-cancel: cancelling the spawner cancels this child too.
+        // Register before enqueue: a fast child must not report before it is tracked.
         self.scheduler
             .register_child(spawner_task.id, child_task.id)
             .await;
-        // Intentionally no add_dependency — parent is NOT blocked.
+        let _ = self.scheduler.enqueue(child_task.clone()).await;
 
         self.emit_event(
             EventType::TaskDelegated,
@@ -815,7 +795,7 @@ impl Kernel {
             "spawned_agent": target_agent_name,
             "task_id": child_task.id.to_string(),
             "status": "queued",
-            "notification": "result injected into your context if still running; use poll-agent for reliable status",
+            "notification": "result is delivered into your context when the child finishes; if you finish first you are resumed automatically",
         }))
     }
 

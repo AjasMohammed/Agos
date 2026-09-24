@@ -261,6 +261,11 @@ pub struct CapabilityDispatchRequest {
     /// Workspace grants with `--mode rwx`: the only user folders sandboxed
     /// build/process commands may write or run in.
     pub workspace_paths_executable: Vec<std::path::PathBuf>,
+    /// Live storage zones for this agent — the conversation shared workspace
+    /// among them. Carried so build/process commands can run where the file
+    /// tools can already write; without it an agent can scaffold a project in
+    /// the shared workspace and not be able to build it.
+    pub storage_zones: Vec<(std::path::PathBuf, ZoneAccessLevel)>,
 }
 
 #[async_trait::async_trait]
@@ -301,4 +306,9 @@ pub trait StorageZoneQuery: Send + Sync {
 
     /// Return the access level for a path within a zone, or None if not in any zone.
     fn zone_access(&self, agent_id: &AgentID, path: &std::path::Path) -> Option<ZoneAccessLevel>;
+
+    /// Every live zone for this agent, as (path, access). Sandbox builders bind
+    /// directories when the command is constructed and cannot use the
+    /// path-at-a-time accessors above.
+    fn zones_for(&self, agent_id: &AgentID) -> Vec<(std::path::PathBuf, ZoneAccessLevel)>;
 }

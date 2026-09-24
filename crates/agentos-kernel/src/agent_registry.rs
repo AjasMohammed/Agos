@@ -380,11 +380,22 @@ impl AgentRegistry {
             for entry in agent.permissions.entries() {
                 effective.grant_entry(entry);
             }
+            // Deny entries must survive: they are how an operator narrows a
+            // broader grant (e.g. one skill out of the default `skill:` grant,
+            // or a revoked late-default), and `check()` honours them ahead of
+            // every grant. Dropping them here made every such revoke inert on
+            // the runtime path while the stored set still showed the deny.
+            for pattern in &agent.permissions.deny_entries {
+                effective.deny(pattern.clone());
+            }
             // Next, merge in all role permissions
             for role_name in &agent.roles {
                 if let Some(role) = self.get_role_by_name(role_name) {
                     for entry in role.permissions.entries() {
                         effective.grant_entry(entry);
+                    }
+                    for pattern in &role.permissions.deny_entries {
+                        effective.deny(pattern.clone());
                     }
                 }
             }
@@ -725,6 +736,46 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn cross_agent_schedule_runs_with_creator_intersect_target() {
+        use crate::commands::background::clamp_to_schedule_creator;
+
+        let mut worker = make_agent("worker");
+        worker
+            .permissions
+            .grant("fs:/data".into(), true, true, false, None);
+        worker
+            .permissions
+            .grant_op("process.exec".into(), PermissionOp::Execute, None);
+        let mut creator = make_agent("creator");
+        creator
+            .permissions
+            .grant("fs:/data".into(), true, false, false, None);
+
+        let mut registry = AgentRegistry::new();
+        let worker_id = registry.register(worker);
+        let creator_id = registry.register(creator);
+        let full = registry.compute_effective_permissions(&worker_id);
+
+        // Scheduled by a weaker agent: only what both hold survives.
+        let clamped =
+            clamp_to_schedule_creator(&registry, worker_id, full.clone(), Some(creator_id));
+        assert!(clamped.check("fs:/data", PermissionOp::Read));
+        assert!(!clamped.check("fs:/data", PermissionOp::Write));
+        assert!(!clamped.check("process.exec", PermissionOp::Execute));
+
+        // Operator-created and self-scheduled: untouched.
+        for same in [None, Some(worker_id)] {
+            let p = clamp_to_schedule_creator(&registry, worker_id, full.clone(), same);
+            assert!(p.check("fs:/data", PermissionOp::Write));
+            assert!(p.check("process.exec", PermissionOp::Execute));
+        }
+
+        // Creator since deleted: fail closed.
+        let orphan = clamp_to_schedule_creator(&registry, worker_id, full, Some(AgentID::new()));
+        assert!(!orphan.check("fs:/data", PermissionOp::Read));
+    }
+
     fn make_agent(name: &str) -> AgentProfile {
         AgentProfile {
             id: AgentID::new(),
@@ -746,6 +797,24 @@ mod tests {
             working_set_size: None,
             avatar: None,
         }
+    }
+
+    #[test]
+    fn effective_permissions_carry_deny_entries() {
+        // Regression: denies were dropped here, so every runtime check ran
+        // against a deny-free set — a revoked skill (or any narrowed grant)
+        // stayed fully available while the stored set showed the deny.
+        let mut registry = AgentRegistry::new();
+        let mut agent = make_agent("denied-skill-agent");
+        agent
+            .permissions
+            .grant_op("skill:".to_string(), PermissionOp::Execute, None);
+        agent.permissions.deny("skill:researcher/".to_string());
+        let id = registry.register(agent);
+
+        let effective = registry.compute_effective_permissions(&id);
+        assert!(effective.check("skill:secops-monitor/", PermissionOp::Execute));
+        assert!(!effective.check("skill:researcher/", PermissionOp::Execute));
     }
 
     #[test]

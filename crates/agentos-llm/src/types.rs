@@ -54,11 +54,25 @@ pub struct InferenceOptions {
     /// Seed for reproducible output (OpenAI only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
-    /// Extended thinking budget in tokens (Anthropic claude-3-7+ only).
-    /// When set, the model reasons before responding, improving complex task quality.
+    /// Extended thinking budget in tokens. When set, the model reasons before
+    /// responding, improving complex task quality.
     /// Typical values: 1024 (low), 8192 (medium), 32768 (high), 100000 (max).
+    ///
+    /// Consumed as a token budget by Anthropic below Claude 4.6 and by Gemini
+    /// 2.5 (`thinkingConfig.thinkingBudget`). Providers whose API takes a
+    /// depth rung rather than a budget read `thinking_effort` instead; both
+    /// fields are set together, so an adapter picks whichever its API wants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<u32>,
+    /// Reasoning depth as a rung rather than a token budget. One of
+    /// `low` / `medium` / `high` / `xhigh` / `max`.
+    ///
+    /// Maps to `output_config.effort` on Claude 4.6+, `reasoning_effort` on
+    /// OpenAI-shaped endpoints, `thinkingConfig.thinkingLevel` on Gemini 3,
+    /// and `think` on Ollama. Ignored by models that take a budget instead,
+    /// and by models with no reasoning mode at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<String>,
     /// Whether to inject Anthropic prompt-cache control markers on the system prompt.
     /// Enables up to 90% token cost savings on repeated context. Default: false.
     #[serde(default)]
@@ -79,6 +93,32 @@ pub struct InferenceOptions {
     /// adapter reports `supports_deferred_tools()`.
     #[serde(default)]
     pub deferred_tools_from: Option<usize>,
+}
+
+impl InferenceOptions {
+    /// `reasoning_effort` value for OpenAI-shaped endpoints, or `None` when
+    /// thinking is off.
+    ///
+    /// `xhigh` and `max` are Anthropic-only rungs and land on `high`, which is
+    /// OpenAI's ceiling. A rung from neither list sends nothing at all.
+    pub fn openai_reasoning_effort(&self) -> Option<&'static str> {
+        let rung = self.thinking_effort.as_deref()?;
+        match rung {
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" | "xhigh" | "max" => Some("high"),
+            // An unknown rung sends nothing rather than guessing: guessing up
+            // silently turns a cheap request into an expensive one, and
+            // guessing at all can be a 400 on an enum the endpoint never had.
+            other => {
+                tracing::warn!(
+                    rung = %other,
+                    "unrecognised thinking effort; sending no reasoning_effort"
+                );
+                None
+            }
+        }
+    }
 }
 
 /// Anthropic prompt-cache entry lifetime.
@@ -199,27 +239,60 @@ pub struct InferenceCost {
 }
 
 /// Built-in pricing table for known models (USD per 1K tokens).
-/// Updated as of March 2026. Users can override via config.
+/// Updated as of September 2026. Users can override via config.
+///
+/// Every entry is also a prefix: `lookup_pricing` matches dated ids such as
+/// `claude-haiku-4-5-20251001` against the undated alias.
 pub fn default_pricing_table() -> Vec<ModelPricing> {
     vec![
         // Anthropic
         ModelPricing {
             provider: "anthropic".into(),
-            model: "claude-sonnet-4-6".into(),
+            model: "claude-fable-5".into(), // covers -5-1
+            input_per_1k: 0.010,
+            output_per_1k: 0.050,
+        },
+        ModelPricing {
+            provider: "anthropic".into(),
+            model: "claude-opus-5".into(),
+            input_per_1k: 0.005,
+            output_per_1k: 0.025,
+        },
+        ModelPricing {
+            provider: "anthropic".into(),
+            model: "claude-opus-4".into(), // 4-5 through 4-8, same tier
+            input_per_1k: 0.005,
+            output_per_1k: 0.025,
+        },
+        ModelPricing {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+            input_per_1k: 0.002,
+            output_per_1k: 0.010,
+        },
+        ModelPricing {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4".into(),
             input_per_1k: 0.003,
             output_per_1k: 0.015,
         },
         ModelPricing {
             provider: "anthropic".into(),
-            model: "claude-opus-4-6".into(),
-            input_per_1k: 0.015,
-            output_per_1k: 0.075,
+            model: "claude-haiku-4-5".into(),
+            input_per_1k: 0.001,
+            output_per_1k: 0.005,
         },
+        // Unknown Anthropic model: price it at the Opus tier rather than free.
+        // Without this entry every id the table does not name fell through to
+        // zero, so cost budgets could never fire for it — an unpriced model is
+        // far likelier to be a new flagship than to be free. Over-estimating
+        // trips a budget early, which is visible; under-estimating to zero is
+        // silent.
         ModelPricing {
             provider: "anthropic".into(),
-            model: "claude-haiku-4-5".into(),
-            input_per_1k: 0.0008,
-            output_per_1k: 0.004,
+            model: "*".into(),
+            input_per_1k: 0.005,
+            output_per_1k: 0.025,
         },
         // OpenAI
         ModelPricing {
@@ -255,6 +328,35 @@ pub fn default_pricing_table() -> Vec<ModelPricing> {
             output_per_1k: 0.0,
         },
     ]
+}
+
+/// Resolve pricing for `provider` + `model`: exact id, then the longest entry
+/// that `model` starts with (so `claude-haiku-4-5-20251001` resolves via
+/// `claude-haiku-4-5`), then the provider's `"*"` entry, then zero.
+///
+/// One function because six call sites had each grown their own copy of this
+/// lookup, and only some of them handled the wildcard.
+///
+/// The returned `model` is always the id that was asked for, not the table
+/// entry that matched, so cost attribution records the model actually called.
+pub fn lookup_pricing(table: &[ModelPricing], provider: &str, model: &str) -> ModelPricing {
+    let of_provider = || table.iter().filter(|p| p.provider == provider);
+
+    let matched = of_provider()
+        .find(|p| p.model == model)
+        .or_else(|| {
+            of_provider()
+                .filter(|p| p.model != "*" && model.starts_with(&p.model))
+                .max_by_key(|p| p.model.len())
+        })
+        .or_else(|| of_provider().find(|p| p.model == "*"));
+
+    ModelPricing {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        input_per_1k: matched.map(|p| p.input_per_1k).unwrap_or(0.0),
+        output_per_1k: matched.map(|p| p.output_per_1k).unwrap_or(0.0),
+    }
 }
 
 /// Calculate the cost of an inference call.
@@ -360,6 +462,52 @@ pub fn parse_uncertainty(text: &str) -> Option<UncertaintyDeclaration> {
 mod tests {
     use super::*;
 
+    /// Cost budgets are enforced from this table, so a model the table cannot
+    /// price is a budget that can never fire. Before the `"*"` entry every
+    /// current Anthropic id fell through to $0 and agents billed nothing.
+    #[test]
+    fn test_current_anthropic_models_are_never_free() {
+        let table = default_pricing_table();
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-opus-4-8",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001", // dated id resolves via the alias
+            "claude-something-not-yet-released",
+        ] {
+            let p = lookup_pricing(&table, "anthropic", model);
+            assert!(
+                p.input_per_1k > 0.0 && p.output_per_1k > 0.0,
+                "{model} priced at zero — its cost budget can never fire"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lookup_pricing_prefers_exact_then_longest_prefix() {
+        let table = default_pricing_table();
+        // Longest prefix wins: opus-5 must not resolve via `claude-opus-4`.
+        assert_eq!(
+            lookup_pricing(&table, "anthropic", "claude-opus-5").output_per_1k,
+            0.025
+        );
+        assert_eq!(
+            lookup_pricing(&table, "anthropic", "claude-sonnet-5").output_per_1k,
+            0.010
+        );
+        // A local ollama model stays free through the provider wildcard.
+        assert_eq!(lookup_pricing(&table, "ollama", "llama3").input_per_1k, 0.0);
+        // A provider with no entries at all still yields zero, not a panic.
+        assert_eq!(
+            lookup_pricing(&table, "nonesuch", "whatever").input_per_1k,
+            0.0
+        );
+    }
+
     #[test]
     fn test_parse_uncertainty_block() {
         let text = r#"Here is my analysis.
@@ -447,6 +595,7 @@ And here is the rest of the response."#;
             json_mode: true,
             seed: Some(42),
             thinking_budget_tokens: None,
+            thinking_effort: None,
             enable_prompt_caching: false,
             cache_ttl: PromptCacheTtl::OneHour,
             tools_cache_prefix_len: None,
@@ -559,5 +708,29 @@ And here is the rest of the response."#;
         assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert!(result.cost.is_none());
         assert_eq!(result.cached_tokens, 0);
+    }
+
+    /// `xhigh` and `max` exist on Anthropic only; sending either to an
+    /// OpenAI-shaped endpoint is a 400 on an unknown enum value.
+    #[test]
+    fn reasoning_effort_clamps_anthropic_only_rungs() {
+        let rung = |e: Option<&str>| {
+            InferenceOptions {
+                thinking_effort: e.map(str::to_string),
+                ..Default::default()
+            }
+            .openai_reasoning_effort()
+        };
+        assert_eq!(rung(None), None);
+        assert_eq!(rung(Some("low")), Some("low"));
+        assert_eq!(rung(Some("medium")), Some("medium"));
+        assert_eq!(rung(Some("high")), Some("high"));
+        assert_eq!(rung(Some("xhigh")), Some("high"));
+        assert_eq!(rung(Some("max")), Some("high"));
+        // Unknown rung must send nothing, not the most expensive thing on the
+        // menu: `thinking_effort` is a free-form String, so a future
+        // `ThinkingLevel` variant or a config typo reaches here unvalidated.
+        assert_eq!(rung(Some("minimal")), None);
+        assert_eq!(rung(Some("")), None);
     }
 }

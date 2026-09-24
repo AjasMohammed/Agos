@@ -1,7 +1,6 @@
 //! OAuth2 Authorization-Code + PKCE flow for connectors.
 //!
-//! Shared by the REST API (`agentos-api`) and the legacy HTMX UI
-//! (`agentos-web`): both are thin HTTP shells over [`Kernel::oauth_begin`] and
+//! The REST API (`agentos-api`) is a thin HTTP shell over [`Kernel::oauth_begin`] and
 //! [`Kernel::oauth_complete`]. Pending-flow state (CSRF `state`, PKCE verifier)
 //! lives in the vault's OAuth store with a 10-minute TTL.
 

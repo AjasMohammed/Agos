@@ -34,7 +34,7 @@
 <p>This follows the same pattern as Android (system services), WASI (capability handles), iOS (scoped storage), and browsers (fetch + CORS).</p>
 <hr>
 <h2 id="architecture" class="anchored"><a class="hanchor" href="#architecture" aria-label="link">#</a>Architecture</h2>
-<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent Intent: &quot;Install numpy and run pytest&quot;
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent Intent: "Install numpy and run pytest"
          |
          v
 +-------------------------------------+
@@ -56,7 +56,7 @@
 +-------------------------------------+
          |
          v
-Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &quot;1.26.4&quot; }
+Agent receives: { "package": "numpy", "version": "1.26.4" }
 (structured data, not raw stdout)
 </pre></div>
 </div>
@@ -71,10 +71,10 @@ Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &
 <ul><li><code>curated</code> (default) -- only packages on the allowlist (in <code>config/allowlists/</code>)</li><li><code>open</code> -- any package allowed</li><li><code>locked</code> -- all packages require operator approval</li></ul>
 <p><strong>Example:</strong></p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Create a Python workspace</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ecosystem&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;python&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"my-project"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ecosystem"</span><span class="p">:</span><span class="w"> </span><span class="s2">"python"</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Install a package</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;package&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;flask&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&gt;=3.0&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;workspace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-project&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"package"</span><span class="p">:</span><span class="w"> </span><span class="s2">"flask"</span><span class="p">,</span><span class="w"> </span><span class="nt">"version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&gt;=3.0"</span><span class="p">,</span><span class="w"> </span><span class="nt">"workspace"</span><span class="p">:</span><span class="w"> </span><span class="s2">"my-project"</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="2-managed-storage-zones-storage" class="anchored"><a class="hanchor" href="#2-managed-storage-zones-storage" aria-label="link">#</a>2. Managed Storage Zones (<code>storage.*</code>)</h3>
@@ -87,7 +87,7 @@ Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &
 <ul><li><code>ro</code> (read-only) -- file tools can read but not write</li><li><code>rw</code> (read-write) -- full access</li></ul>
 <p><strong>File Tool Integration:</strong> Once a zone is active, all 8 file tools (reader, writer, editor, delete, move, glob, grep, diff) automatically recognize files within the zone. Write tools enforce <code>ReadOnly</code> zones.</p>
 <p><strong>Example:</strong></p>
-<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/home/user/projects/myapp&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;access&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;rw&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">"path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/home/user/projects/myapp"</span><span class="p">,</span><span class="w"> </span><span class="nt">"access"</span><span class="p">:</span><span class="w"> </span><span class="s2">"rw"</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="3-managed-processes-proc" class="anchored"><a class="hanchor" href="#3-managed-processes-proc" aria-label="link">#</a>3. Managed Processes (<code>proc.*</code>)</h3>
@@ -100,13 +100,13 @@ Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &
 <ul><li>Max 8 processes per agent (configurable)</li><li>Output captured in 500-line ring buffer per process</li><li>Wall-clock timeout (default 1 hour) -- auto-kill on expiry</li></ul>
 <p><strong>Example:</strong></p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Start a dev server</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;binary&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;python&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;-m&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;http.server&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;8080&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"binary"</span><span class="p">:</span><span class="w"> </span><span class="s2">"python"</span><span class="p">,</span><span class="w"> </span><span class="nt">"args"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"-m"</span><span class="p">,</span><span class="w"> </span><span class="s2">"http.server"</span><span class="p">,</span><span class="w"> </span><span class="s2">"8080"</span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Check its output</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;process_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;proc-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;lines&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"process_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"proc-1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"lines"</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
 
 <span class="c1">// Stop it</span>
-<span class="p">{</span><span class="w"> </span><span class="nt">&quot;process_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;proc-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;signal&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SIGTERM&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">"process_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"proc-1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"signal"</span><span class="p">:</span><span class="w"> </span><span class="s2">"SIGTERM"</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="4-managed-networking-net" class="anchored"><a class="hanchor" href="#4-managed-networking-net" aria-label="link">#</a>4. Managed Networking (<code>net.*</code>)</h3>
@@ -118,7 +118,7 @@ Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &
 <p><strong>Default Allowed Destinations:</strong> <code>*.github.com</code>, <code>api.openai.com</code>, <code>api.anthropic.com</code>, <code>pypi.org</code>, <code>registry.npmjs.org</code>, <code>crates.io</code>, <code>*.googleapis.com</code></p>
 <p><strong>Default Denied:</strong> <code>169.254.169.254</code> (cloud metadata), all RFC 1918 ranges (<code>10.*</code>, <code>172.16-31.*</code>, <code>192.168.*</code>), loopback (<code>127.*</code>), IPv6 private/link-local</p>
 <p><strong>Example:</strong></p>
-<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://api.github.com/repos/owner/repo&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;GET&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://api.github.com/repos/owner/repo"</span><span class="p">,</span><span class="w"> </span><span class="nt">"method"</span><span class="p">:</span><span class="w"> </span><span class="s2">"GET"</span><span class="w"> </span><span class="p">}</span>
 </pre></div>
 </div>
 <h3 id="5-managed-builds-build" class="anchored"><a class="hanchor" href="#5-managed-builds-build" aria-label="link">#</a>5. Managed Builds (<code>build.*</code>)</h3>
@@ -129,15 +129,15 @@ Agent receives: { &quot;package&quot;: &quot;numpy&quot;, &quot;version&quot;: &
 <ul><li><code>Cargo.toml</code> present --&gt; Rust (<code>cargo test</code>, <code>cargo clippy</code>)</li><li><code>package.json</code> present --&gt; Node.js (<code>npm test</code>, <code>npx eslint</code>)</li><li><code>pyproject.toml</code> / <code>setup.py</code> present --&gt; Python (<code>pytest</code>, <code>python -m flake8</code>)</li><li><code>go.mod</code> present --&gt; Go (<code>go test ./...</code>, <code>go vet ./...</code>)</li><li><code>Makefile</code> present --&gt; Make (<code>make test</code>)</li></ul>
 <p><strong>Structured Output:</strong> Test results are parsed into JSON with pass/fail counts:</p>
 <div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;failed&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;exit_code&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;tests&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;failed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ignored&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;failures&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
-<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;test_auth_flow&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assertion failed...&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"failed"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"exit_code"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"tests"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"total"</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="nt">"passed"</span><span class="p">:</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="nt">"failed"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"ignored"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"failures"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"test_auth_flow"</span><span class="p">,</span><span class="w"> </span><span class="nt">"message"</span><span class="p">:</span><span class="w"> </span><span class="s2">"assertion failed..."</span><span class="w"> </span><span class="p">}</span>
 <span class="w">    </span><span class="p">]</span>
 <span class="w">  </span><span class="p">},</span>
-<span class="w">  </span><span class="nt">&quot;duration_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8234</span>
+<span class="w">  </span><span class="nt">"duration_ms"</span><span class="p">:</span><span class="w"> </span><span class="mi">8234</span>
 <span class="p">}</span>
 </pre></div>
 </div>

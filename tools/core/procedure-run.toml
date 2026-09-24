@@ -1,0 +1,67 @@
+tags = ["read", "exec"]
+# A procedure is an UNBOUNDED bag of tools, so the worst step sets the class and
+# the wrapper cannot know which that is in advance. Deliberately absent from any
+# [risk_class_by_action] table — that table may only ever LOWER a class to
+# readonly_external, which this is not. Each step is then gated individually
+# against the running agent's own permissions.
+risk_class = "control_plane"
+
+[manifest]
+name        = "procedure-run"
+version     = "1.0.0"
+description = "Run a stored executable procedure: every step is invoked directly, with no LLM in the loop, so the sequence is the same every time. Find one with procedure-search or procedure-list; write one with procedure-create. Each step still runs under your own permissions — a step you are not entitled to fails, and the run stops there."
+author      = "agentos-core"
+trust_tier  = "core"
+category    = "memory"
+search_hints = ["run a saved workflow", "execute a procedure", "replay those steps", "run the pipeline I saved", "do that routine again"]
+
+[capabilities_required]
+# Permission to READ the recipe. Authority for each step comes from that step's
+# own capability token, minted from your PermissionSet — so writing an ambitious
+# procedure grants nothing it does not already have.
+permissions = ["memory.procedural:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ProcedureRunIntent"
+output = "ProcedureRunResult"
+
+[payload_schema]
+type = "object"
+required = ["procedure"]
+
+[payload_schema.properties.procedure]
+type = "string"
+description = "Name of the stored procedure to run. Your own procedures take precedence over global ones of the same name. Alias: 'name'."
+
+[payload_schema.properties.inputs]
+type = "object"
+description = "Values for the parameters the procedure declares. A name it does not declare is an error, not a no-op — a typo would otherwise run with a default you thought you had overridden."
+
+[payload_schema.properties.detach]
+type = "boolean"
+default = false
+description = "Return a run id immediately instead of waiting. Use it for a long recipe; check the result with bg list."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []
+
+[usage_hints]
+use_for = [
+  "repeating a multi-step routine exactly, without spending an inference per step re-deriving it",
+]
+prefer_over = [
+  "calling the same sequence of tools by hand every time — the procedure is one call, and it cannot drift",
+]
+related_tools = ["procedure-create", "procedure-search", "procedure-list"]
+
+[[examples]]
+description = "Run a saved recipe with one parameter"
+payload = { procedure = "speak-aloud", inputs = { text = "The backup finished." } }

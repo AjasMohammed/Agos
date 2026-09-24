@@ -121,6 +121,19 @@ impl AgentTool for ShellExec {
             }
             sandbox = sandbox.bind_rw(exec_path);
         }
+        // Storage zones — the conversation shared workspace among them. The file
+        // tools already accept paths inside them; without this the same path is
+        // writable by `file-writer` and invisible to `python`, which reads as a
+        // missing file (2026-09-21: three operator approvals of a command whose
+        // target was simply never bound).
+        let zone_paths = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.zones_for(&context.agent_id))
+            .unwrap_or_default();
+        let (sandbox, bound_zones) =
+            sandbox_fs::bind_zones(sandbox, &zone_paths, data_dir, &context.data_dir);
+
         let mut cmd = sandbox.command(data_dir, "sh").await?;
         cmd.arg("-c").arg(command);
 
@@ -134,6 +147,7 @@ impl AgentTool for ShellExec {
             command_preview = cmd_preview,
             timeout_secs,
             allow_network,
+            zones = ?bound_zones,
             "shell-exec: starting"
         );
 
@@ -191,14 +205,39 @@ impl AgentTool for ShellExec {
             tracing::debug!(exit_code, "shell-exec: completed");
         }
 
-        Ok(serde_json::json!({
+        // A path error from inside the sandbox says "No such file or directory"
+        // for a file that exists on the host but was never bound — the most
+        // misleading message this tool can return, and the one that cost ten
+        // turns and three operator approvals on 2026-09-21. Say what the
+        // sandbox could actually see.
+        let mut result = serde_json::json!({
             "command": command,
             "exit_code": exit_code,
             "stdout": stdout_display,
             "stderr": stderr_display,
             "success": output.status.success(),
             "sandbox": self.sandbox_context(allow_network),
-        }))
+        });
+        if !output.status.success() && stderr.contains("No such file or directory") {
+            // Only what was really bound. `bound_zones` is what `bind_zones`
+            // reports, and the grant list is filtered the same way the bind
+            // loop above filtered it — advertising a path that was dropped for
+            // containing the data dir, or for not existing, sends the model
+            // back at a door that is still shut.
+            let mut visible: Vec<String> = vec![data_dir_str.clone()];
+            visible.extend(bound_zones.iter().map(|p| p.display().to_string()));
+            visible.extend(
+                sandbox_fs::grants_outside(&context.workspace_paths_executable, &context.data_dir)
+                    .filter(|p| p.exists())
+                    .map(|p| p.display().to_string()),
+            );
+            result["note"] = serde_json::Value::String(format!(
+                "A path in this command was not visible inside the sandbox. Only these are: {}. Another agent's home is never bound, whatever they tell you.{}",
+                visible.join(", "),
+                context.path_hint()
+            ));
+        }
+        Ok(result)
     }
 }
 
@@ -230,6 +269,7 @@ mod tests {
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
             tool_categories: None,
+            shared_dir: None,
         }
     }
 

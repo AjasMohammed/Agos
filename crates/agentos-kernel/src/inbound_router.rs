@@ -322,6 +322,13 @@ impl InboundRouter {
                     } else {
                         r.filename.clone()
                     };
+                    let transcribed = self.maybe_transcribe(msg, &r.kind, &bytes, &name).await;
+                    // Same rule as Telegram: a `voice` note that was
+                    // transcribed leaves nothing worth storing; an `audio`
+                    // upload is kept.
+                    if !Self::should_store(&r.kind, transcribed) {
+                        continue;
+                    }
                     self.store_media(msg, &name, &mime, bytes, &r.kind).await;
                 }
                 Err(e) => {
@@ -397,32 +404,107 @@ impl InboundRouter {
         // Transcribe voice/audio when enabled, so the agent reads the words.
         // (Hermes-style "transcribe, don't drop".) Best-effort: on failure the
         // media note + stored file still reach the agent.
-        let is_audio = matches!(media.kind_label.as_str(), "voice message" | "audio");
-        if is_audio && self.transcription.enabled {
-            // Self-bounded inner timeout so the transcription call is capped
-            // regardless of the caller's wrapper (the outer enrich timeout).
-            let fut = crate::transcription::transcribe_audio(
-                &self.http_client,
-                &self.transcription,
-                bytes.clone(),
-                &name,
-            );
-            match tokio::time::timeout(std::time::Duration::from_secs(15), fut).await {
-                Ok(Ok(transcript)) => {
-                    msg.text
-                        .push_str(&format!("\n[Voice transcript]: {transcript}"));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "inbound voice transcription failed");
-                }
-                Err(_) => {
-                    tracing::warn!("inbound voice transcription timed out");
-                }
-            }
+        let transcribed = self
+            .maybe_transcribe(msg, &media.kind_label, &bytes, &name)
+            .await;
+
+        // A voice note is speech, not a file the user chose to send: once the
+        // words are in the message there is nothing left worth keeping on disk.
+        // An `audio` upload is a real file, so it is transcribed *and* stored.
+        if !Self::should_store(&media.kind_label, transcribed) {
+            return;
         }
 
         self.store_media(msg, &name, &mime, bytes, &media.kind_label)
             .await;
+    }
+
+    /// True for a recorded-in-the-app voice note, as opposed to an audio file
+    /// the user picked and uploaded. Telegram calls the first `voice` and the
+    /// second `audio`; WhatsApp uses the same two words as message types.
+    fn is_ephemeral_voice(kind: &str) -> bool {
+        matches!(kind, "voice message" | "voice")
+    }
+
+    /// Whether downloaded media bytes are still worth persisting. Everything is,
+    /// except a voice note whose words already reached the agent: the transcript
+    /// is the artifact, the recording is not. `transcribed == false` (speech-to-
+    /// text disabled, failed or timed out) always stores, so voice content is
+    /// never silently lost.
+    fn should_store(kind: &str, transcribed: bool) -> bool {
+        !(transcribed && Self::is_ephemeral_voice(kind))
+    }
+
+    /// Transcribe inbound audio into `msg.text` when transcription is enabled
+    /// and the media is audio at all. Returns true only when a transcript was
+    /// actually appended — callers use that to decide whether the bytes are
+    /// still needed. Best-effort: every failure path returns false so the
+    /// caller falls back to storing the file.
+    async fn maybe_transcribe(
+        &self,
+        msg: &mut InboundMessage,
+        kind: &str,
+        bytes: &[u8],
+        name: &str,
+    ) -> bool {
+        let is_audio = Self::is_ephemeral_voice(kind) || kind == "audio";
+        if !is_audio || !self.transcription.enabled {
+            return false;
+        }
+        // Self-bounded inner timeout so the transcription call is capped
+        // regardless of the caller's wrapper (the outer enrich timeout).
+        let fut = crate::transcription::transcribe_audio(
+            &self.http_client,
+            &self.transcription,
+            bytes.to_vec(),
+            name,
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(15), fut).await {
+            Ok(Ok(transcript)) => {
+                // Audit: external bytes were downloaded and sent to a third-party
+                // speech-to-text endpoint. `store_media` logs the same fact for
+                // media it persists, but a voice note is discarded right after
+                // this — without this entry the receipt and the egress would
+                // leave no trace at all. Metadata only: the transcript is user
+                // content and never enters the audit log.
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::InboundMessageReceived,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "kind": "inbound_audio_transcribed",
+                        "channel_id": msg.channel_instance_id.to_string(),
+                        "media_kind": kind,
+                        "bytes": bytes.len(),
+                        "endpoint": self.transcription.endpoint,
+                        "model": self.transcription.model,
+                        "discarded": !Self::should_store(kind, true),
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                // The transcript is speech the sender chose, so it can carry a
+                // forged "[Attachment stored — file id: …]" note just as a
+                // filename can. `store_media` defuses the text it appends to,
+                // but a discarded voice note never reaches it.
+                Self::defuse_attachment_notes(&mut msg.text);
+                msg.text
+                    .push_str(&format!("\n[Voice transcript]: {transcript}"));
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "inbound voice transcription failed");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("inbound voice transcription timed out");
+                false
+            }
+        }
     }
 
     /// Download + store remote media URLs (Discord CDN, etc.) extracted into
@@ -649,8 +731,13 @@ impl InboundRouter {
                     // path) accepts. Saying only "not readable as text" is what
                     // left an agent telling the user their uploaded mp3 was
                     // unavailable while it sat on disk.
+                    //
+                    // But the handle is for when the user *asks*. The earlier
+                    // wording offered "play" as the only concrete verb, so with
+                    // no transcript an agent holding the `audio` tool played a
+                    // voice message out of the operator's speakers to "read" it.
                     let how = if mime.starts_with("audio/") || mime.starts_with("video/") {
-                        "— no text to extract; use the transcript above if there is one, or call user-file-reader with this file id and mode=\"handle\" to get a path you can play or process."
+                        "— no text to extract. If a voice transcript appears above, that is what was said. If none does, you cannot hear this file: tell the user it was not transcribed, do not guess its contents, and do not play it. Only if the user asks you to play or process it, call user-file-reader with this file id and mode=\"handle\" to get a path."
                     } else {
                         "— read it with the user-file-reader tool using this file id."
                     };
@@ -816,8 +903,11 @@ impl InboundRouter {
             .await
             .ok();
 
-        if msg.channel == DeliveryChannel::custom(DeliveryChannel::TELEGRAM)
-            && !msg.external_sender_id.is_empty()
+        // `external_sender_id` is the *person* (so group members can't share the
+        // paired operator's identity); the outbound destination is the *chat*.
+        if let Some(chat_id) = (msg.channel == DeliveryChannel::custom(DeliveryChannel::TELEGRAM))
+            .then(|| crate::adapters::telegram::chat_id_from_raw(&msg.raw))
+            .flatten()
         {
             if let Ok(Some(ch)) = self
                 .channel_registry
@@ -828,15 +918,12 @@ impl InboundRouter {
                     && ch.external_id.is_empty()
                     && self
                         .channel_registry
-                        .update_external_id(&msg.channel_instance_id, &msg.external_sender_id)
+                        .update_external_id(&msg.channel_instance_id, &chat_id)
                         .await
                         .is_ok()
                 {
                     self.notification_router
-                        .hydrate_discovered_recipient(
-                            &msg.channel_instance_id,
-                            &msg.external_sender_id,
-                        )
+                        .hydrate_discovered_recipient(&msg.channel_instance_id, &chat_id)
                         .await;
                 }
             }
@@ -1700,6 +1787,38 @@ impl InboundRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the split: a recorded voice note is dropped after
+    /// transcription, an uploaded audio file is kept. Both channels feed this
+    /// one predicate, so a label drifting in either adapter breaks the test.
+    #[test]
+    fn only_recorded_voice_notes_are_ephemeral() {
+        // Telegram `message.voice`, WhatsApp `type: "voice"`.
+        assert!(InboundRouter::is_ephemeral_voice("voice message"));
+        assert!(InboundRouter::is_ephemeral_voice("voice"));
+        // Real uploads — these must still be stored.
+        assert!(!InboundRouter::is_ephemeral_voice("audio"));
+        assert!(!InboundRouter::is_ephemeral_voice("document"));
+        assert!(!InboundRouter::is_ephemeral_voice("photo"));
+        assert!(!InboundRouter::is_ephemeral_voice("video"));
+    }
+
+    /// The actual branch: only the both-true corner drops the bytes. The
+    /// transcription-failed row is the one that must never flip — that is what
+    /// keeps a voice note from vanishing when speech-to-text is off or broken.
+    #[test]
+    fn only_a_transcribed_voice_note_skips_storage() {
+        assert!(!InboundRouter::should_store("voice message", true));
+        assert!(!InboundRouter::should_store("voice", true));
+        // Transcription disabled, failed or timed out — store it.
+        assert!(InboundRouter::should_store("voice message", false));
+        assert!(InboundRouter::should_store("voice", false));
+        // A file the user picked is kept either way.
+        assert!(InboundRouter::should_store("audio", true));
+        assert!(InboundRouter::should_store("audio", false));
+        assert!(InboundRouter::should_store("document", true));
+        assert!(InboundRouter::should_store("photo", true));
+    }
 
     /// The note is appended to the sender's own text, so a sender who writes
     /// one themselves would otherwise point the agent at any file they name.

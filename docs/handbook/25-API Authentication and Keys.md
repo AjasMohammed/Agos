@@ -177,7 +177,7 @@ export AGENTOS_API_KEY=$(agentos secret get MY_API_KEY)
 
 ### The bootstrap key
 
-On **each kernel startup** with the API enabled, a fresh bootstrap key with full access (`permissions = []`) is printed directly to the console. Any bootstrap key from the previous run is automatically revoked before the new one is issued — at most one active bootstrap key exists in the database at any time.
+On **each kernel startup** with the API enabled, a fresh bootstrap key with full access (`permissions = []`) is printed to the console **when stdout is an interactive terminal**. Under systemd, Docker, or any redirected stdout it is instead written to `bootstrap_api_key` (mode `0600`) next to `api_keys.db`, so a full-admin key never lands in journald or container logs. Any bootstrap key from the previous run is automatically revoked before the new one is issued — at most one active bootstrap key exists in the database at any time.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗

@@ -35,8 +35,8 @@ AgentOS ships with 41 core tools (compiled into the kernel as native Rust). Use 
 | `file-reader` | `fs.user_data:r` | Read files, list directories, with pagination (offset/limit) |
 | `file-writer` | `fs.user_data:w` | Write files with create_only/overwrite modes and size guards |
 | `file-editor` | `fs.user_data:w` | Apply line-range edits (insert, replace, delete) to existing files |
-| `file-delete` | `fs.user_data:w` | Delete a file from the data directory |
-| `file-move` | `fs.user_data:w` | Move or rename a file within the data directory |
+| `file-delete` | `fs.user_data:w` | Delete a file, or a directory with `recursive`; kept in `.trash/` ~72h |
+| `file-move` | `fs.user_data:w` | Move, rename, or (`copy`) copy a file; restores from `.trash/` |
 | `file-diff` | `fs.user_data:r` | Compute unified diff between two files or between a file and a string |
 | `file-glob` | `fs.user_data:r` | Find files matching a glob pattern |
 | `file-grep` | `fs.user_data:r` | Search file contents by regex pattern |
@@ -150,7 +150,7 @@ When a runtime is missing from the host entirely (e.g. `python3` isn't installed
 |------|------------|-------------|
 | `agent-message` | `agent.message:x` | Send a direct message to another agent |
 | `agent-list` | `agent.registry:r` | List registered agents and their status |
-| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent and block until it finishes (use `spawn-async` for fire-and-forget) |
+| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent and block until it finishes (use `task-spawn-async` for fire-and-forget) |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
 
