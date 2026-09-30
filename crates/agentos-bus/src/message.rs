@@ -424,6 +424,11 @@ pub enum KernelCommand {
     // Audit export
     ExportAuditChain {
         limit: Option<u32>,
+        /// Page cursor: only entries with `seq` above this. The reply is also
+        /// capped in bytes, so callers page until an empty reply to stay under
+        /// the bus frame limit.
+        #[serde(default)]
+        after_seq: Option<i64>,
     },
 
     // Resource contention

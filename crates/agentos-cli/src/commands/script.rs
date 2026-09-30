@@ -49,9 +49,9 @@ pub async fn handle(client: &mut BusClient, command: ScriptCommands) -> anyhow::
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -64,9 +64,9 @@ pub async fn handle(client: &mut BusClient, command: ScriptCommands) -> anyhow::
                     println!("Script tool '{}' reloaded.", name);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

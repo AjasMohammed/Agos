@@ -57,10 +57,10 @@ pub async fn handle(client: &mut BusClient, cmd: CostCommands) -> anyhow::Result
                     );
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
         }
@@ -99,10 +99,10 @@ pub async fn handle(client: &mut BusClient, cmd: CostCommands) -> anyhow::Result
                     println!("  Reuse ratio:       {:.2}%", reuse_ratio * 100.0);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
         }

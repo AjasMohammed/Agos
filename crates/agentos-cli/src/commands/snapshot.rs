@@ -69,10 +69,10 @@ pub async fn handle(client: &mut BusClient, cmd: SnapshotCommands) -> anyhow::Re
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
             Ok(())
@@ -100,10 +100,10 @@ pub async fn handle(client: &mut BusClient, cmd: SnapshotCommands) -> anyhow::Re
                     println!("✅ Task {} rolled back to snapshot '{}'", task, snap_ref);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
             Ok(())

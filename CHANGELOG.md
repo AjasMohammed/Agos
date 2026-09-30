@@ -10,6 +10,12 @@ The distributed binary is `agentos` (crate `agentos-cli`); the version reported 
 
 ## [Unreleased]
 
+### Security
+- Outbound A2A delegation (`a2a-delegate`) no longer follows redirects and is
+  pinned to the addresses its SSRF check approved. A public peer could
+  previously redirect it, or DNS-rebind it, to loopback or cloud metadata.
+  Requests now time out after 30 s.
+
 ### Changed
 - Peripheral HAL drivers (audio, bluetooth, display, printer, raw-usb,
   usb-storage, webcam, wifi) are registered at boot only when the host has the

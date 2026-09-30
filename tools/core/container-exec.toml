@@ -37,9 +37,10 @@ type = "string"
 
 [payload_schema.properties.timeout_ms]
 type        = "integer"
-minimum     = 100
+minimum     = 1000
+maximum     = 600000
 default     = 60000
-description = "Hard wall-clock timeout in milliseconds; the kernel kills the command on expiry."
+description = "Wall-clock timeout in milliseconds (max 10 min). On expiry the call returns with exit_code -1 and the output so far; the process itself may keep running inside the container."
 
 [sandbox]
 network = false

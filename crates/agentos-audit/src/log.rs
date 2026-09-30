@@ -564,6 +564,12 @@ struct EntryHashInput<'a> {
 /// Maximum allowed size (bytes) for the `details` JSON payload of a single audit entry.
 const MAX_DETAILS_BYTES: usize = 64 * 1024; // 64 KiB
 
+/// Soft cap on one export page: half the 16 MiB bus frame, so the entry that
+/// crosses it (details ≤ 64 KiB) plus JSON framing still fits. Measured in
+/// framed bytes: the bus re-encodes the page as a JSON string, doubling every
+/// `"` and `\`.
+const EXPORT_PAGE_BYTES: usize = 8 * 1024 * 1024;
+
 impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
         let conn = Connection::open(path)
@@ -1135,9 +1141,15 @@ impl AuditLog {
         )
     }
 
-    /// Export the audit chain as JSONL (one JSON object per line).
-    /// Each entry includes its sequence, hashes, and all fields.
-    pub fn export_chain_json(&self, limit: Option<u32>) -> Result<String, AgentOSError> {
+    /// Export the audit chain as JSONL (one JSON object per line), each entry
+    /// with its sequence, hashes, and all fields. One page: entries with `seq > after_seq`, at most
+    /// `limit` of them, and stopping once the page passes `EXPORT_PAGE_BYTES`
+    /// so it always fits a bus frame. An empty page means the end.
+    pub fn export_chain_page(
+        &self,
+        limit: Option<u32>,
+        after_seq: Option<i64>,
+    ) -> Result<String, AgentOSError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let limit_val = limit.unwrap_or(100_000);
         let mut stmt = conn
@@ -1147,12 +1159,12 @@ impl AuditLog {
                  COALESCE(tool_id, ''), details, severity, \
                  COALESCE(reversible, 0), COALESCE(rollback_ref, ''), \
                  prev_hash, entry_hash \
-                 FROM audit_log ORDER BY id ASC LIMIT ?1",
+                 FROM audit_log WHERE id > ?2 ORDER BY id ASC LIMIT ?1",
             )
             .map_err(|e| AgentOSError::VaultError(format!("Export prepare error: {}", e)))?;
 
         let rows = stmt
-            .query_map(params![limit_val], |row| {
+            .query_map(params![limit_val, after_seq.unwrap_or(0)], |row| {
                 let details_str: String = row.get(7)?;
                 // details is stored as JSON text; parse it back so it embeds as a
                 // proper nested object rather than a double-encoded string.
@@ -1178,14 +1190,19 @@ impl AuditLog {
             .map_err(|e| AgentOSError::VaultError(format!("Export query error: {}", e)))?;
 
         let mut output = String::new();
+        // Bytes the bus adds re-encoding the page: `"`, `\` and `\n` gain a `\`.
+        let mut escapes = 0usize;
         for row_result in rows {
             let value = row_result
                 .map_err(|e| AgentOSError::VaultError(format!("Export row error: {}", e)))?;
-            output.push_str(
-                &serde_json::to_string(&value)
-                    .map_err(|e| AgentOSError::Serialization(e.to_string()))?,
-            );
+            let line = serde_json::to_string(&value)
+                .map_err(|e| AgentOSError::Serialization(e.to_string()))?;
+            escapes += 1 + line.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
+            output.push_str(&line);
             output.push('\n');
+            if output.len() + escapes >= EXPORT_PAGE_BYTES {
+                break;
+            }
         }
         Ok(output)
     }
@@ -1823,6 +1840,34 @@ mod tests {
             reversible: false,
             rollback_ref: None,
         }
+    }
+
+    /// Paging by `after_seq` walks the whole chain with no gap or overlap.
+    #[test]
+    fn export_pages_resume_after_the_cursor() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        for i in 0..5 {
+            log.append(make_entry(None, i)).unwrap();
+        }
+        let seqs = |page: &str| -> Vec<i64> {
+            page.lines()
+                .map(|l| {
+                    serde_json::from_str::<serde_json::Value>(l).unwrap()["seq"]
+                        .as_i64()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let first = seqs(&log.export_chain_page(Some(3), None).unwrap());
+        assert_eq!(first.len(), 3);
+        let rest = seqs(&log.export_chain_page(None, first.last().copied()).unwrap());
+        assert_eq!(rest.len(), 2);
+        assert!(rest[0] > first[2]);
+        assert!(log
+            .export_chain_page(None, rest.last().copied())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

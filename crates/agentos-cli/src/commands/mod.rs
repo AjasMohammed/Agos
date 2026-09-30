@@ -1,5 +1,28 @@
 use crate::Commands;
 use agentos_bus::client::BusClient;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set when a command reported an error it did not propagate, so `main` can
+/// exit non-zero for scripts and CI after the command has finished printing.
+static FAILED: AtomicBool = AtomicBool::new(false);
+
+pub fn mark_failed() {
+    FAILED.store(true, Ordering::Relaxed);
+}
+
+pub fn failed() -> bool {
+    FAILED.load(Ordering::Relaxed)
+}
+
+/// `eprintln!` for a kernel error or unexpected response: prints, keeps going
+/// (a loop over several items still reports the rest), and makes the process
+/// exit 1.
+macro_rules! cli_err {
+    ($($arg:tt)*) => {{
+        eprintln!($($arg)*);
+        $crate::commands::mark_failed();
+    }};
+}
 
 pub mod a2a;
 pub mod agent;

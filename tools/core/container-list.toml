@@ -4,7 +4,7 @@ risk_class = "readonly_scoped"
 [manifest]
 name = "container-list"
 version = "1.0.0"
-description = "List active containers with their status, resource usage, and expiry times."
+description = "List your active containers with their status, resource limits, and expiry times."
 author = "agentos-core"
 trust_tier = "core"
 tags = ["compute", "container"]
@@ -22,10 +22,6 @@ output = "ContainerListResult"
 [payload_schema]
 type = "object"
 additionalProperties = false
-
-[payload_schema.properties.agent_name]
-type        = "string"
-description = "Optional agent name filter; omit to list containers owned by the calling agent."
 
 [sandbox]
 network = false

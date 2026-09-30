@@ -185,6 +185,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         procedures: Default::default(),
         agent_heartbeat: Default::default(),
         agent_budget: Default::default(),
+        runtime: Default::default(),
         hal: Default::default(),
         security: Default::default(),
         user_profile: Default::default(),

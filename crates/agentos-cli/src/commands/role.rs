@@ -134,8 +134,8 @@ pub async fn handle(client: &mut BusClient, command: RoleCommands) -> anyhow::Re
                 }
             }
         }
-        KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-        _ => eprintln!("❌ Unexpected response"),
+        KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+        _ => cli_err!("❌ Unexpected response"),
     }
 
     Ok(())

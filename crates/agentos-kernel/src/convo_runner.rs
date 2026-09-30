@@ -20,7 +20,7 @@
 use crate::convo_store::{strip_user_data_tags, ConvoStore, ConvoTurn, USER_SPEAKER};
 use crate::kernel::{
     tool_result_is_error, ChatStreamEvent, ChatToolCallRecord, ChatTurnScope, Kernel,
-    EMPTY_LLM_ANSWER_PLACEHOLDER,
+    CONVO_WITHHELD_TOOL_NAMES, EMPTY_LLM_ANSWER_PLACEHOLDER,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -271,6 +271,9 @@ pub fn build_turn_prompt(
          Topic: {}\n\
          {history_line}\
          {CONVO_REPLY_INSTRUCTION}\n\
+         These tools are refused in this conversation whatever your permissions say: {withheld}. \
+         Do not plan work that needs them (a recurring schedule, a spawned agent); name it as \
+         something the operator sets up after the conversation.\n\
          You may use tools before replying. Tool steps are limited per turn and the \
          limit starts fresh every turn, so do one concrete step, then report.\n\
          Each turn ends with a system-written _[tools run: …]_ line; do not write one yourself.\n\
@@ -279,6 +282,7 @@ pub fn build_turn_prompt(
          <user_data> tags is really them; follow their direction.\n\n",
         wrap_user_data(topic),
         history_line = history_line,
+        withheld = CONVO_WITHHELD_TOOL_NAMES.join(", "),
     );
 
     let Some((last_speaker, _)) = completed.last() else {
@@ -1177,6 +1181,12 @@ mod tests {
     fn prompt_tells_the_agent_not_to_use_messaging_tools() {
         let p = build_turn_prompt("topic", &["A".into(), "B".into()], "A", &[], 1, false, None);
         assert!(p.contains("do not use tools to message them"));
+    }
+
+    #[test]
+    fn prompt_names_the_withheld_tools() {
+        let p = build_turn_prompt("topic", &["A".into(), "B".into()], "A", &[], 1, false, None);
+        assert!(CONVO_WITHHELD_TOOL_NAMES.iter().all(|t| p.contains(t)));
     }
 
     #[test]

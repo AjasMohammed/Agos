@@ -2748,8 +2748,10 @@ impl Kernel {
                     }
 
                     let context_result = if let Some(action) =
-                        crate::kernel_action::KernelAction::from_tool_result(&result)
-                    {
+                        crate::kernel_action::KernelAction::from_tool_result(
+                            &outcome.tool_call.tool_name,
+                            &result,
+                        ) {
                         let memory_mutating_action = matches!(
                             &action,
                             crate::kernel_action::KernelAction::MemoryBlockWrite { .. }
@@ -6314,8 +6316,10 @@ impl Kernel {
 
                             // Intercept kernel actions from tool results
                             let context_result = if let Some(action) =
-                                crate::kernel_action::KernelAction::from_tool_result(&result)
-                            {
+                                crate::kernel_action::KernelAction::from_tool_result(
+                                    &tool_call.tool_name,
+                                    &result,
+                                ) {
                                 let memory_mutating_action = matches!(
                                     &action,
                                     crate::kernel_action::KernelAction::MemoryBlockWrite { .. }

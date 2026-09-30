@@ -49,9 +49,9 @@ pub async fn handle(client: &mut BusClient, command: ScratchpadCommands) -> anyh
                     print_list_response(&json, &agent);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -68,9 +68,9 @@ pub async fn handle(client: &mut BusClient, command: ScratchpadCommands) -> anyh
                     print_read_response(&json);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -89,9 +89,9 @@ pub async fn handle(client: &mut BusClient, command: ScratchpadCommands) -> anyh
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -113,9 +113,9 @@ pub async fn handle(client: &mut BusClient, command: ScratchpadCommands) -> anyh
                     print_graph_response(&json);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

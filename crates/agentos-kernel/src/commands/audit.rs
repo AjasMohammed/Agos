@@ -3,8 +3,12 @@ use agentos_bus::KernelResponse;
 
 impl Kernel {
     /// Export audit chain as JSONL string.
-    pub(crate) async fn cmd_export_audit_chain(&self, limit: Option<u32>) -> KernelResponse {
-        match self.audit.export_chain_json(limit) {
+    pub(crate) async fn cmd_export_audit_chain(
+        &self,
+        limit: Option<u32>,
+        after_seq: Option<i64>,
+    ) -> KernelResponse {
+        match self.audit.export_chain_page(limit, after_seq) {
             Ok(jsonl) => KernelResponse::AuditChainExport(jsonl),
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),

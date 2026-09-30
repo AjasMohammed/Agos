@@ -2607,7 +2607,9 @@ impl Kernel {
             }
 
             // Audit export
-            KernelCommand::ExportAuditChain { limit } => self.cmd_export_audit_chain(limit).await,
+            KernelCommand::ExportAuditChain { limit, after_seq } => {
+                self.cmd_export_audit_chain(limit, after_seq).await
+            }
 
             // Resource contention
             KernelCommand::ResourceContention => self.cmd_resource_contention().await,
@@ -3833,7 +3835,9 @@ impl Kernel {
         // return a `_kernel_action` marker instead of doing the work. Dispatch
         // it here — otherwise the scheduled fire records the raw marker in run
         // history and the action never actually executes.
-        if let Some(action) = crate::kernel_action::KernelAction::from_tool_result(&result) {
+        if let Some(action) =
+            crate::kernel_action::KernelAction::from_tool_result(&tool_name, &result)
+        {
             if let Some(reject) = crate::kernel::chat_incompatible_action_error(&action) {
                 return Err(AgentOSError::ToolExecutionFailed {
                     tool_name,

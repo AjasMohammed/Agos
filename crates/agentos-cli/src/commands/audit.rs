@@ -79,8 +79,8 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AuditCommands::Verify { from } => {
@@ -129,20 +129,51 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
             }
         }
         AuditCommands::Export { limit, output } => {
-            let response = client
-                .send_command(KernelCommand::ExportAuditChain { limit })
-                .await?;
-            match response {
-                KernelResponse::AuditChainExport(jsonl) => {
-                    if let Some(path) = output {
-                        std::fs::write(&path, &jsonl)?;
-                        println!("Audit chain exported to '{}'.", path);
-                    } else {
-                        print!("{}", jsonl);
-                    }
+            // Paged: the whole chain in one reply outgrows the 16 MiB bus frame.
+            use std::io::Write;
+            // Stage beside the target so a failed export never clobbers a good one.
+            let staging = output.as_ref().map(|path| format!("{path}.partial"));
+            let mut out: Box<dyn Write> = match &staging {
+                Some(tmp) => Box::new(std::io::BufWriter::new(std::fs::File::create(tmp)?)),
+                None => Box::new(std::io::stdout().lock()),
+            };
+            let mut remaining = limit;
+            let mut after_seq = None;
+            let mut written = 0u64;
+            while remaining != Some(0) {
+                let response = client
+                    .send_command(KernelCommand::ExportAuditChain {
+                        limit: remaining,
+                        after_seq,
+                    })
+                    .await?;
+                let jsonl = match response {
+                    KernelResponse::AuditChainExport(jsonl) => jsonl,
+                    KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
+                    other => anyhow::bail!("Unexpected response: {other:?}"),
+                };
+                let Some(last) = jsonl.lines().last() else {
+                    break;
+                };
+                let seq = serde_json::from_str::<serde_json::Value>(last)?["seq"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("export page without a seq"))?;
+                // A kernel older than this CLI ignores `after_seq` and would
+                // hand back the same page forever.
+                if after_seq.is_some_and(|prev| seq <= prev) {
+                    anyhow::bail!("kernel does not page audit exports; restart it on this build");
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                let n = jsonl.lines().count() as u32;
+                out.write_all(jsonl.as_bytes())?;
+                written += u64::from(n);
+                after_seq = Some(seq);
+                remaining = remaining.map(|r| r.saturating_sub(n));
+            }
+            out.flush()?;
+            drop(out);
+            if let (Some(path), Some(tmp)) = (output, staging) {
+                std::fs::rename(&tmp, &path)?;
+                println!("Audit chain exported to '{path}' ({written} entries).");
             }
         }
 
@@ -175,8 +206,8 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         AuditCommands::Rollback { task, snapshot } => {
@@ -199,8 +230,8 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                         .unwrap_or("latest");
                     println!("Task {} rolled back to snapshot '{}'.", task, snap);
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

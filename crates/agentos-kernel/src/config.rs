@@ -126,6 +126,52 @@ pub struct KernelConfig {
     /// Per-agent cost budgets bound at connect time. Omit to use built-in defaults.
     #[serde(default)]
     pub agent_budget: AgentBudgetSettings,
+    /// `[runtime]` — container backend and the image allowlist for the
+    /// `container-*` tools.
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+}
+
+/// Container runtime settings. Only `backend` and `allowed_images` are read;
+/// per-container limits come from the `container-create` payload and the
+/// per-agent quota (`agentos_runtime::ContainerQuota`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RuntimeConfig {
+    /// `"docker"` (default) or `"none"` to disable containers.
+    #[serde(default = "default_runtime_backend")]
+    pub backend: String,
+    /// Exact image references agents may run (`"python:3.12-slim"` does not
+    /// match `"python:3.12"`). Missing images are pulled on first use.
+    #[serde(default = "default_allowed_images")]
+    pub allowed_images: Vec<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_runtime_backend(),
+            allowed_images: default_allowed_images(),
+        }
+    }
+}
+
+fn default_runtime_backend() -> String {
+    "docker".into()
+}
+
+fn default_allowed_images() -> Vec<String> {
+    [
+        "python:3.11-slim",
+        "python:3.12-slim",
+        "node:20-alpine",
+        "node:22-alpine",
+        "ubuntu:22.04",
+        "ubuntu:24.04",
+        "rust:1.78-slim",
+        "alpine:3.19",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// Cost/budget configuration applied to every agent when it connects.

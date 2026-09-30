@@ -193,9 +193,9 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("❌ Task failed: {}", message);
+                    cli_err!("❌ Task failed: {}", message);
                 }
-                _ => eprintln!("❌ Unexpected response"),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -226,8 +226,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -242,8 +242,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         println!("{}", line);
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -254,8 +254,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Task {} cancelled", task_id),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -289,8 +289,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         .unwrap_or(0);
                     println!("✅ Purged {} task(s) for agent '{}'", purged, agent);
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -312,8 +312,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         println!("✅ Task resumed from checkpoint");
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -343,8 +343,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -365,8 +365,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         print_trace(&trace, iter);
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
 
@@ -374,10 +374,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
             let agent_id: Option<AgentID> = match agent {
                 Some(ref s) => match s.parse() {
                     Ok(id) => Some(id),
-                    Err(_) => {
-                        eprintln!("Error: invalid agent ID '{s}'");
-                        return Ok(());
-                    }
+                    Err(_) => anyhow::bail!("invalid agent ID '{s}'"),
                 },
                 None => None,
             };
@@ -414,8 +411,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
     }

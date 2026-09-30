@@ -88,6 +88,13 @@ pub struct ExecResult {
 /// Pluggable backend for container/VM orchestration.
 #[async_trait]
 pub trait ComputeRuntime: Send + Sync {
+    /// Make `image` available locally (allowlist check + pull if missing).
+    /// Called before the caller serializes on its provision lock, so a slow
+    /// pull does not block other agents' creates.
+    async fn prepare_image(&self, _image: &str) -> Result<(), AgentOSError> {
+        Ok(())
+    }
+
     /// Provision a new container from the spec.
     async fn provision(
         &self,

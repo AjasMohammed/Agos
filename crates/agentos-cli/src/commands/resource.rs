@@ -73,10 +73,10 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
         }
@@ -117,8 +117,8 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -134,7 +134,7 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                 KernelResponse::Success { data } => {
                     if let Some(d) = data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             println!("Released lock on '{}' held by '{}'.", resource, agent);
                         }
@@ -143,10 +143,10 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
         }
@@ -162,7 +162,7 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                 KernelResponse::Success { data } => {
                     if let Some(d) = data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             println!("Released all locks held by '{}'.", agent);
                         }
@@ -171,10 +171,10 @@ pub async fn handle(client: &mut BusClient, cmd: ResourceCommands) -> anyhow::Re
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
                 _ => {
-                    eprintln!("Unexpected response");
+                    cli_err!("Unexpected response");
                 }
             }
         }

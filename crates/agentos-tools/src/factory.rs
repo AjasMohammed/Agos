@@ -205,6 +205,11 @@ pub const VOLATILE_TOOL_NAMES: &[&str] = &[
     "display-config",
     "hardware-get-twin",
     "hardware-info",
+    // Containers: a repeated exec must actually run again (the agent edits a
+    // file and re-runs it), and a repeated create must not hand back the id
+    // of a container that has since been destroyed.
+    "container-create",
+    "container-exec",
     "container-list",
     "container-logs",
     "iot-ha-state",

@@ -81,8 +81,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                     "✅ Granted permission '{}' to agent '{}'",
                     permission, agent
                 ),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         PermCommands::Revoke { agent, permission } => {
@@ -97,8 +97,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                     "✅ Revoked permission '{}' from agent '{}'",
                     permission, agent
                 ),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         PermCommands::Show { agent } => {
@@ -130,8 +130,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         PermCommands::Profile { command } => match command {
@@ -149,8 +149,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                     .await?;
                 match response {
                     KernelResponse::Success { .. } => println!("✅ Created profile '{}'", name),
-                    KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                    _ => eprintln!("❌ Unexpected response"),
+                    KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                    _ => cli_err!("❌ Unexpected response"),
                 }
             }
             PermProfileCommands::Delete { name } => {
@@ -159,8 +159,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                     .await?;
                 match response {
                     KernelResponse::Success { .. } => println!("✅ Deleted profile '{}'", name),
-                    KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                    _ => eprintln!("❌ Unexpected response"),
+                    KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                    _ => cli_err!("❌ Unexpected response"),
                 }
             }
             PermProfileCommands::List => {
@@ -175,8 +175,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                             println!(" (None)");
                         }
                     }
-                    KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                    _ => eprintln!("❌ Unexpected response"),
+                    KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                    _ => cli_err!("❌ Unexpected response"),
                 }
             }
             PermProfileCommands::Assign {
@@ -194,8 +194,8 @@ pub async fn handle(client: &mut BusClient, command: PermCommands) -> anyhow::Re
                         "✅ Assigned profile '{}' to agent '{}'",
                         profile_name, agent_name
                     ),
-                    KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                    _ => eprintln!("❌ Unexpected response"),
+                    KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                    _ => cli_err!("❌ Unexpected response"),
                 }
             }
         },

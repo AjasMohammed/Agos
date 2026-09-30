@@ -98,7 +98,9 @@ jobs:
         # runtime hardware probe can run. Only the libc set is allowed.
         if: runner.os == 'Linux' && matrix.use_cross == false
         run: |
-          extra=$(ldd ${{ matrix.artifact }} | awk '{print $1}' \
+          set -euo pipefail
+          libs=$(ldd ${{ matrix.artifact }})
+          extra=$(echo "$libs" | awk '{print $1}' \
             | grep -v -E '^(linux-vdso\.so\.1|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1|/lib64/ld-linux-x86-64\.so\.2)$' || true)
           if [ -n "$extra" ]; then
             echo "::error::release binary links unexpected shared libraries:"

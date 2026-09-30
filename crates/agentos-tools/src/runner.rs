@@ -313,6 +313,14 @@ impl ToolRunner {
         self.register(Box::new(GetScheduleRunsTool::new()));
         self.register(Box::new(GetTaskLogsTool::new()));
 
+        // Container tools — emit _kernel_action; the kernel owns the Docker
+        // runtime, quotas and ownership checks.
+        for name in crate::container_tools::CONTAINER_TOOL_NAMES {
+            if let Some(tool) = crate::container_tools::ContainerTool::new(name) {
+                self.register(Box::new(tool));
+            }
+        }
+
         // KMC bridge tools — route to kernel capability providers.
         for name in crate::kmc_tools::KMC_TOOL_NAMES {
             if let Some(tool) = crate::kmc_tools::build_kmc_tool(name) {

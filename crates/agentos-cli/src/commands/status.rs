@@ -12,8 +12,8 @@ pub async fn handle(client: &mut BusClient) -> anyhow::Result<()> {
             println!("   Installed tools:  {}", status.installed_tools);
             println!("   Audit entries:    {}", status.total_audit_entries);
         }
-        KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-        _ => eprintln!("❌ Cannot reach kernel. Is it running?"),
+        KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+        _ => cli_err!("❌ Cannot reach kernel. Is it running?"),
     }
     Ok(())
 }

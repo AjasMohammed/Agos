@@ -47,8 +47,8 @@ pub async fn handle(client: &mut BusClient, cmd: IdentityCommands) -> anyhow::Re
                         if has_key { "present" } else { "absent" }
                     );
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -63,8 +63,8 @@ pub async fn handle(client: &mut BusClient, cmd: IdentityCommands) -> anyhow::Re
                 KernelResponse::Success { .. } => {
                     println!("Identity and permissions revoked for agent '{}'.", agent);
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

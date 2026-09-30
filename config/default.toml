@@ -240,6 +240,8 @@ rust_allowlist = [
 # Peripheral drivers (audio, bluetooth, display, printer, raw-usb,
 # usb-storage, webcam, wifi) register only when the host has the hardware and
 # the service the driver uses; `agentos doctor` shows what was detected.
+# Probed once at boot: changes here and newly plugged devices need a kernel
+# restart. raw-usb only lists devices until [hal.raw_usb] allow names them.
 # force_enable = ["printer"]    # e.g. a remote CUPS server
 # disable = ["webcam", "audio"] # never register, even when present
 force_enable = []
@@ -559,22 +561,16 @@ config_writable = false
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 servers = []
 
-# NOT YET WIRED — keys in [runtime] are parsed but currently IGNORED by the
-# kernel. KernelConfig has no `runtime` field, so editing anything below has no
-# effect yet (the container allowed_images list is hardcoded in kernel.rs).
-# The block is retained to preserve design intent until the runtime backend is
-# wired up.
+# Container runtime for the container-* tools. Per-container limits come from
+# the container-create call; each agent is capped at 3 containers / 4 GiB /
+# 4 CPUs in total.
 [runtime]
 # Container runtime backend: "docker" (default) | "none" (disabled)
 backend = "docker"
-default_memory_limit_mb = 1024
-default_cpu_limit = 1.0
-default_pids_limit = 100
-default_ttl_seconds = 3600
-max_concurrent_containers = 10
-workspace_base_dir = "/tmp/agentos/sandboxes"
 
-# Pre-approved Docker images. Agents can only use images on this list.
+# Pre-approved Docker images, matched exactly ("python:3.12-slim" does not match
+# "python:3.12"). Agents can only use images on this list; missing ones are
+# pulled on first use.
 allowed_images = [
     "python:3.11-slim",
     "python:3.12-slim",

@@ -226,8 +226,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         println!("  Monitor : agentos task logs {}", tid);
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Ping {
@@ -278,7 +278,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     eprintln!("❌ Error: {}", message);
                     std::process::exit(1);
                 }
-                _ => eprintln!("❌ Unexpected response"),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::List => {
@@ -300,8 +300,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Disconnect { name } => {
@@ -321,8 +321,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Agent '{}' disconnected", name),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Remove { name, yes } => {
@@ -367,8 +367,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Message { from, to, content } => {
@@ -381,8 +381,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Message sent to '{}'", to),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Messages { agent, last } => {
@@ -419,8 +419,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::SetUrl { name, url } => {
@@ -434,8 +434,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 KernelResponse::Success { .. } => {
                     println!("Agent '{}' base URL updated to '{}'", name, url);
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Group {
@@ -451,8 +451,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Group '{}' created", name),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
         AgentCommands::Memory { command } => {
@@ -480,8 +480,8 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         sent_to, group
                     );
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("❌ Error: {}", message),
+                _ => cli_err!("❌ Unexpected response"),
             }
         }
     }
@@ -516,8 +516,8 @@ async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> 
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         AgentMemoryCommands::History { agent, limit } => {
@@ -553,8 +553,8 @@ async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> 
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         AgentMemoryCommands::Rollback { agent, version } => {
@@ -576,8 +576,8 @@ async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> 
                         agent, version, new_ver
                     );
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         AgentMemoryCommands::Clear { agent } => {
@@ -590,8 +590,8 @@ async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> 
                 KernelResponse::Success { .. } => {
                     println!("Context memory cleared for agent '{}'.", agent);
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         AgentMemoryCommands::Set { agent, file } => {
@@ -615,8 +615,8 @@ async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> 
                         agent, tokens
                     );
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

@@ -136,6 +136,12 @@ pub(crate) enum KernelAction {
     MemoryBlockDelete {
         label: String,
     },
+    /// One of the `container-*` tools, run as the calling agent by
+    /// `Kernel::execute_container_action`.
+    Container {
+        tool: String,
+        payload: serde_json::Value,
+    },
     /// Fire-and-forget notification to the user inbox.
     ///
     /// `channels`: empty = fan out to all registered delivery adapters.
@@ -376,6 +382,7 @@ impl KernelAction {
             KernelAction::MemoryBlockRead { .. } => "memory_block_read",
             KernelAction::MemoryBlockList => "memory_block_list",
             KernelAction::MemoryBlockDelete { .. } => "memory_block_delete",
+            KernelAction::Container { .. } => "container",
             KernelAction::NotifyUser { .. } => "notify_user",
             KernelAction::AskUser { .. } => "ask_user",
             KernelAction::WorkspaceRequest { .. } => "workspace_request",
@@ -419,7 +426,12 @@ impl KernelAction {
     }
     /// Try to parse a kernel action from a tool result.
     /// Returns `None` if the result does not contain a `_kernel_action` field.
-    pub fn from_tool_result(value: &serde_json::Value) -> Option<Self> {
+    ///
+    /// `emitted_by` is the tool that produced `value`. A container action is
+    /// honoured only from the `container-*` tool it names: any other tool
+    /// (a WASM or MCP tool returning arbitrary JSON) would otherwise run a
+    /// container without the `container.*` permission or its approval.
+    pub fn from_tool_result(emitted_by: &str, value: &serde_json::Value) -> Option<Self> {
         let action = value.get("_kernel_action")?.as_str()?;
         match action {
             "delegate_task" => {
@@ -550,6 +562,16 @@ impl KernelAction {
                 Some(Self::MemoryBlockRead { label })
             }
             "memory_block_list" => Some(Self::MemoryBlockList),
+            "container" => {
+                let tool = value.get("tool")?.as_str()?;
+                if tool.replace('_', "-") != emitted_by.replace('_', "-") {
+                    return None;
+                }
+                Some(Self::Container {
+                    tool: tool.to_string(),
+                    payload: value.get("payload").cloned().unwrap_or_default(),
+                })
+            }
             "memory_block_delete" => {
                 let label = value.get("label")?.as_str()?.to_string();
                 Some(Self::MemoryBlockDelete { label })
@@ -1164,6 +1186,9 @@ impl Kernel {
             KernelAction::MemoryBlockDelete { label } => {
                 self.execute_memory_block_delete(task, &label).await
             }
+            KernelAction::Container { tool, payload } => {
+                self.execute_container_action(task, &tool, &payload).await
+            }
             KernelAction::NotifyUser {
                 subject,
                 body,
@@ -1631,18 +1656,23 @@ impl Kernel {
                 token,
                 wait_for_result,
             } => {
-                // SSRF protection: resolve the hostname and reject private/internal addresses.
-                if let Some(ssrf_err) = check_a2a_url_ssrf(&agent_url).await {
-                    return KernelActionResult {
-                        success: false,
-                        result: serde_json::json!({
-                            "error": ssrf_err,
-                            "agent_url": agent_url,
-                        }),
-                    };
-                }
+                // SSRF protection: resolve the hostname, reject private/internal
+                // addresses, and pin the client to exactly the addresses checked
+                // (no second resolution, no redirects).
+                let (host, addrs) = match check_a2a_url_ssrf(&agent_url).await {
+                    Ok(checked) => checked,
+                    Err(ssrf_err) => {
+                        return KernelActionResult {
+                            success: false,
+                            result: serde_json::json!({
+                                "error": ssrf_err,
+                                "agent_url": agent_url,
+                            }),
+                        };
+                    }
+                };
 
-                let mut client = agentos_mcp::a2a::A2AClient::new(&agent_url);
+                let mut client = agentos_mcp::a2a::A2AClient::pinned(&agent_url, &host, &addrs);
                 if let Some(ref t) = token {
                     client = client.with_token(t);
                 }
@@ -4101,17 +4131,20 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 /// Parses the URL, resolves the hostname, and checks every resolved IP against
 /// private/internal ranges. Returns `Some(error_message)` if the URL should be
 /// blocked, `None` if it is safe to proceed.
-async fn check_a2a_url_ssrf(url: &str) -> Option<String> {
+/// Resolve `url`'s host and return it with the addresses it resolved to, or
+/// an error if the URL is malformed or any address is private/internal.
+/// Callers must connect only to the returned addresses.
+async fn check_a2a_url_ssrf(url: &str) -> Result<(String, Vec<std::net::SocketAddr>), String> {
     let parsed = match url::Url::parse(url) {
         Ok(u) => u,
-        Err(e) => return Some(format!("Invalid agent_url: {}", e)),
+        Err(e) => return Err(format!("Invalid agent_url: {}", e)),
     };
 
     // Only allow http/https schemes
     match parsed.scheme() {
         "http" | "https" => {}
         other => {
-            return Some(format!(
+            return Err(format!(
                 "Blocked scheme '{}' — only http/https allowed",
                 other
             ))
@@ -4120,33 +4153,39 @@ async fn check_a2a_url_ssrf(url: &str) -> Option<String> {
 
     let host = match parsed.host_str() {
         Some(h) => h.to_string(),
-        None => return Some("agent_url has no host".to_string()),
+        None => return Err("agent_url has no host".to_string()),
     };
 
     let port = parsed.port_or_known_default().unwrap_or(80);
 
     // Resolve and check each IP
-    let addrs: Vec<std::net::IpAddr> =
+    let addrs: Vec<std::net::SocketAddr> =
         match tokio::net::lookup_host(format!("{}:{}", host, port)).await {
-            Ok(iter) => iter.map(|sa| sa.ip()).collect(),
-            Err(e) => return Some(format!("DNS resolution failed for '{}': {}", host, e)),
+            Ok(iter) => iter.collect(),
+            Err(e) => return Err(format!("DNS resolution failed for '{}': {}", host, e)),
         };
+    if addrs.is_empty() {
+        return Err(format!(
+            "DNS resolution returned no addresses for '{}'",
+            host
+        ));
+    }
 
-    for ip in &addrs {
-        if is_private_addr(ip) {
+    for ip in addrs.iter().map(|sa| sa.ip()) {
+        if is_private_addr(&ip) {
             tracing::warn!(
                 url = %url,
                 %ip,
                 "A2A delegation SSRF blocked: private/internal IP"
             );
-            return Some(format!(
+            return Err(format!(
                 "SSRF blocked: '{}' resolves to private/internal IP {}",
                 host, ip
             ));
         }
     }
 
-    None
+    Ok((host, addrs))
 }
 
 /// Returns true if `ip` is a private, loopback, link-local, or otherwise
@@ -5680,7 +5719,7 @@ mod schedule_visibility_parse_tests {
             "kinds": ["cron", "once"],
             "include_inactive": true,
         });
-        match KernelAction::from_tool_result(&v) {
+        match KernelAction::from_tool_result("test-tool", &v) {
             Some(KernelAction::ListMySchedules {
                 kinds,
                 include_inactive,
@@ -5693,9 +5732,32 @@ mod schedule_visibility_parse_tests {
     }
 
     #[test]
+    fn parses_container_tool_output() {
+        // Exactly what `ContainerTool::execute` emits.
+        let v = serde_json::json!({
+            "_kernel_action": "container",
+            "tool": "container-exec",
+            "payload": { "container_id": "abc", "command": ["echo", "hi"] },
+        });
+        match KernelAction::from_tool_result("container_exec", &v) {
+            Some(KernelAction::Container { tool, payload }) => {
+                assert_eq!(tool, "container-exec");
+                assert_eq!(payload["command"][1], "hi");
+            }
+            other => panic!("expected Container, got {other:?}"),
+        }
+        // Forged by some other tool (e.g. a WASM tool returning this JSON):
+        // must not run a container behind the container-* permission/approval.
+        assert!(KernelAction::from_tool_result("my-wasm-tool", &v).is_none());
+        assert!(KernelAction::from_tool_result("container-create", &v).is_none());
+        let no_tool = serde_json::json!({ "_kernel_action": "container" });
+        assert!(KernelAction::from_tool_result("container-exec", &no_tool).is_none());
+    }
+
+    #[test]
     fn list_my_schedules_defaults() {
         let v = serde_json::json!({ "_kernel_action": "list_my_schedules" });
-        match KernelAction::from_tool_result(&v) {
+        match KernelAction::from_tool_result("test-tool", &v) {
             Some(KernelAction::ListMySchedules {
                 kinds,
                 include_inactive,
@@ -5710,7 +5772,7 @@ mod schedule_visibility_parse_tests {
     #[test]
     fn parses_get_task_logs() {
         let v = serde_json::json!({ "_kernel_action": "get_task_logs", "run_id": "r-1" });
-        match KernelAction::from_tool_result(&v) {
+        match KernelAction::from_tool_result("test-tool", &v) {
             Some(KernelAction::GetTaskLogs { run_id }) => assert_eq!(run_id, "r-1"),
             other => panic!("expected GetTaskLogs, got {other:?}"),
         }
@@ -5719,7 +5781,7 @@ mod schedule_visibility_parse_tests {
     #[test]
     fn get_task_logs_requires_run_id() {
         let v = serde_json::json!({ "_kernel_action": "get_task_logs" });
-        assert!(KernelAction::from_tool_result(&v).is_none());
+        assert!(KernelAction::from_tool_result("test-tool", &v).is_none());
     }
 }
 
@@ -5781,5 +5843,37 @@ mod channel_send_file_read_tests {
             read_agent_file_blocking(&home, &fifo, 1024),
             Err(AgentFileError::Other(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod a2a_ssrf_tests {
+    use super::check_a2a_url_ssrf;
+
+    #[tokio::test]
+    async fn private_and_malformed_urls_are_rejected() {
+        for url in [
+            "http://127.0.0.1:3001",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/",
+            "file:///etc/passwd",
+            "not a url",
+        ] {
+            assert!(
+                check_a2a_url_ssrf(url).await.is_err(),
+                "{url} must be refused"
+            );
+        }
+    }
+
+    /// The checked addresses come back so the client can be pinned to them
+    /// (an IP literal needs no DNS, so this stays offline).
+    #[tokio::test]
+    async fn public_address_is_returned_for_pinning() {
+        let (host, addrs) = check_a2a_url_ssrf("https://93.184.216.34/a2a")
+            .await
+            .expect("public IP allowed");
+        assert_eq!(host, "93.184.216.34");
+        assert_eq!(addrs, vec!["93.184.216.34:443".parse().unwrap()]);
     }
 }

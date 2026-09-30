@@ -2795,7 +2795,8 @@ impl Kernel {
     }
 
     /// Reset a claude-code agent's gateway tool-call buffer at the start of a
-    /// chat turn, so a drain at the end captures only this turn's calls.
+    /// chat turn, so the drains during and after it capture only this turn's
+    /// calls.
     /// No-op for agents without a gateway (normal agents).
     async fn clear_gateway_tool_calls(&self, agent_id: AgentID) {
         if let Some(collector) = self.claude_gateway_tool_calls.read().await.get(&agent_id) {
@@ -2824,6 +2825,87 @@ impl Kernel {
                 duration_ms: g.duration_ms,
             })
             .collect()
+    }
+
+    /// Surface the tool calls a claude-code subprocess made via the MCP gateway
+    /// since the last drain: emit live `ToolStart`/`ToolResult` frames, record
+    /// them episodically, and append them to `tool_calls` for persistence. The
+    /// calls already ran inside the subprocess, so this is after-the-fact.
+    /// No-op for normal agents.
+    ///
+    /// The streaming loop calls this WHILE the subprocess is still streaming,
+    /// not only once it ends: its text arrives live as tokens, so draining only
+    /// after `Done` put every tool card below all of the text (2026-09-24).
+    async fn emit_gateway_tool_calls(
+        &self,
+        agent_id: AgentID,
+        turn_task_id: TaskID,
+        turn_trace_id: TraceID,
+        iteration: u32,
+        tx: &tokio::sync::mpsc::Sender<ChatStreamEvent>,
+        tool_calls: &mut Vec<ChatToolCallRecord>,
+    ) -> bool {
+        // Once a send fails the reader is gone: stop waiting on it (each send
+        // can park for the full consumer timeout) but still record every call.
+        let mut reader_ok = true;
+        for gc in self.take_gateway_tool_calls(agent_id).await {
+            // W3: charge the subprocess call against `max_tool_calls_per_day`.
+            // For a claude-code agent every real tool invocation happens in
+            // the subprocess, so without this the tool-call budget charges
+            // zero and is a no-op. The verdict is ignored on purpose — the
+            // call already ran; this is accounting after the fact, not a gate.
+            let _ = self.cost_tracker.record_tool_call(&agent_id).await;
+            // Emit ToolStart first so the frontend creates a tool card; it
+            // pairs the following ToolResult to that card by name. Without the
+            // start, the live stream drops the result (the card only exists if
+            // a start created it). The call already ran in the subprocess, so
+            // start + result are emitted back-to-back here.
+            let success = !tool_result_is_error(&gc.result);
+            if reader_ok {
+                let result_preview = serde_json::to_string(&gc.result)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                reader_ok = send_stream_event(
+                    tx,
+                    ChatStreamEvent::ToolStart {
+                        tool_name: gc.tool_name.clone(),
+                        iteration,
+                        task_id: None,
+                    },
+                )
+                .await
+                    && send_stream_event(
+                        tx,
+                        ChatStreamEvent::ToolResult {
+                            tool_name: gc.tool_name.clone(),
+                            result_preview,
+                            duration_ms: gc.duration_ms,
+                            success,
+                        },
+                    )
+                    .await;
+            }
+            // Also record it episodically: subprocess calls are real tool use
+            // by this agent, and without them a gateway agent's timeline has
+            // no tool_call rows for consolidation to build steps from.
+            self.chat_record_tool(
+                agent_id,
+                turn_task_id,
+                turn_trace_id,
+                &gc.tool_name,
+                &gc.intent_type,
+                &gc.payload,
+                &gc.result,
+                success,
+                gc.duration_ms,
+                iteration,
+            )
+            .await;
+            tool_calls.push(gc);
+        }
+        reader_ok
     }
 
     /// Scan a chat tool result and wrap it in the `<user_data>` taint envelope
@@ -4041,9 +4123,10 @@ impl Kernel {
                         }
                     };
                     if cached.is_none() {
-                        if let Some(action) =
-                            crate::kernel_action::KernelAction::from_tool_result(&tool_result)
-                        {
+                        if let Some(action) = crate::kernel_action::KernelAction::from_tool_result(
+                            tool_name,
+                            &tool_result,
+                        ) {
                             if let Some(reject) = chat_incompatible_action_error(&action) {
                                 tool_result = serde_json::json!({ "error": reject });
                             } else {
@@ -4886,8 +4969,70 @@ impl Kernel {
             let mut stream_suppressed_count: usize = 0;
             let mut streamed_token_events: usize = 0;
             let mut pending_tail = String::new();
+            // A claude-code agent runs its whole tool loop inside this one
+            // inference, and its tool calls land in the gateway buffer, not in
+            // this stream. Drain that buffer before forwarding each token (so a
+            // tool card sits between the text before and after it) and on a
+            // tick (so a tool-only stretch still shows progress). Normal agents
+            // have no gateway and never tick.
+            // ponytail: ordering is by drain time, not by when the subprocess
+            // produced each token. Under backpressure (slow reader, tokens still
+            // queued in `inner_rx`) a card can land above text written before the
+            // call. Upgrade: have the claude-code adapter emit a marker at each
+            // `tool_use` block and drain only on tokens after it.
+            let has_gateway = self
+                .claude_gateway_tool_calls
+                .read()
+                .await
+                .contains_key(&agent_id);
+            let mut gateway_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+            // A long park on a slow reader must not replay a burst of ticks.
+            gateway_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-            while let Some(event) = inner_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    ev = inner_rx.recv() => match ev {
+                        Some(ev) => ev,
+                        None => break,
+                    },
+                    _ = gateway_tick.tick(), if has_gateway => {
+                        if !self
+                            .emit_gateway_tool_calls(
+                                agent_id,
+                                turn_task_id,
+                                turn_trace_id,
+                                iterations,
+                                &tx,
+                                &mut tool_calls,
+                            )
+                            .await
+                        {
+                            reader_gone = true;
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                if has_gateway
+                    && matches!(
+                        event,
+                        agentos_llm::InferenceEvent::Token(_)
+                            | agentos_llm::InferenceEvent::Thinking(_)
+                    )
+                    && !self
+                        .emit_gateway_tool_calls(
+                            agent_id,
+                            turn_task_id,
+                            turn_trace_id,
+                            iterations,
+                            &tx,
+                            &mut tool_calls,
+                        )
+                        .await
+                {
+                    reader_gone = true;
+                    break;
+                }
                 match event {
                     agentos_llm::InferenceEvent::Token(chunk) => {
                         let cleaned = sanitizer.push(&chunk);
@@ -5043,66 +5188,17 @@ impl Kernel {
                 spoken.push(visible_text.clone());
             }
 
-            // Surface tool calls the claude-code subprocess made via the MCP
-            // gateway this iteration: append them for persistence AND emit live
-            // ToolResult stream events so they render in the chat UI. The calls
-            // already executed inside the subprocess, so this is after-the-fact.
-            // No-op for normal agents.
-            for gc in self.take_gateway_tool_calls(agent_id).await {
-                // W3: charge the subprocess call against `max_tool_calls_per_day`.
-                // For a claude-code agent every real tool invocation happens in
-                // the subprocess, so without this the tool-call budget charges
-                // zero and is a no-op. The verdict is ignored on purpose — the
-                // call already ran; this is accounting after the fact, not a gate.
-                let _ = self.cost_tracker.record_tool_call(&agent_id).await;
-                // Emit ToolStart first so the frontend creates a tool card; it
-                // pairs the following ToolResult to that card by name. Without the
-                // start, the live stream drops the result (the card only exists if
-                // a start created it). The call already ran in the subprocess, so
-                // start + result are emitted back-to-back here.
-                let _ = send_stream_event(
-                    &tx,
-                    ChatStreamEvent::ToolStart {
-                        tool_name: gc.tool_name.clone(),
-                        iteration: iterations,
-                        task_id: None,
-                    },
-                )
-                .await;
-                let success = gc.result.get("error").is_none();
-                let result_preview = serde_json::to_string(&gc.result)
-                    .unwrap_or_default()
-                    .chars()
-                    .take(200)
-                    .collect::<String>();
-                let _ = send_stream_event(
-                    &tx,
-                    ChatStreamEvent::ToolResult {
-                        tool_name: gc.tool_name.clone(),
-                        result_preview,
-                        duration_ms: gc.duration_ms,
-                        success,
-                    },
-                )
-                .await;
-                // Also record it episodically: subprocess calls are real tool use
-                // by this agent, and without them a gateway agent's timeline has
-                // no tool_call rows for consolidation to build steps from.
-                self.chat_record_tool(
-                    agent_id,
-                    turn_task_id,
-                    turn_trace_id,
-                    &gc.tool_name,
-                    &gc.intent_type,
-                    &gc.payload,
-                    &gc.result,
-                    success,
-                    gc.duration_ms,
-                    iterations,
-                )
-                .await;
-                tool_calls.push(gc);
-            }
+            // Tool calls the claude-code subprocess made after the last token
+            // (the loop above drains the ones interleaved with its text).
+            self.emit_gateway_tool_calls(
+                agent_id,
+                turn_task_id,
+                turn_trace_id,
+                iterations,
+                &tx,
+                &mut tool_calls,
+            )
+            .await;
 
             if streamed_token_events == 0 {
                 // Some providers/adapters only emit a final Done payload. Simulate
@@ -5742,9 +5838,10 @@ impl Kernel {
                         }
                     };
                     if cached.is_none() {
-                        if let Some(action) =
-                            crate::kernel_action::KernelAction::from_tool_result(&tool_result)
-                        {
+                        if let Some(action) = crate::kernel_action::KernelAction::from_tool_result(
+                            tool_name,
+                            &tool_result,
+                        ) {
                             if let Some(reject) = chat_incompatible_action_error(&action) {
                                 tool_result = serde_json::json!({ "error": reject });
                             } else {
@@ -6464,7 +6561,10 @@ impl Kernel {
         // the agent never sees a tool that cannot run.
         let peripheral_probes = tokio::task::spawn_blocking(agentos_hal::probe_peripherals)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "HAL peripheral probe failed; only [hal] force_enable drivers register");
+                Vec::new()
+            });
         let wanted = |name: &str| -> bool {
             if config.hal.disable.iter().any(|d| d == name) {
                 return false;
@@ -6501,9 +6601,8 @@ impl Kernel {
         if wanted("printer") {
             hal.register(Box::new(PrinterDriver::new()));
         }
-        // An empty allowlist makes raw-usb deny everything; don't advertise it.
         #[cfg(all(feature = "raw-usb", target_os = "linux"))]
-        if wanted("raw-usb") && !config.hal.raw_usb.allow.is_empty() {
+        if wanted("raw-usb") {
             // The raw-USB driver is fail-closed: with an empty allowlist every
             // open/read/write/control is denied. `[hal.raw_usb] allow` is the
             // only way to make it usable.
@@ -6547,7 +6646,7 @@ impl Kernel {
             } else if config.hal.disable.iter().any(|d| d == probe.driver) {
                 "disabled by [hal] disable"
             } else if wanted(probe.driver) {
-                "not compiled into this build (or raw-usb allowlist empty)"
+                "not compiled into this build"
             } else {
                 probe.reason.as_str()
             };
@@ -6630,7 +6729,7 @@ impl Kernel {
             // host, before the schema registry and tool indexes are built.
             let mut registry = tool_registry.write().await;
             for (tool, driver) in crate::tool_registry::PERIPHERAL_TOOL_DRIVERS {
-                if !hal.has_driver(driver) && registry.remove(tool).is_ok() {
+                if !hal.has_driver(driver) && registry.hide(tool) {
                     tracing::info!(tool, driver, "Tool hidden: HAL driver not registered");
                 }
             }
@@ -8312,28 +8411,38 @@ impl Kernel {
         let quota_enforcer = Arc::new(agentos_runtime::QuotaEnforcer::new(
             agentos_runtime::ContainerQuota::default(),
         ));
-        let compute_runtime: Option<Arc<dyn agentos_runtime::ComputeRuntime>> =
-            match agentos_runtime::DockerRuntime::new(vec![
-                "python:3.11-slim".into(),
-                "python:3.12-slim".into(),
-                "node:20-alpine".into(),
-                "node:22-alpine".into(),
-                "ubuntu:22.04".into(),
-                "ubuntu:24.04".into(),
-                "rust:1.78-slim".into(),
-                "alpine:3.19".into(),
-            ])
+        let compute_runtime: Option<Arc<dyn agentos_runtime::ComputeRuntime>> = if config
+            .runtime
+            .backend
+            != "docker"
+        {
+            if config.runtime.backend != "none" {
+                tracing::warn!(
+                    backend = %config.runtime.backend,
+                    "Unknown [runtime].backend (expected \"docker\" or \"none\"); container runtime disabled"
+                );
+            }
+            None
+        } else {
+            match agentos_runtime::DockerRuntime::new(
+                config.runtime.allowed_images.clone(),
+                data_dir.display().to_string(),
+            )
             .await
             {
                 Ok(rt) => {
-                    tracing::info!("Container runtime (Docker) initialized");
+                    tracing::info!(
+                        images = config.runtime.allowed_images.len(),
+                        "Container runtime (Docker) initialized"
+                    );
                     Some(Arc::new(rt))
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "Docker not available — container runtime disabled");
                     None
                 }
-            };
+            }
+        };
 
         let webhook_db_path = data_dir.join("webhook_endpoints.db");
         let webhook_registry =
@@ -9761,6 +9870,7 @@ mod preflight_tests {
             procedures: Default::default(),
             agent_heartbeat: Default::default(),
             agent_budget: Default::default(),
+            runtime: Default::default(),
             hal: Default::default(),
             security: Default::default(),
             user_profile: Default::default(),
@@ -10034,6 +10144,7 @@ mod vault_bootstrap_tests {
             procedures: Default::default(),
             agent_heartbeat: Default::default(),
             agent_budget: Default::default(),
+            runtime: Default::default(),
             hal: Default::default(),
             security: Default::default(),
             user_profile: Default::default(),

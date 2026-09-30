@@ -370,7 +370,11 @@ fn main() -> anyhow::Result<()> {
         return rt.block_on(run_sandbox_exec(&request_path));
     }
 
-    tokio_main()
+    let result = tokio_main();
+    if result.is_ok() && commands::failed() {
+        std::process::exit(1);
+    }
+    result
 }
 
 fn close_inherited_fds() {

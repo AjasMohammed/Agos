@@ -332,9 +332,9 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                     println!("Installed skill '{}' v{}", name, version);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -347,9 +347,9 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                     println!("Removed skill '{}'", name);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -380,9 +380,9 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -405,9 +405,9 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                     }
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -420,9 +420,9 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                     print_skill_status(&info);
                 }
                 KernelResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    cli_err!("Error: {}", message);
                 }
-                _ => eprintln!("Unexpected response"),
+                _ => cli_err!("Unexpected response"),
             }
         }
 

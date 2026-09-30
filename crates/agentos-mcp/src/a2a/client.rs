@@ -9,10 +9,34 @@ pub struct A2AClient {
     token: Option<String>,
 }
 
+/// Redirects are never followed: a public peer answering `302` to
+/// `169.254.169.254` or loopback would otherwise walk past the caller's SSRF
+/// check, which only sees the first URL.
+fn http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+}
+
 impl A2AClient {
     pub fn new(base_url: &str) -> Self {
+        Self::with_http(base_url, http_builder())
+    }
+
+    /// Like [`Self::new`], but connects `host` only to `addrs`: the addresses
+    /// the caller already resolved and checked. Without pinning, reqwest
+    /// resolves again and a short-TTL name can answer public for the check and
+    /// private for the request (DNS rebinding).
+    pub fn pinned(base_url: &str, host: &str, addrs: &[std::net::SocketAddr]) -> Self {
+        Self::with_http(base_url, http_builder().resolve_to_addrs(host, addrs))
+    }
+
+    fn with_http(base_url: &str, builder: reqwest::ClientBuilder) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Building only fails if the TLS backend cannot initialise, which
+            // `Client::new()` (used here before) turned into a panic as well.
+            http: builder.build().expect("A2A HTTP client"),
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
         }
@@ -76,5 +100,69 @@ impl A2AClient {
         }
         builder.send().await?.error_for_status()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One-response HTTP server; counts requests it sees.
+    async fn serve(response: String) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+        (addr, hits)
+    }
+
+    fn ok_card() -> String {
+        let body =
+            r#"{"name":"x","description":"","url":"http://x","version":"1","capabilities":[]}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let (target, target_hits) = serve(ok_card()).await;
+        let (peer, _) = serve(format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://{target}/.well-known/agent.json\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        ))
+        .await;
+        let client = A2AClient::new(&format!("http://{peer}"));
+        assert!(client.discover().await.is_err());
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            0,
+            "redirect was followed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_client_connects_only_to_checked_addrs() {
+        let (server, hits) = serve(ok_card()).await;
+        // `.invalid` never resolves, so reaching the server proves the pin
+        // replaced DNS for this host.
+        let client = A2AClient::pinned(
+            &format!("http://peer.invalid:{}", server.port()),
+            "peer.invalid",
+            &[server],
+        );
+        let _ = client.discover().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

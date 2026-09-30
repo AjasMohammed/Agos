@@ -737,10 +737,12 @@ impl DisplayBackend for SystemDisplayBackend {
 }
 
 fn detect_backend_kind() -> BackendKind {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() && command_exists("wlr-randr") {
+    // Empty counts as unset, matching `agentos_hal::detect`.
+    let set = |var: &str| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+    if set("WAYLAND_DISPLAY") && command_exists("wlr-randr") {
         return BackendKind::WlrRandr;
     }
-    if std::env::var_os("DISPLAY").is_some() && command_exists("xrandr") {
+    if set("DISPLAY") && command_exists("xrandr") {
         return BackendKind::XRandr;
     }
     BackendKind::Sysfs

@@ -503,7 +503,7 @@ impl KernelMcpExecutor {
         // those; without this the `claude` subprocess would just see the raw
         // envelope and believe e.g. `ask-user` had reached the operator.
         if let Ok(value) = &result {
-            if let Some(action) = KernelAction::from_tool_result(value) {
+            if let Some(action) = KernelAction::from_tool_result(tool_name, value) {
                 result = Ok(self
                     .dispatch_kernel_action(task_id, trace_id, &permissions, action)
                     .await);

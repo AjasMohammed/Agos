@@ -82,6 +82,116 @@ impl Default for WebSearchTool {
     }
 }
 
+/// Parse DuckDuckGo's HTML results page.
+///
+/// Every field is read from inside the current result: DDG writes
+/// `<a rel="nofollow" class="result__a" href="…">`, class *before* href, so the
+/// href is taken from the anchor's own tag (searching backwards from the class
+/// picked up the previous result's link and shifted every URL by one), and the
+/// snippet is only looked for before the next result's title anchor.
+fn parse_ddg_html(html: &str, limit: usize) -> Vec<SearchResult> {
+    const MARKER: &str = "class=\"result__a\"";
+    let mut results = Vec::new();
+    let mut rest = html;
+
+    while results.len() < limit {
+        let Some(marker) = rest.find(MARKER) else {
+            break;
+        };
+        let Some(tag_start) = rest[..marker].rfind('<') else {
+            break;
+        };
+        let Some(tag_len) = rest[tag_start..].find('>') else {
+            break;
+        };
+        let tag = &rest[tag_start..tag_start + tag_len];
+        let after_tag = &rest[tag_start + tag_len + 1..];
+        let block = &after_tag[..after_tag.find(MARKER).unwrap_or(after_tag.len())];
+        rest = after_tag;
+
+        let Some(url_raw) = tag
+            .find("href=\"")
+            .map(|i| &tag[i + 6..])
+            .and_then(|s| s.find('"').map(|e| s[..e].replace("&amp;", "&")))
+        else {
+            continue;
+        };
+
+        // Resolve DDG redirect URLs (//duckduckgo.com/l/?uddg=<encoded_url>)
+        let final_url = if url_raw.starts_with("//duckduckgo.com/l/") {
+            url_raw
+                .find("uddg=")
+                .and_then(|i| {
+                    let encoded = &url_raw[i + 5..];
+                    let end = encoded.find('&').unwrap_or(encoded.len());
+                    urlencoding::decode(&encoded[..end])
+                        .ok()
+                        .map(|c| c.to_string())
+                })
+                .unwrap_or_else(|| url_raw.clone())
+        } else {
+            url_raw
+        };
+
+        let title = block
+            .find("</a>")
+            .map(|close| html_to_text(&block[..close]))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| final_url.clone());
+
+        // The snippet holds <b> highlights, so it ends at its own closing tag,
+        // not at the first `</` inside it.
+        let snippet = block
+            .find("result__snippet")
+            .map(|i| &block[i..])
+            .and_then(|s| s.find('>').map(|o| &s[o + 1..]))
+            .map(|s| {
+                let end = ["</a>", "</div>", "</td>"]
+                    .iter()
+                    .filter_map(|close| s.find(close))
+                    .min()
+                    .unwrap_or(s.len());
+                html_to_text(&s[..end])
+            })
+            .unwrap_or_default();
+
+        // SSRF guard: block private IPs and dangerous hostnames on scraped URLs.
+        if final_url.starts_with("http") && !is_ssrf_blocked_url(&final_url) {
+            results.push(SearchResult {
+                title,
+                url: final_url,
+                snippet,
+            });
+        }
+    }
+
+    results
+}
+
+/// Strip inline tags, decode the common entities and collapse whitespace.
+fn html_to_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    // `&amp;` last, so `&amp;lt;` stays the literal text `&lt;`.
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Return `true` if the URL's host should be blocked for SSRF protection.
 /// Covers IP literals, DNS-rebinding-prone hostnames, and mDNS domains.
 fn is_ssrf_blocked_url(url_str: &str) -> bool {
@@ -242,113 +352,7 @@ impl WebSearchTool {
             .text()
             .await?;
 
-        let mut results = Vec::new();
-        let mut pos = 0;
-
-        while results.len() < limit {
-            // Find a result anchor with class="result__a"
-            let href_offset = match html.get(pos..).and_then(|s| s.find("class=\"result__a\"")) {
-                Some(o) => o,
-                None => break,
-            };
-            let abs = pos + href_offset;
-
-            // Find href=" before the result__a marker
-            let url_start = match html.get(..abs).and_then(|s| s.rfind("href=\"")) {
-                Some(i) => i + 6, // skip past `href="`
-                None => {
-                    pos = abs + 1;
-                    continue;
-                }
-            };
-
-            let url_raw_str = match html.get(url_start..) {
-                Some(s) => s,
-                None => break,
-            };
-            let url_end = match url_raw_str.find('"') {
-                Some(e) => e,
-                None => break,
-            };
-            let url_raw = match url_raw_str.get(..url_end) {
-                Some(s) => s,
-                None => break,
-            };
-
-            // Resolve DDG redirect URLs (//duckduckgo.com/l/?uddg=<encoded_url>)
-            let final_url = if url_raw.starts_with("//duckduckgo.com/l/") {
-                url_raw
-                    .find("uddg=")
-                    .and_then(|i| {
-                        let encoded = &url_raw[i + 5..];
-                        let end = encoded.find('&').unwrap_or(encoded.len());
-                        urlencoding::decode(encoded.get(..end)?)
-                            .ok()
-                            .map(|c| c.to_string())
-                    })
-                    .unwrap_or_else(|| url_raw.to_string())
-            } else {
-                url_raw.to_string()
-            };
-
-            // Extract anchor text as the title (text between '>' and '</a>').
-            let title = html
-                .get(abs..)
-                .and_then(|s| {
-                    let tag_open_end = s.find('>')?;
-                    let after_tag = s.get(tag_open_end + 1..)?;
-                    let close = after_tag.find("</a>").unwrap_or(after_tag.len().min(120));
-                    after_tag.get(..close).map(|t| {
-                        // Strip inline HTML tags (e.g. <b> highlights) from title.
-                        let mut out = String::with_capacity(close);
-                        let mut in_tag = false;
-                        for ch in t.chars() {
-                            match ch {
-                                '<' => in_tag = true,
-                                '>' => in_tag = false,
-                                _ if !in_tag => out.push(ch),
-                                _ => {}
-                            }
-                        }
-                        out.trim().to_string()
-                    })
-                })
-                .unwrap_or_else(|| final_url.clone());
-
-            // Extract snippet text (result__snippet class).
-            let snippet = html
-                .get(abs..)
-                .and_then(|s| {
-                    let snip_start = s.find("result__snippet")?;
-                    let after_class = s.get(snip_start..)?;
-                    let text_start = after_class.find('>')? + 1;
-                    let after_open = after_class.get(text_start..)?;
-                    let text_end = after_open.find("</").unwrap_or(after_open.len().min(200));
-                    after_open.get(..text_end).map(|raw| {
-                        raw.replace("&amp;", "&")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&quot;", "\"")
-                            .replace("&#39;", "'")
-                            .trim()
-                            .to_string()
-                    })
-                })
-                .unwrap_or_default();
-
-            // SSRF guard: block private IPs and dangerous hostnames on scraped URLs.
-            if final_url.starts_with("http") && !is_ssrf_blocked_url(&final_url) {
-                results.push(SearchResult {
-                    title,
-                    url: final_url,
-                    snippet,
-                });
-            }
-
-            pos = abs + 1;
-        }
-
-        Ok(results)
+        Ok(parse_ddg_html(&html, limit))
     }
 
     /// Return a cached result set for this query, if one is present and fresh.
@@ -555,6 +559,37 @@ impl AgentTool for WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two results in DDG's real markup: class before href, a `result__url`
+    /// and a `result__snippet` link after each title, `<b>` highlights inside.
+    const DDG_FIXTURE: &str = r#"
+<div class="result results_links results_links_deep web-result ">
+  <h2 class="result__title">
+    <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.taskade.com%2Fblog%2Fai%2Dagent%2Dplatforms&amp;rut=51e5">12 Best <b>AI</b> Agent Platforms (No-Code &amp; Dev)</a>
+  </h2>
+  <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.taskade.com%2Fblog%2Fai%2Dagent%2Dplatforms&amp;rut=51e5">www.taskade.com</a>
+  <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.taskade.com%2Fblog%2Fai%2Dagent%2Dplatforms&amp;rut=51e5">The 12 best <b>AI</b> <b>agent</b> platforms for 2026.</a>
+</div>
+<div class="result results_links results_links_deep web-result ">
+  <h2 class="result__title">
+    <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.technavio.com%2Freport%2Fai&amp;rut=bda0">AI Agent Platform Market</a>
+  </h2>
+  <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.technavio.com%2Freport%2Fai&amp;rut=bda0">Grows at a CAGR of <b>41.5%</b>.</a>
+</div>
+"#;
+
+    #[test]
+    fn ddg_parse_pairs_each_title_with_its_own_url_and_full_snippet() {
+        let r = parse_ddg_html(DDG_FIXTURE, 10);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].title, "12 Best AI Agent Platforms (No-Code & Dev)");
+        assert_eq!(r[0].url, "https://www.taskade.com/blog/ai-agent-platforms");
+        assert_eq!(r[0].snippet, "The 12 best AI agent platforms for 2026.");
+        assert_eq!(r[1].title, "AI Agent Platform Market");
+        assert_eq!(r[1].url, "https://www.technavio.com/report/ai");
+        assert_eq!(r[1].snippet, "Grows at a CAGR of 41.5%.");
+        assert_eq!(parse_ddg_html(DDG_FIXTURE, 1).len(), 1);
+    }
 
     #[test]
     fn test_web_search_tool_name() {

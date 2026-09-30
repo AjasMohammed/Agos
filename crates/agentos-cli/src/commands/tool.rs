@@ -291,8 +291,8 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -304,8 +304,8 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("Tool from {} installed", path),
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -317,8 +317,8 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("Tool '{}' removed", name),
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 

@@ -754,6 +754,83 @@ async fn stopped_stream_keeps_the_partial_answer() {
     handle.await.unwrap();
 }
 
+/// A claude-code agent runs its whole tool loop inside ONE inference, and its
+/// tool calls land in the gateway buffer while the text streams. Draining that
+/// buffer only after `Done` put every tool card below all of the text
+/// (2026-09-24, agent "Op"). A call made mid-stream must reach the reader
+/// between the text before it and the text after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gateway_tool_call_streams_between_text_chunks() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    // Many 20-char chunks, so there is text on both sides of the call.
+    let answer = "Some words before and after the tool call. ".repeat(10);
+    let agent_id = common::register_mock_agent_with_responses(
+        &kernel,
+        "chat-gateway-agent",
+        vec![MockResponse::text(&answer).with_stop_reason(StopReason::EndTurn)],
+    )
+    .await;
+    let collector: agentos_kernel::claude_mcp_gateway::GatewayToolCallCollector =
+        Default::default();
+    kernel
+        .claude_gateway_tool_calls
+        .write()
+        .await
+        .insert(agent_id, collector.clone());
+
+    // Capacity 1 + a reader that stalls after the first chunk holds the kernel
+    // mid-stream, so the call lands in the buffer while text is still coming.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<agentos_kernel::ChatStreamEvent>(1);
+    let reader = tokio::spawn(async move {
+        let mut kinds = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            let kind = match ev {
+                agentos_kernel::ChatStreamEvent::TextChunk { .. } => "text",
+                agentos_kernel::ChatStreamEvent::ToolStart { .. } => "tool",
+                _ => continue,
+            };
+            if kind == "text" && !kinds.contains(&"text") {
+                collector
+                    .lock()
+                    .await
+                    .push(agentos_kernel::claude_mcp_gateway::GatewayToolCall {
+                        tool_name: "web-search".into(),
+                        payload: serde_json::json!({}),
+                        result: serde_json::json!({"ok": true}),
+                        duration_ms: 5,
+                    });
+            }
+            kinds.push(kind);
+        }
+        kinds
+    });
+
+    let result = kernel
+        .chat_infer_streaming("chat-gateway-agent", &[], "Look it up.", None, tx, None)
+        .await
+        .expect("chat_infer_streaming failed");
+    let kinds = reader.await.unwrap();
+
+    let tool_at = kinds
+        .iter()
+        .position(|k| *k == "tool")
+        .unwrap_or_else(|| panic!("gateway call never streamed: {kinds:?}"));
+    assert!(
+        kinds[tool_at + 1..].contains(&"text"),
+        "the tool card must sit between text chunks, not after all of them: {kinds:?}"
+    );
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "the call must still be persisted"
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
 /// Stop pressed before the first token (or a reader that never read at all):
 /// the turn still closes cleanly instead of failing, and it never pays for an
 /// inference — the check runs on the first send of the iteration.

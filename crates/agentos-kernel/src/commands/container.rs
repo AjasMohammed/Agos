@@ -3,9 +3,17 @@ use std::sync::Arc;
 use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
 use agentos_bus::KernelResponse;
 use agentos_runtime::{ComputeRuntime, ContainerSpec, NetworkMode};
-use agentos_types::{AgentID, TraceID};
+use agentos_types::{AgentID, AgentTask, TraceID};
 
+use crate::kernel_action::KernelActionResult;
 use crate::Kernel;
+
+fn action_error(message: String) -> KernelActionResult {
+    KernelActionResult {
+        success: false,
+        result: serde_json::json!({ "error": message }),
+    }
+}
 
 /// Maximum memory per container (64 GiB).
 const MAX_MEMORY_MB: u64 = 64 * 1024;
@@ -13,6 +21,12 @@ const MAX_MEMORY_MB: u64 = 64 * 1024;
 const MAX_CPU: f64 = 16.0;
 /// Minimum exec timeout (1 second).
 const MIN_TIMEOUT_MS: u64 = 1000;
+/// Maximum exec timeout (10 minutes). The kernel action has no outer timeout,
+/// so this bounds how long one call can hold the agent's turn.
+const MAX_TIMEOUT_MS: u64 = 600_000;
+/// Maximum container lifetime (24 hours). Also keeps `expires_at` arithmetic
+/// far from chrono's overflow panic.
+const MAX_TTL_SECONDS: u64 = 24 * 3600;
 
 impl Kernel {
     /// Helper: get the compute runtime or return an error response.
@@ -88,6 +102,11 @@ impl Kernel {
                 message: format!("cpu must be 0.1–{MAX_CPU}"),
             };
         }
+        if ttl_seconds == 0 || ttl_seconds > MAX_TTL_SECONDS {
+            return KernelResponse::Error {
+                message: format!("ttl_seconds must be 1–{MAX_TTL_SECONDS}"),
+            };
+        }
 
         let network_mode = match network.as_str() {
             "none" | "" => NetworkMode::None,
@@ -109,6 +128,14 @@ impl Kernel {
             env_vars: Default::default(),
             workspace_mount: None,
         };
+
+        // Pull outside the provision lock: a multi-GB image must not block
+        // every other agent's create.
+        if let Err(e) = runtime.prepare_image(&spec.image).await {
+            return KernelResponse::Error {
+                message: format!("Container create failed: {e}"),
+            };
+        }
 
         // Acquire provision lock to prevent TOCTOU races (C2)
         let _lock = self.quota_enforcer.provision_lock.lock().await;
@@ -181,9 +208,9 @@ impl Kernel {
         }
 
         // Timeout validation (I4)
-        if timeout_ms < MIN_TIMEOUT_MS {
+        if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
             return KernelResponse::Error {
-                message: format!("timeout_ms must be >= {MIN_TIMEOUT_MS}"),
+                message: format!("timeout_ms must be {MIN_TIMEOUT_MS}–{MAX_TIMEOUT_MS}"),
             };
         }
 
@@ -356,6 +383,94 @@ impl Kernel {
 
         KernelResponse::Success {
             data: Some(serde_json::json!({ "containers": data })),
+        }
+    }
+
+    /// Run a `container-*` tool call as the calling agent. The tool is a
+    /// stateless shim; everything is enforced by the `cmd_container_*`
+    /// handlers above, the same ones the bus commands use.
+    pub(crate) async fn execute_container_action(
+        &self,
+        task: &AgentTask,
+        tool: &str,
+        payload: &serde_json::Value,
+    ) -> KernelActionResult {
+        let Some(agent_name) = self
+            .agent_registry
+            .read()
+            .await
+            .get_by_id(&task.agent_id)
+            .map(|a| a.name.clone())
+        else {
+            return action_error(format!("Agent not found: {}", task.agent_id));
+        };
+        let str_field = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let u64_field = |k: &str, d: u64| payload.get(k).and_then(|v| v.as_u64()).unwrap_or(d);
+        let container_id = str_field("container_id");
+        let missing_id = || action_error(format!("{tool} requires 'container_id'"));
+
+        let response = match tool {
+            "container-create" => {
+                let Some(image) = str_field("image") else {
+                    return action_error("container-create requires 'image'".into());
+                };
+                self.cmd_container_create(
+                    agent_name,
+                    image,
+                    u64_field("memory_mb", 256),
+                    payload.get("cpu").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                    str_field("network").unwrap_or_default(),
+                    u64_field("ttl_seconds", 3600),
+                )
+                .await
+            }
+            "container-exec" => {
+                let Some(container_id) = container_id else {
+                    return missing_id();
+                };
+                let command: Option<Vec<String>> = payload
+                    .get("command")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect());
+                let Some(command) = command.filter(|c| !c.is_empty()) else {
+                    return action_error(
+                        "container-exec requires 'command' as a non-empty array of strings".into(),
+                    );
+                };
+                self.cmd_container_exec(
+                    agent_name,
+                    container_id,
+                    command,
+                    u64_field("timeout_ms", 60_000),
+                )
+                .await
+            }
+            "container-logs" => {
+                let Some(container_id) = container_id else {
+                    return missing_id();
+                };
+                self.cmd_container_logs(agent_name, container_id, u64_field("tail", 200) as usize)
+                    .await
+            }
+            "container-destroy" => {
+                let Some(container_id) = container_id else {
+                    return missing_id();
+                };
+                self.cmd_container_destroy(agent_name, container_id).await
+            }
+            // Always scoped to the caller: an agent never lists other agents'
+            // containers.
+            "container-list" => self.cmd_container_list(Some(agent_name)).await,
+            other => return action_error(format!("Unknown container tool: {other}")),
+        };
+
+        match response {
+            KernelResponse::Success { data } => KernelActionResult {
+                success: true,
+                result: data.unwrap_or_default(),
+            },
+            KernelResponse::Error { message } => action_error(message),
+            other => action_error(format!("Unexpected container response: {other:?}")),
         }
     }
 

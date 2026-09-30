@@ -20,6 +20,7 @@ pub mod bluetooth;
 pub mod cancel_agent;
 pub mod channel_send;
 pub mod chat_search;
+pub mod container_tools;
 pub mod context_memory_read;
 pub mod context_memory_update;
 pub mod coordination;

@@ -106,13 +106,19 @@ async fn run_checks(fix: bool) -> Vec<(String, CheckResult)> {
         check_bus_socket_dir(&socket_path, fix),
     ));
     checks.push(("Core tool manifests".to_string(), check_tools_dir()));
-    checks.push(("Hardware peripherals".to_string(), check_peripherals()));
+    checks.push((
+        "Hardware peripherals (host probe, this shell's environment)".to_string(),
+        check_peripherals(),
+    ));
 
     checks
 }
 
-/// What the kernel's boot-time peripheral probe will find on this host.
-/// Missing hardware is not a fault, so this always passes.
+/// The kernel's boot-time peripheral probe, run with this shell's environment
+/// (PATH, XDG_RUNTIME_DIR, DISPLAY). The kernel may see a different
+/// environment, and `[hal] force_enable` / `disable` and compiled features
+/// still apply on top; its boot log has the final word. Missing hardware is
+/// not a fault, so this always passes.
 fn check_peripherals() -> CheckResult {
     let probes = agentos_hal::probe_peripherals();
     let found: Vec<_> = probes

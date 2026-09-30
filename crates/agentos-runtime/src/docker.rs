@@ -4,9 +4,10 @@ use crate::runtime::{
 use agentos_types::{AgentID, AgentOSError, TaskID};
 use async_trait::async_trait;
 use bollard::container::{
-    Config, CreateContainerOptions, LogsOptions, RemoveContainerOptions, StopContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::image::CreateImageOptions;
 use bollard::models::HostConfig;
 use bollard::Docker;
 use chrono::{Duration, Utc};
@@ -18,6 +19,8 @@ use tokio::sync::RwLock;
 const LABEL_PREFIX: &str = "agentos";
 /// Maximum stdout/stderr capture per exec call (1 MiB).
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Upper bound on a single image pull.
+const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn runtime_err(reason: impl std::fmt::Display) -> AgentOSError {
     AgentOSError::ToolExecutionFailed {
@@ -29,13 +32,19 @@ fn runtime_err(reason: impl std::fmt::Display) -> AgentOSError {
 /// Docker-based implementation of `ComputeRuntime`.
 pub struct DockerRuntime {
     client: Docker,
+    /// Identifies the owning kernel (its data dir) so leftover cleanup never
+    /// touches another kernel's containers on the same Docker host.
+    instance: String,
     containers: Arc<RwLock<HashMap<String, ContainerInfo>>>,
     allowlist: crate::allowlist::ImageAllowlist,
 }
 
 impl DockerRuntime {
     /// Connect to the Docker daemon using default socket detection.
-    pub async fn new(allowed_images: Vec<String>) -> Result<Self, AgentOSError> {
+    ///
+    /// `instance` must be stable across restarts of the same kernel and
+    /// distinct between kernels (the data dir is used).
+    pub async fn new(allowed_images: Vec<String>, instance: String) -> Result<Self, AgentOSError> {
         let client = Docker::connect_with_socket_defaults()
             .map_err(|e| runtime_err(format!("Docker connection failed: {e}")))?;
 
@@ -45,16 +54,108 @@ impl DockerRuntime {
             .await
             .map_err(|e| runtime_err(format!("Docker daemon unreachable: {e}")))?;
 
+        remove_leftover_containers(&client, &instance).await;
+
         Ok(Self {
             client,
+            instance,
             containers: Arc::new(RwLock::new(HashMap::new())),
             allowlist: crate::allowlist::ImageAllowlist::new(allowed_images),
         })
     }
 }
 
+/// Force-remove containers a previous kernel run left behind. The runtime
+/// tracks containers only in memory, so after a restart these would never be
+/// reaped, never count toward quota, and could not be destroyed by their owner.
+///
+/// ponytail: removal, not re-adoption. Rebuilding the map from the
+/// `agentos.*` labels (plus `inspect_container` for limits) would let work
+/// survive a restart; do that if agents need long-lived containers.
+async fn remove_leftover_containers(client: &Docker, instance: &str) {
+    let instance_label = format!("{LABEL_PREFIX}.instance={instance}");
+    let filters = HashMap::from([("label", vec![instance_label.as_str()])]);
+    let opts = ListContainersOptions {
+        all: true,
+        filters,
+        ..Default::default()
+    };
+    let leftovers = match client.list_containers(Some(opts)).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not list leftover agent containers");
+            return;
+        }
+    };
+    for id in leftovers.into_iter().filter_map(|c| c.id) {
+        let rm = RemoveContainerOptions {
+            force: true,
+            v: true,
+            ..Default::default()
+        };
+        match client.remove_container(&id, Some(rm)).await {
+            Ok(()) => tracing::info!(container_id = %id, "Removed leftover agent container"),
+            Err(e) => {
+                tracing::warn!(container_id = %id, error = %e, "Leftover container removal failed")
+            }
+        }
+    }
+}
+
+impl DockerRuntime {
+    /// Pull an (already allowlisted) image if it is not present locally;
+    /// `create_container` does not pull on its own.
+    async fn ensure_image(&self, image: &str) -> Result<(), AgentOSError> {
+        if self.client.inspect_image(image).await.is_ok() {
+            return Ok(());
+        }
+        let (from_image, tag) = split_image_ref(image);
+        tracing::info!(image, "Pulling container image");
+        let opts = CreateImageOptions {
+            from_image,
+            tag,
+            ..Default::default()
+        };
+        let mut pull = self.client.create_image(Some(opts), None, None);
+        let drain = async {
+            while let Some(step) = pull.next().await {
+                step.map_err(|e| runtime_err(format!("Image pull failed for '{image}': {e}")))?;
+            }
+            Ok(())
+        };
+        // Bollard's own timeout covers only the response headers, not the
+        // streamed pull; a stalled registry would otherwise hang the caller.
+        tokio::time::timeout(PULL_TIMEOUT, drain)
+            .await
+            .map_err(|_| runtime_err(format!("Image pull timed out for '{image}'")))?
+    }
+}
+
+/// Split `repo[:tag]` for the pull API, which pulls EVERY tag when `tag` is
+/// empty. A `:` before the last `/` is a registry port, not a tag. Digest
+/// references (`repo@sha256:…`) go through whole with no tag.
+fn split_image_ref(image: &str) -> (&str, &str) {
+    if image.contains('@') {
+        return (image, "");
+    }
+    let name_start = image.rfind('/').map_or(0, |i| i + 1);
+    match image[name_start..].rfind(':') {
+        Some(i) => (&image[..name_start + i], &image[name_start + i + 1..]),
+        None => (image, "latest"),
+    }
+}
+
 #[async_trait]
 impl ComputeRuntime for DockerRuntime {
+    async fn prepare_image(&self, image: &str) -> Result<(), AgentOSError> {
+        if !self.allowlist.is_allowed(image) {
+            return Err(runtime_err(format!(
+                "Image '{image}' is not in the operator allowlist"
+            )));
+        }
+        self.ensure_image(image).await
+    }
+
     async fn provision(
         &self,
         spec: ContainerSpec,
@@ -69,12 +170,17 @@ impl ComputeRuntime for DockerRuntime {
             )));
         }
 
+        // No-op when the kernel already called `prepare_image` (outside its
+        // provision lock); pulls here for any other caller.
+        self.ensure_image(&spec.image).await?;
+
         let now = Utc::now();
         let expires_at = now + Duration::seconds(spec.ttl_seconds as i64);
 
         // Build labels for tracking managed containers
         let mut labels = HashMap::new();
         labels.insert(format!("{LABEL_PREFIX}.managed"), "true".to_string());
+        labels.insert(format!("{LABEL_PREFIX}.instance"), self.instance.clone());
         labels.insert(format!("{LABEL_PREFIX}.agent_id"), agent_id.to_string());
         labels.insert(
             format!("{LABEL_PREFIX}.expires_at"),
@@ -290,7 +396,12 @@ impl ComputeRuntime for DockerRuntime {
         let opts = LogsOptions::<String> {
             stdout: true,
             stderr: true,
-            tail: tail.to_string(),
+            // Docker reads tail=0 as zero lines; the tool contract says 0 = all.
+            tail: if tail == 0 {
+                "all".to_string()
+            } else {
+                tail.to_string()
+            },
             ..Default::default()
         };
 
@@ -317,14 +428,8 @@ impl ComputeRuntime for DockerRuntime {
     }
 
     async fn destroy(&self, container_id: &str) -> Result<(), AgentOSError> {
-        // Stop with 10s grace period
-        let stop_opts = StopContainerOptions { t: 10 };
-        let _ = self
-            .client
-            .stop_container(container_id, Some(stop_opts))
-            .await;
-
-        // Force remove
+        // Force remove. No graceful stop: PID 1 is `sleep infinity`, which
+        // ignores SIGTERM, so a stop always waited out the full grace period.
         let rm_opts = RemoveContainerOptions {
             force: true,
             v: true, // remove associated volumes
@@ -354,5 +459,54 @@ impl ComputeRuntime for DockerRuntime {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_image_ref;
+
+    #[test]
+    fn split_image_ref_never_leaves_tag_empty_for_a_name() {
+        assert_eq!(split_image_ref("alpine:3.19"), ("alpine", "3.19"));
+        assert_eq!(split_image_ref("n8nio/n8n"), ("n8nio/n8n", "latest"));
+        assert_eq!(
+            split_image_ref("localhost:5000/team/app:1.2"),
+            ("localhost:5000/team/app", "1.2")
+        );
+        assert_eq!(
+            split_image_ref("localhost:5000/team/app"),
+            ("localhost:5000/team/app", "latest")
+        );
+        assert_eq!(split_image_ref("repo@sha256:abc"), ("repo@sha256:abc", ""));
+    }
+
+    /// Live round trip against the local Docker daemon, pull included:
+    /// `cargo test -p agentos-runtime -- --ignored docker_round_trip`
+    #[tokio::test]
+    #[ignore = "needs a Docker daemon and network"]
+    async fn docker_round_trip() {
+        use crate::runtime::{ComputeRuntime, ContainerSpec};
+        let image = "alpine:3.19".to_string();
+        let instance = format!("test-{}", uuid::Uuid::new_v4());
+        let rt = super::DockerRuntime::new(vec![image.clone()], instance)
+            .await
+            .unwrap();
+        let spec = ContainerSpec {
+            image,
+            memory_limit_bytes: 64 * 1024 * 1024,
+            ttl_seconds: 120,
+            ..Default::default()
+        };
+        let info = rt
+            .provision(spec, agentos_types::AgentID::new(), None)
+            .await
+            .unwrap();
+        let out = rt
+            .exec(&info.id, vec!["echo".into(), "hi".into()], 10_000)
+            .await;
+        rt.destroy(&info.id).await.unwrap();
+        let out = out.unwrap();
+        assert_eq!((out.exit_code, out.stdout.trim()), (0, "hi"));
     }
 }

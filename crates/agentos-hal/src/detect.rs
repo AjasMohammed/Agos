@@ -40,6 +40,10 @@ pub struct ProbeEnv {
     pub root: PathBuf,
     pub path: Option<OsString>,
     pub xdg_runtime_dir: Option<PathBuf>,
+    /// PipeWire looks here before `XDG_RUNTIME_DIR`.
+    pub pipewire_runtime_dir: Option<PathBuf>,
+    /// PipeWire socket name; `pipewire-0` when unset.
+    pub pipewire_remote: Option<OsString>,
     pub wayland_display: Option<OsString>,
     pub display: Option<OsString>,
 }
@@ -49,7 +53,13 @@ impl ProbeEnv {
         Self {
             root: PathBuf::from("/"),
             path: std::env::var_os("PATH"),
-            xdg_runtime_dir: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            xdg_runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            pipewire_runtime_dir: std::env::var_os("PIPEWIRE_RUNTIME_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            pipewire_remote: std::env::var_os("PIPEWIRE_REMOTE"),
             wayland_display: std::env::var_os("WAYLAND_DISPLAY"),
             display: std::env::var_os("DISPLAY"),
         }
@@ -74,11 +84,22 @@ impl ProbeEnv {
             })
         })
     }
+
+    fn dbus_service(&self, name: &str) -> bool {
+        self.at("usr/share/dbus-1/system-services")
+            .join(format!("{name}.service"))
+            .exists()
+    }
 }
 
+/// Set and non-empty. The display driver uses the same test.
 fn set(v: &Option<OsString>) -> bool {
     v.as_ref().is_some_and(|s| !s.is_empty())
 }
+
+/// Appended when the hardware itself is missing: probes run once, at boot.
+// ponytail: boot-only probe; add `agentos hal rescan` if hotplug matters to users.
+const REPLUG: &str = "; restart the kernel after plugging one in, or use [hal] force_enable";
 
 /// Probe every peripheral driver against the real host.
 pub fn probe_peripherals() -> Vec<PeripheralProbe> {
@@ -105,28 +126,40 @@ pub fn probe_peripherals_with(env: &ProbeEnv) -> Vec<PeripheralProbe> {
 }
 
 /// `Ok(why present)` or `Err(why absent)`. Each check mirrors what the driver
-/// actually calls, not just the hardware.
+/// actually calls, not just the hardware. Where a running service already
+/// implies a machine with devices that come and go (PipeWire, UDisks2), only
+/// the service is checked, so hotplugged devices keep working.
 fn probe_one(env: &ProbeEnv, driver: &str) -> Result<String, String> {
     match driver {
         // audio.rs drives PipeWire only (wpctl, pw-play, pw-record, pw-cli).
         "audio" => {
-            let cards = std::fs::read_to_string(env.at("proc/asound/cards")).unwrap_or_default();
-            if cards.trim().is_empty() || cards.contains("no soundcards") {
-                return Err("no sound card in /proc/asound/cards".into());
-            }
             if !env.on_path("wpctl") {
                 return Err("wpctl not on PATH (PipeWire tools)".into());
             }
-            match &env.xdg_runtime_dir {
-                Some(dir) if dir.join("pipewire-0").exists() => Ok("sound card + PipeWire".into()),
-                _ => Err("no PipeWire socket ($XDG_RUNTIME_DIR/pipewire-0)".into()),
+            let dir = env
+                .pipewire_runtime_dir
+                .as_ref()
+                .or(env.xdg_runtime_dir.as_ref());
+            let name = env
+                .pipewire_remote
+                .clone()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "pipewire-0".into());
+            match dir {
+                Some(dir) if dir.join(&name).exists() => Ok("PipeWire session".into()),
+                _ => Err("no PipeWire socket (no user session for the kernel)".into()),
             }
         }
         // bluetooth.rs talks to BlueZ about a local adapter.
-        "bluetooth" => env
-            .any_entry("sys/class/bluetooth", |n, _| n.starts_with("hci"))
-            .then(|| "adapter in /sys/class/bluetooth".to_string())
-            .ok_or_else(|| "no adapter in /sys/class/bluetooth".into()),
+        "bluetooth" => {
+            if !env.dbus_service("org.bluez") {
+                Err("BlueZ not installed".into())
+            } else if !env.any_entry("sys/class/bluetooth", |n, _| n.starts_with("hci")) {
+                Err(format!("no adapter in /sys/class/bluetooth{REPLUG}"))
+            } else {
+                Ok("adapter + BlueZ".into())
+            }
+        }
         // display.rs uses wlr-randr / xrandr in a session, else reads DRM
         // connectors from sysfs (list only).
         "display" => {
@@ -148,43 +181,44 @@ fn probe_one(env: &ProbeEnv, driver: &str) -> Result<String, String> {
             .any(|p| env.at(p).exists())
             .then(|| "CUPS socket".to_string())
             .ok_or_else(|| "no local CUPS socket (use [hal] force_enable for remote CUPS)".into()),
-        // raw_usb.rs opens USB devices directly.
-        "raw-usb" => usb_devices(env)
-            .then(|| "USB devices present".to_string())
-            .ok_or_else(|| "no USB devices in /sys/bus/usb/devices".into()),
+        // raw_usb.rs opens USB devices directly (and lists them without an
+        // allowlist, which is how an operator finds the vid:pid to allow).
+        "raw-usb" => usb_controller(env)
+            .then(|| "USB controller present".to_string())
+            .ok_or_else(|| "no USB controller in /sys/bus/usb/devices".into()),
         // usb_storage.rs talks to org.freedesktop.UDisks2 on the system bus.
         "usb-storage" => {
-            if !usb_devices(env) {
-                Err("no USB devices in /sys/bus/usb/devices".into())
-            } else if !env
-                .at("usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service")
-                .exists()
-            {
+            if !usb_controller(env) {
+                Err("no USB controller in /sys/bus/usb/devices".into())
+            } else if !env.dbus_service("org.freedesktop.UDisks2") {
                 Err("UDisks2 not installed".into())
             } else {
-                Ok("USB + UDisks2".into())
+                Ok("USB controller + UDisks2".into())
             }
         }
         // webcam.rs opens V4L2 capture devices.
         "webcam" => env
             .any_entry("sys/class/video4linux", |n, _| n.starts_with("video"))
             .then(|| "V4L2 device present".to_string())
-            .ok_or_else(|| "no /sys/class/video4linux/video*".into()),
+            .ok_or_else(|| format!("no /sys/class/video4linux/video*{REPLUG}")),
         // wifi.rs drives NetworkManager through nmcli.
         "wifi" => {
             if !env.any_entry("sys/class/net", |_, p| p.join("wireless").is_dir()) {
-                Err("no wireless interface in /sys/class/net".into())
+                Err(format!("no wireless interface in /sys/class/net{REPLUG}"))
             } else if !env.on_path("nmcli") {
                 Err("nmcli not on PATH (NetworkManager)".into())
+            } else if !env.at("run/NetworkManager").is_dir() {
+                Err("NetworkManager not running".into())
             } else {
-                Ok("wireless interface + nmcli".into())
+                Ok("wireless interface + NetworkManager".into())
             }
         }
         other => Err(format!("unknown peripheral driver '{other}'")),
     }
 }
 
-fn usb_devices(env: &ProbeEnv) -> bool {
+/// Root hubs are always listed, so this means "a USB controller exists".
+fn usb_controller(env: &ProbeEnv) -> bool {
     env.any_entry("sys/bus/usb/devices", |_, _| true)
 }
 
@@ -213,13 +247,13 @@ mod tests {
         fn mkdir(&self, rel: &str) {
             fs::create_dir_all(self.env.at(rel)).unwrap();
         }
-        fn file(&self, rel: &str, body: &str) {
+        fn file(&self, rel: &str) {
             let p = self.env.at(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::write(p, body).unwrap();
+            fs::write(p, "").unwrap();
         }
         fn bin(&self, name: &str) {
-            self.file(&format!("bin/{name}"), "");
+            self.file(&format!("bin/{name}"));
         }
         fn present(&self, driver: &str) -> bool {
             probe_peripherals_with(&self.env)
@@ -242,29 +276,32 @@ mod tests {
     }
 
     #[test]
-    fn wifi_needs_wireless_iface_and_nmcli() {
+    fn wifi_needs_wireless_iface_and_running_networkmanager() {
         let host = Host::new();
         host.mkdir("sys/class/net/wlan0/wireless");
         assert!(!host.present("wifi"));
         host.bin("nmcli");
+        assert!(!host.present("wifi"), "NetworkManager not running");
+        host.mkdir("run/NetworkManager");
         assert!(host.present("wifi"));
     }
 
     #[test]
-    fn audio_needs_card_wpctl_and_pipewire_socket() {
+    fn audio_needs_wpctl_and_pipewire_socket() {
         let mut host = Host::new();
-        host.bin("wpctl");
-        host.file("run/user/1000/pipewire-0", "");
+        host.file("run/user/1000/pipewire-0");
         host.env.xdg_runtime_dir = Some(host.env.at("run/user/1000"));
-        host.file("proc/asound/cards", " --- no soundcards ---\n");
-        assert!(!host.present("audio"));
-        host.file(
-            "proc/asound/cards",
-            " 0 [PCH ]: HDA-Intel - HDA Intel PCH\n",
-        );
+        assert!(!host.present("audio"), "no wpctl");
+        host.bin("wpctl");
         assert!(host.present("audio"));
         host.env.xdg_runtime_dir = None;
         assert!(!host.present("audio"));
+        // PIPEWIRE_RUNTIME_DIR + PIPEWIRE_REMOTE win over the defaults.
+        host.file("srv/pw/custom");
+        host.env.pipewire_runtime_dir = Some(host.env.at("srv/pw"));
+        assert!(!host.present("audio"));
+        host.env.pipewire_remote = Some("custom".into());
+        assert!(host.present("audio"));
     }
 
     #[test]
@@ -285,28 +322,27 @@ mod tests {
     #[test]
     fn printer_via_cups_socket() {
         let host = Host::new();
-        host.file("var/run/cups/cups.sock", "");
+        host.file("var/run/cups/cups.sock");
         assert!(host.present("printer"));
     }
 
     #[test]
     fn usb_storage_needs_udisks2() {
         let host = Host::new();
-        host.mkdir("sys/bus/usb/devices/1-1");
+        host.mkdir("sys/bus/usb/devices/usb1");
         assert!(host.present("raw-usb"));
         assert!(!host.present("usb-storage"));
-        host.file(
-            "usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service",
-            "",
-        );
+        host.file("usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service");
         assert!(host.present("usb-storage"));
     }
 
     #[test]
-    fn bluetooth_and_webcam_from_sysfs() {
+    fn bluetooth_needs_bluez_and_webcam_needs_v4l() {
         let host = Host::new();
         host.mkdir("sys/class/bluetooth/hci0");
         host.mkdir("sys/class/video4linux/video0");
+        assert!(!host.present("bluetooth"), "BlueZ not installed");
+        host.file("usr/share/dbus-1/system-services/org.bluez.service");
         assert!(host.present("bluetooth"));
         assert!(host.present("webcam"));
     }

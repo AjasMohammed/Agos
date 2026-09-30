@@ -127,8 +127,8 @@ pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow
                 KernelResponse::Success { .. } => {
                     println!("Provider '{}' base URL updated to '{}'", name, url);
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         ProviderCommands::List => {
@@ -176,8 +176,8 @@ pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow
                         );
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         ProviderCommands::Add {
@@ -270,8 +270,8 @@ pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow
                         if replaced { "replaced" } else { "added" }
                     );
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         ProviderCommands::Remove { name } => {
@@ -280,8 +280,8 @@ pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("Provider '{}' removed", name),
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
         ProviderCommands::Probe { name } => {
@@ -306,8 +306,8 @@ pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow
                         println!("  {}", m);
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }

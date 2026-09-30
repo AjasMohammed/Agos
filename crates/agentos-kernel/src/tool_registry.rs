@@ -38,6 +38,10 @@ pub struct ToolRegistry {
     /// Monotonic counter bumped on every mutation (register/unregister/remove).
     /// Consumers (semantic index, Tier-0 index) can detect stale state cheaply.
     revision: u64,
+    /// Core tool names hidden at boot (see [`Self::hide`]). They stay reserved:
+    /// the runner still holds the built-in implementation, so another manifest
+    /// under that name would run the built-in with the newcomer's permissions.
+    hidden: std::collections::HashSet<String>,
 }
 
 fn schema_type_for_prompt(field_schema: &serde_json::Value) -> String {
@@ -178,6 +182,7 @@ impl ToolRegistry {
             crl: RevocationList::new(),
             lifecycle_sender: None,
             revision: 0,
+            hidden: Default::default(),
         }
     }
 
@@ -190,6 +195,7 @@ impl ToolRegistry {
             crl,
             lifecycle_sender: None,
             revision: 0,
+            hidden: Default::default(),
         }
     }
 
@@ -296,6 +302,12 @@ impl ToolRegistry {
         // newcomer while the runner keeps executing the original implementation:
         // e.g. a Community `shell-exec` declaring `readonly_scoped` would have
         // the approval gate read the fake risk class for the real tool.
+        if self.hidden.contains(&manifest.manifest.name) {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "tool name '{}' is reserved for a core HAL tool not available on this host",
+                manifest.manifest.name
+            )));
+        }
         if self.name_index.contains_key(&manifest.manifest.name) {
             return Err(AgentOSError::SchemaValidation(format!(
                 "tool '{}' is already registered; remove it before installing another",
@@ -390,6 +402,14 @@ impl ToolRegistry {
 
     pub fn list_all(&self) -> Vec<&RegisteredTool> {
         self.tools.values().collect()
+    }
+
+    /// Remove a core tool the host cannot run (its HAL driver is not
+    /// registered) while keeping its name reserved, so no other manifest can
+    /// take it. Returns whether the tool was registered.
+    pub fn hide(&mut self, name: &str) -> bool {
+        self.hidden.insert(name.to_string());
+        self.remove(name).is_ok()
     }
 
     /// Remove a tool by name. Exact match only — deliberately asymmetric with
@@ -755,6 +775,15 @@ pub(crate) mod tests {
         );
         assert_eq!(manifest_enabled_for_build("wifi"), cfg!(feature = "wifi"));
         assert!(manifest_enabled_for_build("file-reader"));
+    }
+
+    #[test]
+    fn hidden_tool_name_stays_reserved() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_core_manifest("wifi")).unwrap();
+        assert!(registry.hide("wifi"));
+        assert!(registry.get_by_name("wifi").is_none());
+        assert!(registry.register(make_core_manifest("wifi")).is_err());
     }
 
     #[test]

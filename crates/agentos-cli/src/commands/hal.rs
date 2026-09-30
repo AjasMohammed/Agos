@@ -69,8 +69,8 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                         println!("{:<20} {:<20} {:<12} {} agents", id, dtype, status, granted);
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -85,7 +85,7 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                 KernelResponse::Success { data } => {
                     if let Some(d) = &data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             let is_new = d.get("is_new").and_then(|v| v.as_bool()).unwrap_or(false);
                             if is_new {
@@ -100,8 +100,8 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -116,14 +116,14 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                 KernelResponse::Success { data } => {
                     if let Some(d) = &data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             println!("Device '{}' approved for agent '{}'.", device, agent);
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -137,14 +137,14 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                 KernelResponse::Success { data } => {
                     if let Some(d) = &data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             println!("Device '{}' quarantined.", device);
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
 
@@ -159,14 +159,14 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                 KernelResponse::Success { data } => {
                     if let Some(d) = &data {
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
-                            eprintln!("Error: {}", err);
+                            cli_err!("Error: {}", err);
                         } else {
                             println!("Revoked '{}' access to device '{}'.", agent, device);
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => cli_err!("Error: {}", message),
+                _ => cli_err!("Unexpected response"),
             }
         }
     }
