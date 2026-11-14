@@ -88,7 +88,23 @@ impl WasmTool {
             manifest.executor.executor_type == ExecutorType::Wasm,
             "WasmTool::load called on a non-WASM manifest"
         );
-        let module = Module::from_file(&engine, wasm_path)?;
+        agentos_tools::signing::verify_manifest(manifest)?;
+        let bytes = std::fs::read(wasm_path)?;
+        if manifest.manifest.trust_tier != agentos_types::TrustTier::Core
+            || manifest.manifest.checksum.is_some()
+        {
+            use sha2::{Digest, Sha256};
+            let expected =
+                manifest.manifest.checksum.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("Signed WASM module requires a SHA-256 checksum")
+                })?;
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            anyhow::ensure!(
+                actual.eq_ignore_ascii_case(expected),
+                "WASM module checksum mismatch"
+            );
+        }
+        let module = Module::new(&engine, &bytes)?;
         let name = manifest.manifest.name.clone();
         let max_cpu_ms = manifest.sandbox.max_cpu_ms;
         let required_permissions = manifest
@@ -275,4 +291,36 @@ fn parse_permission(perm: &str) -> Vec<(String, PermissionOp)> {
         result.push((resource.clone(), PermissionOp::Observe));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_only_the_wasm_bytes_bound_to_the_signed_manifest() {
+        use sha2::{Digest, Sha256};
+
+        let bytes = b"\0asm\x01\0\0\0";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool.wasm");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut manifest =
+            agentos_tools::parse_manifest(include_str!("../../../tools/core/web-fetch.toml"))
+                .unwrap();
+        manifest.executor.executor_type = ExecutorType::Wasm;
+        manifest.executor.wasm_path = Some("tool.wasm".into());
+        manifest.manifest.trust_tier = agentos_types::TrustTier::Community;
+        manifest.manifest.checksum = Some(format!("{:x}", Sha256::digest(bytes)));
+        let seed = [7; 32];
+        manifest.manifest.author_pubkey = Some(agentos_tools::pubkey_hex_from_seed(&seed));
+        manifest.manifest.signature = Some(agentos_tools::sign_manifest(&manifest, &seed));
+
+        let executor = crate::WasmToolExecutor::new(dir.path()).unwrap();
+        assert!(executor.load(&manifest, &path).is_ok());
+        std::fs::write(&path, b"changed").unwrap();
+        let error = executor.load(&manifest, &path).err().unwrap();
+        assert!(error.to_string().contains("WASM module checksum mismatch"));
+    }
 }

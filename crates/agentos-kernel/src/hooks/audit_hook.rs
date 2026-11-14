@@ -179,9 +179,14 @@ impl Hook for AuditHook {
             rollback_ref: None,
         };
 
-        // Best-effort append — hook failures must never crash the kernel.
         if let Err(e) = self.audit.append(entry) {
+            crate::metrics::record_audit_append_failure();
             tracing::warn!(hook = "audit", error = %e, "Failed to write audit entry from hook");
+            if matches!(event, HookEvent::ToolPre { .. }) {
+                return HookResult::Abort(
+                    "Could not persist the tool execution audit record".into(),
+                );
+            }
         }
 
         // Tool-specific structured audit: when a privileged tool such as
@@ -365,6 +370,26 @@ mod tests {
         assert!(!entries
             .iter()
             .any(|e| e.event_type == AuditEventType::ToolExecutionCompleted));
+    }
+
+    #[tokio::test]
+    async fn tool_pre_aborts_when_audit_append_fails() {
+        let (hook, _, dir) = make_hook();
+        let conn = rusqlite::Connection::open(dir.path().join("audit.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_audit BEFORE INSERT ON audit_log
+             BEGIN SELECT RAISE(ABORT, 'test write failure'); END;",
+        )
+        .unwrap();
+        let outcome = hook
+            .on_event(&HookEvent::ToolPre {
+                task_id: TaskID::new(),
+                agent_id: AgentID::new(),
+                tool_name: "shell-exec".into(),
+                input_json: "{}".into(),
+            })
+            .await;
+        assert!(outcome.is_abort());
     }
 
     #[tokio::test]

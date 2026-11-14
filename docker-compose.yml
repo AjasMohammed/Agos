@@ -58,8 +58,7 @@ services:
     container_name: agentos-jaeger
     restart: unless-stopped
     ports:
-      - "16686:16686"
-      - "4317:4317"
+      - "127.0.0.1:16686:16686"
 
   ollama:
     image: ollama/ollama:latest

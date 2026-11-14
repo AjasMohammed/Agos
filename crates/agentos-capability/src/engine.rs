@@ -292,9 +292,18 @@ impl CapabilityEngine {
             });
         }
 
-        // 6. Check required permissions
+        // 6. Check both the token's ceiling and any live permission set
+        // registered with the engine.
+        let current = self
+            .agent_permissions
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         for (resource, op) in required_permissions {
-            if !token.permissions.check(resource, *op) {
+            if !token.permissions.check(resource, *op)
+                || current
+                    .get(&token.agent_id)
+                    .is_some_and(|perms| !perms.check(resource, *op))
+            {
                 return Err(AgentOSError::PermissionDenied {
                     resource: resource.clone(),
                     operation: format!("{:?}", op),
@@ -387,7 +396,15 @@ impl CapabilityEngine {
 
         // 4. Intersect parent permissions with what the child requested.
         //    This is the core security invariant: child ⊆ parent, always.
-        let intersection = parent_token.permissions.intersect(requested);
+        let mut intersection = parent_token.permissions.intersect(requested);
+        let current = self
+            .agent_permissions
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(permissions) = current.get(&parent_token.agent_id) {
+            intersection = intersection.intersect(permissions);
+        }
+        drop(current);
 
         // 5. Reject empty intersection — child asked for nothing the parent holds.
         if intersection.is_empty() {
@@ -760,6 +777,18 @@ mod tests {
                 &[("fs.user_data".to_string(), PermissionOp::Read)],
             )
             .is_ok());
+
+        engine
+            .update_permissions(&agent_id, PermissionSet::new())
+            .unwrap();
+        assert!(matches!(
+            engine.validate_intent(
+                &token,
+                &make_intent(IntentType::Read),
+                &[("fs.user_data".into(), PermissionOp::Read)],
+            ),
+            Err(AgentOSError::PermissionDenied { .. })
+        ));
 
         // Out-of-scope Execute intent → denied on intent_type, even though the
         // agent's standing permissions might otherwise cover it.

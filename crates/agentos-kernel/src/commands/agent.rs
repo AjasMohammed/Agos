@@ -2064,7 +2064,10 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         let before = perms.entries().len();
                         backfill_late_default_grants(&mut perms);
                         if perms.entries().len() != before {
-                            let _ = registry.update_agent_permissions(&agent_id, perms);
+                            if let Err(error) = registry.update_agent_permissions(&agent_id, perms)
+                            {
+                                tracing::warn!(%agent_id, %error, "Failed to persist default permission grants");
+                            }
                         }
                     }
                 }

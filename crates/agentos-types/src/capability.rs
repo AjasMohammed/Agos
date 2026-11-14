@@ -375,27 +375,10 @@ impl PermissionSet {
 
         let now = chrono::Utc::now();
         self.entries.iter().any(|e| {
-            // Exact match, or prefix match with a path-separator boundary.
-            //
-            // For path-style grants (grant contains '/' but does NOT end with '/'), we require
-            // that the character immediately after the grant prefix in the resource is '/', so
-            // that "fs:/home/user" does NOT match "fs:/home/username".
-            // Grants that already end with '/' (e.g. "fs:/home/user/") or that contain no '/'
-            // (e.g. "net:", "fs.user_data") use plain prefix matching unchanged.
-            let resource_matches = e.resource == "*"
-                || e.resource == resource
-                || (resource.starts_with(e.resource.as_str()) && {
-                    if e.resource.contains('/') && !e.resource.ends_with('/') {
-                        // Require next char to be '/' to avoid partial segment matches
-                        resource.as_bytes().get(e.resource.len()) == Some(&b'/')
-                    } else {
-                        true
-                    }
-                });
             // Expired entries are treated as absent
             let not_expired = e.expires_at.is_none_or(|exp| now < exp);
 
-            resource_matches
+            Self::resource_matches(&e.resource, resource)
                 && not_expired
                 && match operation {
                     PermissionOp::Read => e.read,
@@ -405,6 +388,21 @@ impl PermissionSet {
                     PermissionOp::Observe => e.observe,
                 }
         })
+    }
+
+    // Path grants require a separator after a matching prefix unless it already ends in '/'.
+    // Other grants retain plain prefix matching.
+    fn resource_matches(grant: &str, resource: &str) -> bool {
+        grant == "*"
+            || grant == resource
+            || (resource.starts_with(grant) && {
+                if grant.contains('/') && !grant.ends_with('/') {
+                    // Require next char to be '/' to avoid partial segment matches
+                    resource.as_bytes().get(grant.len()) == Some(&b'/')
+                } else {
+                    true
+                }
+            })
     }
 
     /// Returns `true` if every capability this set grants is also granted by
@@ -438,7 +436,7 @@ impl PermissionSet {
     /// Return a new set containing only the capabilities that both `self` and
     /// `ceiling` grant — i.e. `self` clamped so it can never exceed `ceiling`.
     ///
-    /// Reuses [`PermissionSet::check`] for the per-op test, so wildcard,
+    /// Uses the same resource matching rules as [`PermissionSet::check`], so wildcard,
     /// path-prefix, deny, and expiry semantics match live enforcement. The
     /// result is always a subset of `ceiling` (`result.is_subset_of(ceiling)`
     /// holds), which is what makes this safe to use as a downward-only clamp on
@@ -446,37 +444,42 @@ impl PermissionSet {
     /// denials only further restrict, so keeping them is defense-in-depth.
     pub fn intersect_with(&self, ceiling: &PermissionSet) -> PermissionSet {
         let mut out = PermissionSet::new();
-        // Candidate resources = every resource named by either side. When two
-        // prefix grants overlap, the narrower one is the intersection and it
-        // always appears here — so a broad `self` grant clamped by a narrower
-        // `ceiling` grant correctly yields the narrower prefix (and vice-versa).
-        // `check()` already excludes expired and denied grants on both sides.
-        let mut seen = std::collections::HashSet::new();
-        for resource in self
+        let now = chrono::Utc::now();
+        for left in self
             .entries
             .iter()
-            .map(|e| &e.resource)
-            .chain(ceiling.entries.iter().map(|e| &e.resource))
+            .filter(|entry| entry.expires_at.is_none_or(|e| now < e))
         {
-            if !seen.insert(resource.clone()) {
-                continue;
-            }
-            let grant = |op: PermissionOp| self.check(resource, op) && ceiling.check(resource, op);
-            let read = grant(PermissionOp::Read);
-            let write = grant(PermissionOp::Write);
-            let execute = grant(PermissionOp::Execute);
-            let query = grant(PermissionOp::Query);
-            let observe = grant(PermissionOp::Observe);
-            if read || write || execute || query || observe {
-                out.entries.push(PermissionEntry {
+            for right in ceiling
+                .entries
+                .iter()
+                .filter(|entry| entry.expires_at.is_none_or(|e| now < e))
+            {
+                let resource = if Self::resource_matches(&left.resource, &right.resource) {
+                    &right.resource
+                } else if Self::resource_matches(&right.resource, &left.resource) {
+                    &left.resource
+                } else {
+                    continue;
+                };
+                if resource_has_traversal(resource)
+                    || self.is_denied(resource)
+                    || ceiling.is_denied(resource)
+                {
+                    continue;
+                }
+                let entry = PermissionEntry {
                     resource: resource.clone(),
-                    read,
-                    write,
-                    execute,
-                    query,
-                    observe,
-                    expires_at: None,
-                });
+                    read: left.read && right.read,
+                    write: left.write && right.write,
+                    execute: left.execute && right.execute,
+                    query: left.query && right.query,
+                    observe: left.observe && right.observe,
+                    expires_at: left.expires_at.into_iter().chain(right.expires_at).min(),
+                };
+                if entry.read || entry.write || entry.execute || entry.query || entry.observe {
+                    out.grant_entry(&entry);
+                }
             }
         }
         out.deny_entries = self.deny_entries.clone();
@@ -1121,6 +1124,29 @@ mod tests {
         assert!(!clamped.check("fs:/home/user/docs/file", PermissionOp::Write));
         // The net grant is entirely outside the ceiling → gone.
         assert!(!clamped.check("net:http://example.com", PermissionOp::Read));
+    }
+
+    #[test]
+    fn intersection_preserves_the_earliest_expiry_per_operation() {
+        let early = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let late = early + chrono::Duration::seconds(60);
+        let mut requested = PermissionSet::new();
+        requested.grant("fs:/work/".into(), true, false, false, None);
+        requested.grant("fs:/work/".into(), false, true, false, Some(late));
+        let mut ceiling = PermissionSet::new();
+        ceiling.grant("fs:/work/input/".into(), true, false, false, None);
+        ceiling.grant("fs:/work/input/".into(), false, true, false, Some(early));
+
+        let mut clamped = requested.intersect_with(&ceiling);
+        let write = clamped
+            .entries
+            .iter_mut()
+            .find(|entry| entry.write)
+            .unwrap();
+        assert_eq!(write.expires_at, Some(early));
+        write.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+        assert!(clamped.check("fs:/work/input/file", PermissionOp::Read));
+        assert!(!clamped.check("fs:/work/input/file", PermissionOp::Write));
     }
 
     #[test]

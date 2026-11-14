@@ -1,4 +1,4 @@
-use crate::ssrf::is_private_ip;
+use crate::ssrf::{allows_local_requests, blocked_host, PublicDns};
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
@@ -16,56 +16,18 @@ impl WebFetch {
     pub fn new() -> Result<Self, AgentOSError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(PublicDns))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 5 {
                     return attempt.error("too many redirects (limit: 5)");
                 }
-                let block_reason: Option<String> = {
-                    let url = attempt.url();
-                    let port = url.port_or_known_default().unwrap_or(0);
-                    url.host_str().and_then(|host| {
-                        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                            if is_private_ip(&ip) {
-                                return Some(format!(
-                                    "SSRF: redirect to private IP blocked: {}",
-                                    ip
-                                ));
-                            }
-                        } else {
-                            let lower = host.to_lowercase();
-                            if lower == "localhost"
-                                || lower.ends_with(".localhost")
-                                || lower.ends_with(".local")
-                            {
-                                return Some(format!(
-                                    "SSRF: redirect to local hostname blocked: {}",
-                                    host
-                                ));
-                            }
-                            // DNS-rebinding defense (W12): block a redirect to a
-                            // hostname that resolves to a private/loopback IP.
-                            // The redirect policy is sync; resolve synchronously.
-                            if let Ok(addrs) =
-                                std::net::ToSocketAddrs::to_socket_addrs(&(lower.as_str(), port))
-                            {
-                                for addr in addrs {
-                                    if is_private_ip(&addr.ip()) {
-                                        return Some(format!(
-                                            "SSRF: redirect host {host} resolves to private IP {} (blocked)",
-                                            addr.ip()
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    })
-                };
-                if let Some(reason) = block_reason {
-                    attempt.error(reason)
-                } else {
-                    attempt.follow()
+                if !matches!(attempt.url().scheme(), "http" | "https")
+                    || (!allows_local_requests() && blocked_host(attempt.url()))
+                {
+                    return attempt.error("redirect destination blocked");
                 }
+                attempt.follow()
             }))
             .user_agent("AgentOS/1.0")
             .build()
@@ -131,86 +93,11 @@ impl AgentTool for WebFetch {
             ));
         }
 
-        // SSRF protection: block private/loopback/local hosts.
-        // The bypass env var is only effective in debug/test builds; in release
-        // builds it is compiled out and `is_test` is always false.
-        #[cfg(any(test, debug_assertions))]
-        let is_test = std::env::var("AGENTOS_TEST_ALLOW_LOCAL").is_ok();
-        #[cfg(not(any(test, debug_assertions)))]
-        let is_test = false;
-        if is_test {
-            tracing::warn!("web-fetch: SSRF protection bypassed via AGENTOS_TEST_ALLOW_LOCAL — do not set this in production");
-        }
-        if let Some(host_str) = parsed.host_str() {
-            if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-                if !is_test && is_private_ip(&ip) {
-                    tracing::warn!(url = url_str, %ip, "web-fetch: SSRF blocked (private IP)");
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "network.outbound".into(),
-                        operation: format!(
-                            "SSRF protection blocked access to local/private IP: {}",
-                            ip
-                        ),
-                    });
-                }
-            } else {
-                let lower = host_str.to_lowercase();
-                if !is_test
-                    && (lower == "localhost"
-                        || lower.ends_with(".localhost")
-                        || lower.ends_with(".local"))
-                {
-                    tracing::warn!(
-                        url = url_str,
-                        host = host_str,
-                        "web-fetch: SSRF blocked (local hostname)"
-                    );
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "network.outbound".into(),
-                        operation: format!(
-                            "SSRF protection blocked access to local hostname: {}",
-                            host_str
-                        ),
-                    });
-                }
-                // DNS pre-resolution check: detect hostnames that resolve to private/local
-                // IPs at request time. This mitigates DNS rebinding where an attacker-
-                // controlled domain initially resolves to a public IP (passing the string
-                // checks above) but later resolves to a private range.
-                // Note: a TOCTOU window still exists between this check and the actual TCP
-                // connection; a network-level firewall provides the strongest guarantee.
-                if !is_test {
-                    let port =
-                        parsed
-                            .port()
-                            .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-                    match tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
-                        Ok(addrs) => {
-                            for addr in addrs {
-                                let ip = addr.ip();
-                                if is_private_ip(&ip) {
-                                    tracing::warn!(url = url_str, host = host_str, %ip, "web-fetch: SSRF blocked (DNS rebind to private IP)");
-                                    return Err(AgentOSError::PermissionDenied {
-                                        resource: "network.outbound".into(),
-                                        operation: format!(
-                                            "SSRF protection: '{}' resolves to private/local IP: {}",
-                                            host_str, ip
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            return Err(AgentOSError::ToolExecutionFailed {
-                                tool_name: "web-fetch".into(),
-                                reason: format!("DNS resolution failed for '{}': {}", host_str, e),
-                            });
-                        }
-                    }
-                }
-            }
-        } else {
-            return Err(AgentOSError::SchemaValidation("URL missing host".into()));
+        if !allows_local_requests() && blocked_host(&parsed) {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "network.outbound".into(),
+                operation: "SSRF protection blocked access to a local/private destination".into(),
+            });
         }
 
         let extract_text = payload
@@ -227,7 +114,7 @@ impl AgentTool for WebFetch {
         tracing::debug!(url = url_str, "web-fetch: sending request");
 
         let response = tokio::select! {
-            result = self.client.get(url_str).send() => {
+            result = self.client.get(parsed).send() => {
                 result.map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "web-fetch".into(),
                     reason: format!("HTTP request failed: {}", e),
@@ -397,6 +284,15 @@ mod tests {
             .execute(serde_json::json!({}), ctx_with_network())
             .await;
         assert!(matches!(result, Err(AgentOSError::SchemaValidation(_))));
+    }
+
+    #[tokio::test]
+    async fn connector_dns_rejects_local_addresses() {
+        use reqwest::dns::Resolve;
+        let result = PublicDns.resolve("localhost".parse().unwrap()).await;
+        assert!(result.is_err());
+        assert!(blocked_host(&Url::parse("http://[::1]/").unwrap()));
+        assert!(blocked_host(&Url::parse("http://localhost./").unwrap()));
     }
 
     #[tokio::test]

@@ -1201,6 +1201,9 @@ Options:
 
 ### `agentos audit verify`
 
+Verification exits unsuccessfully when the requested history has missing rows, including gaps
+created by retention. Use `--from` to check a retained contiguous range.
+
 ```text
 Verify the Merkle hash chain integrity
 

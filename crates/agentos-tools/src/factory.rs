@@ -89,6 +89,12 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     // registry, the capability engine and the pipeline engine, none of which a
     // sandbox child has.
     "procedure-run",
+    // Container shims forward operations to the kernel-owned Docker runtime.
+    "container-create",
+    "container-exec",
+    "container-logs",
+    "container-destroy",
+    "container-list",
     "task-spawn-async",
     "agent-call",
     "agent-list",

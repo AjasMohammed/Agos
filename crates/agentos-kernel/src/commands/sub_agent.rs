@@ -70,11 +70,13 @@ impl Kernel {
         // scope_for_child = parent ∩ target, plus parent-token signature/expiry
         // verification. This replaces the old `issue_token` paths that skipped
         // both checks and then re-granted process.exec (a privilege widening).
+        let live_parent = self.live_task_permissions(parent_task).await;
+        let target_permissions = target_permissions.intersect_with(&live_parent);
         let child_token = self.capability_engine.scope_for_child(
             &parent_task.capability_token,
             TaskID::new(),
             target_id,
-            target_permissions,
+            &target_permissions,
             timeout,
         )?;
         Ok((child_token, parent_task.spawn_depth + 1))
@@ -258,6 +260,7 @@ impl Kernel {
         // issued for the child's own task/agent IDs, not the parent's.
         // This is the fix for the scheduler entry collision bug.
         let child_task_id = TaskID::new();
+        let requested = requested.intersect_with(&self.live_task_permissions(&parent_task).await);
         let child_cap = match self.capability_engine.scope_for_child(
             &parent_task.capability_token,
             child_task_id,

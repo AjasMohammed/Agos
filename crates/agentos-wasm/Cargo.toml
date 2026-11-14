@@ -12,9 +12,13 @@ agentos-tools = { path = "../agentos-tools" }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 uuid = { workspace = true }
 async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

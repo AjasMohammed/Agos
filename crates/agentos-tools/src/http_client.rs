@@ -1,4 +1,4 @@
-use crate::ssrf::is_private_ip;
+use crate::ssrf::{allows_local_requests, blocked_host, PublicDns};
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp, PermissionSet};
 use async_trait::async_trait;
@@ -23,6 +23,8 @@ impl HttpClientTool {
     pub fn new() -> Result<Self, AgentOSError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(PublicDns))
             .user_agent("AgentOS/1.0")
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -36,62 +38,19 @@ impl HttpClientTool {
         // a 302 to a private/loopback address.
         let client_redirect = Client::builder()
             .timeout(Duration::from_secs(30))
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(PublicDns))
             .user_agent("AgentOS/1.0")
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10 {
                     return attempt.error("too many redirects (limit: 10)");
                 }
-                // Materialize any error message before consuming `attempt`.
-                let block_reason: Option<String> = {
-                    let url = attempt.url();
-                    let port = url.port_or_known_default().unwrap_or(0);
-                    url.host_str().and_then(|host| {
-                        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                            if is_private_ip(&ip) {
-                                return Some(format!(
-                                    "SSRF: redirect to private IP blocked: {}",
-                                    ip
-                                ));
-                            }
-                        } else {
-                            let lower = host.to_lowercase();
-                            if lower == "localhost"
-                                || lower.ends_with(".localhost")
-                                || lower.ends_with(".local")
-                            {
-                                return Some(format!(
-                                    "SSRF: redirect to local hostname blocked: {}",
-                                    host
-                                ));
-                            }
-                            // DNS-rebinding defense (W12): a redirect to a
-                            // hostname that resolves to a private/loopback IP
-                            // must be blocked. The redirect policy is sync, so
-                            // resolve synchronously here and reject if ANY
-                            // resolved address is private. Resolution failures
-                            // are not treated as SSRF (the request will simply
-                            // fail to connect).
-                            if let Ok(addrs) =
-                                std::net::ToSocketAddrs::to_socket_addrs(&(lower.as_str(), port))
-                            {
-                                for addr in addrs {
-                                    if is_private_ip(&addr.ip()) {
-                                        return Some(format!(
-                                            "SSRF: redirect host {host} resolves to private IP {} (blocked)",
-                                            addr.ip()
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    })
-                };
-                if let Some(reason) = block_reason {
-                    attempt.error(reason)
-                } else {
-                    attempt.follow()
+                if !matches!(attempt.url().scheme(), "http" | "https")
+                    || (!allows_local_requests() && blocked_host(attempt.url()))
+                {
+                    return attempt.error("redirect destination blocked");
                 }
+                attempt.follow()
             }))
             .build()
             .map_err(|e| AgentOSError::ToolExecutionFailed {
@@ -184,78 +143,11 @@ impl AgentTool for HttpClientTool {
             ));
         }
 
-        // The bypass env var is only effective in debug/test builds; in release
-        // builds it is compiled out and `is_test` is always false.
-        #[cfg(any(test, debug_assertions))]
-        let is_test = std::env::var("AGENTOS_TEST_ALLOW_LOCAL").is_ok();
-        #[cfg(not(any(test, debug_assertions)))]
-        let is_test = false;
-        if is_test {
-            warn!("AGENTOS_TEST_ALLOW_LOCAL is set — SSRF protection DISABLED");
-        }
-
-        if let Some(host_str) = parsed_url.host_str() {
-            if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-                if !is_test && is_private_ip(&ip) {
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "network.outbound".into(),
-                        operation: format!(
-                            "SSRF protection blocked access to local/private IP: {}",
-                            ip
-                        ),
-                    });
-                }
-            } else {
-                let lower_host = host_str.to_lowercase();
-                if !is_test
-                    && (lower_host == "localhost"
-                        || lower_host.ends_with(".localhost")
-                        || lower_host.ends_with(".local"))
-                {
-                    return Err(AgentOSError::PermissionDenied {
-                        resource: "network.outbound".into(),
-                        operation: format!(
-                            "SSRF protection blocked access to local hostname: {}",
-                            host_str
-                        ),
-                    });
-                }
-                // DNS pre-resolution check: detect hostnames that resolve to
-                // private/local IPs at request time. Mitigates DNS rebinding.
-                if !is_test {
-                    let port = parsed_url
-                        .port()
-                        .unwrap_or(if parsed_url.scheme() == "https" {
-                            443
-                        } else {
-                            80
-                        });
-                    match tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
-                        Ok(addrs) => {
-                            for addr in addrs {
-                                let ip = addr.ip();
-                                if is_private_ip(&ip) {
-                                    return Err(AgentOSError::PermissionDenied {
-                                        resource: "network.outbound".into(),
-                                        operation: format!(
-                                            "SSRF protection: '{}' resolves to private/local IP: {}",
-                                            host_str, ip
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            return Err(AgentOSError::ToolExecutionFailed {
-                                tool_name: "http-client".into(),
-                                reason: format!("DNS resolution failed for '{}': {}", host_str, e),
-                            });
-                        }
-                    }
-                }
-            }
-        } else {
-            return Err(AgentOSError::SchemaValidation("URL missing host".into()));
+        if !allows_local_requests() && blocked_host(&parsed_url) {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "network.outbound".into(),
+                operation: "SSRF protection blocked access to a local/private destination".into(),
+            });
         }
 
         // ── 3. Options ────────────────────────────────────────────────────────
@@ -332,7 +224,7 @@ impl AgentTool for HttpClientTool {
         };
 
         let mut req_builder = active_client
-            .request(method.clone(), url_str)
+            .request(method.clone(), parsed_url)
             .timeout(Duration::from_millis(timeout_ms));
 
         // Standard headers

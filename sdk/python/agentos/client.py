@@ -39,6 +39,7 @@ class BusClient:
 
     def __init__(self, socket_path: Path = DEFAULT_SOCKET) -> None:
         self._socket_path = socket_path
+        self._exchange_lock = asyncio.Lock()
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
@@ -48,27 +49,30 @@ class BusClient:
 
     async def connect(self) -> None:
         """Open connection to the kernel socket."""
-        try:
-            self._reader, self._writer = await asyncio.open_unix_connection(
-                str(self._socket_path)
-            )
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
-            raise KernelConnectionError(
-                f"Cannot connect to kernel at {self._socket_path}: {exc}. "
-                "Is the kernel running? (agentctl kernel start)"
-            ) from exc
+        async with self._exchange_lock:
+            if self._writer is not None:
+                return
+            try:
+                self._reader, self._writer = await asyncio.open_unix_connection(
+                    str(self._socket_path)
+                )
+            except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+                raise KernelConnectionError(
+                    f"Cannot connect to kernel at {self._socket_path}: {exc}. "
+                    "Is the kernel running? (agentctl kernel start)"
+                ) from exc
 
     async def close(self) -> None:
         """Close the connection gracefully."""
-        if self._writer is not None:
+        writer = self._writer
+        self._writer = None
+        self._reader = None
+        if writer is not None:
             try:
-                self._writer.close()
-                await self._writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
-            finally:
-                self._writer = None
-                self._reader = None
 
     async def __aenter__(self) -> "BusClient":
         await self.connect()
@@ -124,20 +128,31 @@ class BusClient:
         _MAX_STATUS_SKIPS times, then raises KernelCommandError.
         """
         payload = json.dumps(envelope).encode()
-        await self._write_framed(payload)
+        async with self._exchange_lock:
+            self._require_connected()
+            if len(payload) > _MAX_MESSAGE_SIZE:
+                raise KernelCommandError(
+                    f"Message too large: {len(payload)} bytes (max {_MAX_MESSAGE_SIZE})"
+                )
+            try:
+                await self._write_framed(payload)
 
-        for _ in range(self._MAX_STATUS_SKIPS + 1):
-            raw = await self._read_framed()
-            response = json.loads(raw)
-            # Skip async kernel broadcasts; wait for the actual CommandResponse
-            if "StatusUpdate" in response or "NotificationPush" in response:
-                continue
-            return response
+                for _ in range(self._MAX_STATUS_SKIPS + 1):
+                    raw = await self._read_framed()
+                    response = json.loads(raw)
+                    # Skip async kernel broadcasts; wait for the actual CommandResponse
+                    if "StatusUpdate" in response or "NotificationPush" in response:
+                        continue
+                    return response
 
-        raise KernelCommandError(
-            f"Received more than {self._MAX_STATUS_SKIPS} status updates "
-            "without a CommandResponse — possible protocol error"
-        )
+                raise KernelCommandError(
+                    f"Received more than {self._MAX_STATUS_SKIPS} status updates "
+                    "without a CommandResponse — possible protocol error"
+                )
+            except (Exception, asyncio.CancelledError):
+                # An interrupted exchange can leave an unread response on the wire.
+                await self.close()
+                raise
 
     async def send_command(self, command_variant: str, **fields: Any) -> dict[str, Any]:
         """

@@ -15,7 +15,7 @@
 
 ## What it is
 
-AgentOS runs LLM agents as a long-lived daemon on your own machine. Agents get tools (files, shell, web, memory, 130+ more) only through signed manifests and per-task capability tokens; anything risky stops at an approval prompt in your chat; every action lands in an audit log you can query. It speaks to OpenAI, Anthropic, Gemini, Ollama, and 20 other providers.
+AgentOS runs LLM agents as a long-lived daemon on your own machine. Agents get tools (files, shell, web, memory, 130+ more) only through signed manifests and per-task capability tokens; anything risky stops at an approval prompt in your chat; the daemon records lifecycle events in a queryable audit log and blocks guarded tool calls if their start record cannot be written. It speaks to OpenAI, Anthropic, Gemini, Ollama, and 20 other providers.
 
 **Why not just run OpenClaw?** OpenClaw's WebSocket accepted ambient browser credentials, which became [CVE-2026-25253](https://nvd.nist.gov/vuln/detail/CVE-2026-25253) (cross-site hijack to remote code execution), and its skill marketplace shipped over a thousand malicious skills in the ClawHavoc campaign. AgentOS has no cookie auth on its socket, no marketplace, and refuses unsigned community tools. The table under [Security](#security-what-we-test-against) links the regression test for each of those attack shapes.
 

@@ -4,7 +4,8 @@
 //!
 //! The payload is a canonical JSON object (sorted keys, no extra whitespace) over
 //! the security-relevant fields of a `ToolManifest`. Mutable metadata fields
-//! (`description`, `checksum`) and the signature itself are excluded.
+//! (such as `description`) and the signature itself are excluded. WASM signatures
+//! additionally cover the executor and the SHA-256 checksum of its module.
 //!
 //! ```json
 //! {"author":"...","capabilities":[...],"max_cpu_ms":N,"max_memory_mb":N,"name":"...","network":B,"version":"...","weight":"stateless"}
@@ -66,6 +67,10 @@ pub fn signing_payload(manifest: &ToolManifest) -> Vec<u8> {
         json!(manifest.manifest.trust_tier),
     );
     payload.insert("version".to_string(), json!(manifest.manifest.version));
+    if manifest.executor.executor_type == agentos_types::ExecutorType::Wasm {
+        payload.insert("executor".into(), json!(manifest.executor));
+        payload.insert("checksum".into(), json!(manifest.manifest.checksum));
+    }
     if let Some(weight) = manifest.sandbox.weight.as_ref() {
         payload.insert("weight".to_string(), json!(weight));
     }
@@ -183,6 +188,18 @@ pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
         TrustTier::Core => Ok(()),
 
         TrustTier::Verified | TrustTier::Community => {
+            if manifest.executor.executor_type == agentos_types::ExecutorType::Wasm
+                && (manifest.executor.wasm_path.is_none()
+                    || !info.checksum.as_deref().is_some_and(|checksum| {
+                        checksum.len() == 64 && checksum.bytes().all(|b| b.is_ascii_hexdigit())
+                    }))
+            {
+                return Err(AgentOSError::ToolSignatureInvalid {
+                    name: info.name.clone(),
+                    reason: "WASM tools require a module path and a SHA-256 checksum".into(),
+                });
+            }
+
             let pubkey_hex = info.author_pubkey.as_deref().ok_or_else(|| {
                 AgentOSError::ToolSignatureInvalid {
                     name: info.name.clone(),
@@ -638,6 +655,25 @@ mod tests {
             verify_manifest(&m).unwrap_err(),
             AgentOSError::ToolBlocked { .. }
         ));
+    }
+
+    #[test]
+    fn wasm_signature_binds_executor_and_checksum() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut manifest = make_manifest(TrustTier::Community);
+        manifest.executor.executor_type = agentos_types::ExecutorType::Wasm;
+        manifest.executor.wasm_path = Some("tool.wasm".into());
+        manifest.manifest.checksum = Some("a".repeat(64));
+        manifest.manifest.author_pubkey = Some(hex::encode(key.verifying_key().to_bytes()));
+        manifest.manifest.signature = Some(hex::encode(
+            key.sign(&signing_payload(&manifest)).to_bytes(),
+        ));
+        assert!(verify_manifest(&manifest).is_ok());
+        let mut changed_path = manifest.clone();
+        changed_path.executor.wasm_path = Some("other.wasm".into());
+        assert!(verify_manifest(&changed_path).is_err());
+        manifest.manifest.checksum = Some("b".repeat(64));
+        assert!(verify_manifest(&manifest).is_err());
     }
 
     #[test]

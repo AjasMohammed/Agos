@@ -534,9 +534,8 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainVerification {
     pub entries_checked: u64,
-    /// Id discontinuities inside the verified window. Rotation exempts
-    /// security-relevant rows, so gaps are expected on any installation with
-    /// `max_audit_entries` set; each one starts a fresh chain segment.
+    /// Missing ranges inside the requested window, including its boundaries.
+    /// Rotation can create gaps; their cause cannot be verified from this log.
     pub gaps: u64,
     pub valid: bool,
     pub first_invalid_seq: Option<i64>,
@@ -734,7 +733,7 @@ impl AuditLog {
         // Use the next sequence number
         let next_seq: i64 = tx
             .query_row(
-                "SELECT COALESCE(MAX(id), 0) + 1 FROM audit_log",
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'), 0) + 1",
                 [],
                 |row| row.get(0),
             )
@@ -813,7 +812,20 @@ impl AuditLog {
     /// Verify the integrity of the Merkle hash chain.
     pub fn verify_chain(&self, from_seq: Option<i64>) -> Result<ChainVerification, AgentOSError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let from = from_seq.unwrap_or(1);
+        let from = from_seq.unwrap_or(1).max(1);
+        let high_water: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'), 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+
+        if from_seq.is_some_and(|seq| seq > high_water) {
+            return Err(AgentOSError::VaultError(format!(
+                "Audit verification checked zero records: start sequence {from} is past the latest sequence {high_water}"
+            )));
+        }
 
         let mut stmt = conn
             .prepare(
@@ -848,16 +860,13 @@ impl AuditLog {
 
         let mut entries_checked: u64 = 0;
         let mut gaps: u64 = 0;
-        let mut last_seq: Option<i64> = None;
-        let mut expected_prev_hash: Option<String> = None;
+        let mut last_seq = from - 1;
+        let mut expected_prev_hash = (from == 1).then(|| GENESIS_HASH.to_owned());
 
-        // If starting from a non-genesis position, get the nearest preceding entry's hash.
-        // Using `WHERE id < from ORDER BY id DESC LIMIT 1` rather than `WHERE id = from - 1`
-        // so this works correctly when ids have gaps (e.g. after prune_old_entries removes
-        // the oldest rows and the pruned id is immediately before `from`).
+        // Verify the boundary link when the immediately preceding row exists.
         if from > 1 {
             expected_prev_hash = match conn.query_row(
-                "SELECT entry_hash FROM audit_log WHERE id < ?1 ORDER BY id DESC LIMIT 1",
+                "SELECT entry_hash FROM audit_log WHERE id = ?1 - 1",
                 params![from],
                 |row| row.get::<_, String>(0),
             ) {
@@ -898,11 +907,11 @@ impl AuditLog {
             // so linkage across a gap cannot be checked — only counted. A
             // deletion that lands exactly on a gap is therefore invisible;
             // detecting it needs rotation to record what it removed.
-            if last_seq.is_some_and(|prev| seq != prev + 1) {
+            if seq - 1 != last_seq {
                 gaps += 1;
                 expected_prev_hash = None;
             }
-            last_seq = Some(seq);
+            last_seq = seq;
 
             // Check prev_hash linkage
             if let Some(ref expected) = expected_prev_hash {
@@ -952,12 +961,17 @@ impl AuditLog {
             expected_prev_hash = Some(stored_hash);
         }
 
+        if last_seq < high_water {
+            gaps += 1;
+        }
         Ok(ChainVerification {
             entries_checked,
             gaps,
-            valid: true,
+            valid: gaps == 0,
             first_invalid_seq: None,
-            error: None,
+            error: (gaps > 0).then(|| format!(
+                "Audit history is incomplete ({gaps} missing range(s)); rotation or deletion may be responsible"
+            )),
         })
     }
 
@@ -1610,6 +1624,48 @@ mod tests {
 
         let results = log.query_by_trace(&trace).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn audit_verification_rejects_a_start_past_the_latest_record() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        log.append(entry_of(AuditEventType::TaskCreated, AuditSeverity::Info))
+            .unwrap();
+        assert!(log.verify_chain(Some(1)).unwrap().valid);
+        assert!(log
+            .verify_chain(Some(2))
+            .unwrap_err()
+            .to_string()
+            .contains("checked zero records"));
+    }
+
+    #[test]
+    fn deleted_rows_make_audit_history_incomplete() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        for _ in 0..6 {
+            log.append(entry_of(
+                AuditEventType::PermissionRevoked,
+                AuditSeverity::Security,
+            ))
+            .unwrap();
+        }
+        log.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM audit_log WHERE id IN (1, 3, 6)", [])
+            .unwrap();
+        let result = log.verify_chain(None).unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.gaps, 3);
+        assert!(result.first_invalid_seq.is_none());
+        log.append(entry_of(
+            AuditEventType::PermissionRevoked,
+            AuditSeverity::Security,
+        ))
+        .unwrap();
+        assert!(log.verify_chain(Some(7)).unwrap().valid);
     }
 
     #[test]

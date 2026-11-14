@@ -155,14 +155,24 @@ impl AgentRegistry {
         role_name: &str,
         new_perms: PermissionSet,
     ) -> Result<(), String> {
-        if let Some(id) = self.role_name_index.get(role_name).copied() {
-            if let Some(role) = self.roles.get_mut(&id) {
-                role.permissions = new_perms;
-                self.save_to_disk();
-                return Ok(());
-            }
+        let id = *self
+            .role_name_index
+            .get(role_name)
+            .ok_or_else(|| format!("Role '{role_name}' not found"))?;
+        let role = self
+            .roles
+            .get_mut(&id)
+            .ok_or_else(|| format!("Role '{role_name}' not found"))?;
+        let previous = std::mem::replace(&mut role.permissions, new_perms);
+        if let Err(error) = self.persist_roles() {
+            self.roles
+                .get_mut(&id)
+                .expect("role still registered")
+                .permissions = previous;
+            self.last_write_error = Some(error.clone());
+            return Err(error);
         }
-        Err(format!("Role '{}' not found", role_name))
+        Ok(())
     }
 
     pub fn register(&mut self, profile: AgentProfile) -> AgentID {
@@ -352,23 +362,35 @@ impl AgentRegistry {
         agent_id: &AgentID,
         perms: PermissionSet,
     ) -> Result<(), String> {
-        if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.permissions = perms;
-            self.save_to_disk();
-            Ok(())
-        } else {
-            Err(format!("Agent '{}' not found", agent_id))
+        let agent = self
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
+        let previous = std::mem::replace(&mut agent.permissions, perms);
+        if let Err(error) = self.persist_agents() {
+            self.agents
+                .get_mut(agent_id)
+                .expect("agent still registered")
+                .permissions = previous;
+            self.last_write_error = Some(error.clone());
+            return Err(error);
         }
+        Ok(())
     }
 
     pub fn remove_role(&mut self, agent_id: &AgentID, role_name: &str) -> Result<(), String> {
-        if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.roles.retain(|r| r != role_name);
-            self.save_to_disk();
-            Ok(())
-        } else {
-            Err("Agent not found".to_string())
+        let agent = self.agents.get_mut(agent_id).ok_or("Agent not found")?;
+        let previous = agent.roles.clone();
+        agent.roles.retain(|r| r != role_name);
+        if let Err(error) = self.persist_agents() {
+            self.agents
+                .get_mut(agent_id)
+                .expect("agent still registered")
+                .roles = previous;
+            self.last_write_error = Some(error.clone());
+            return Err(error);
         }
+        Ok(())
     }
 
     /// Computes the effective permissions for an agent by combining its direct permissions
@@ -631,30 +653,29 @@ impl AgentRegistry {
         self.last_write_error.as_deref()
     }
 
-    fn save_to_disk(&mut self) {
+    fn persist_agents(&self) -> Result<(), String> {
         if let Some(dir) = &self.data_dir {
-            let agents_file = dir.join("agents.json");
-            let roles_file = dir.join("roles.json");
-
-            // Sort for deterministic output — prevents spurious .bak divergence when
-            // HashMap iteration order changes between runs.
-            let mut agents_list: Vec<&AgentProfile> = self.agents.values().collect();
-            agents_list.sort_by_key(|a| a.id.to_string());
-            if let Err(e) = Self::write_json_with_backup(&agents_file, agents_list) {
-                self.last_write_error = Some(e.clone());
-                return;
-            }
-
-            let mut roles_list: Vec<&Role> = self.roles.values().collect();
-            roles_list.sort_by_key(|r| r.id.to_string());
-            if let Err(e) = Self::write_json_with_backup(&roles_file, roles_list) {
-                self.last_write_error = Some(e);
-                return;
-            }
-
-            // Both files written successfully — clear any previous error.
-            self.last_write_error = None;
+            let mut agents: Vec<_> = self.agents.values().collect();
+            agents.sort_by_key(|agent| agent.id.to_string());
+            Self::write_json_with_backup(&dir.join("agents.json"), agents)?;
         }
+        Ok(())
+    }
+
+    fn persist_roles(&self) -> Result<(), String> {
+        if let Some(dir) = &self.data_dir {
+            let mut roles: Vec<_> = self.roles.values().collect();
+            roles.sort_by_key(|role| role.id.to_string());
+            Self::write_json_with_backup(&dir.join("roles.json"), roles)?;
+        }
+        Ok(())
+    }
+
+    fn save_to_disk(&mut self) {
+        self.last_write_error = self
+            .persist_agents()
+            .and_then(|()| self.persist_roles())
+            .err();
     }
 
     /// Serialize `data` to `path` atomically (via `.tmp` + rename).
@@ -830,6 +851,81 @@ mod tests {
 
         assert!(perms.check("fs.user_data", PermissionOp::Write));
         assert!(perms.check("custom", PermissionOp::Read));
+    }
+
+    #[test]
+    fn role_revocations_roll_back_on_write_failure_and_persist_on_retry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let mut registry = AgentRegistry::with_persistence(path.clone());
+        let mut role = Role::new("reader".into(), String::new());
+        role.permissions
+            .grant_op("custom".into(), PermissionOp::Read, None);
+        registry.register_role(role);
+        let mut agent = make_agent("alice");
+        agent.roles.push("reader".into());
+        let id = registry.register(agent);
+
+        let roles_tmp = AgentRegistry::tmp_path(&path.join("roles.json"));
+        fs::create_dir(&roles_tmp).unwrap();
+        assert!(registry
+            .update_role_permissions("reader", PermissionSet::new())
+            .is_err());
+        assert!(registry
+            .compute_effective_permissions(&id)
+            .check("custom", PermissionOp::Read));
+        fs::remove_dir(roles_tmp).unwrap();
+        registry
+            .update_role_permissions("reader", PermissionSet::new())
+            .unwrap();
+
+        let agents_tmp = AgentRegistry::tmp_path(&path.join("agents.json"));
+        fs::create_dir(&agents_tmp).unwrap();
+        assert!(registry.remove_role(&id, "reader").is_err());
+        assert!(registry
+            .get_by_id(&id)
+            .unwrap()
+            .roles
+            .iter()
+            .any(|role| role == "reader"));
+        fs::remove_dir(agents_tmp).unwrap();
+        registry.remove_role(&id, "reader").unwrap();
+
+        let reopened = AgentRegistry::with_persistence(path);
+        assert!(!reopened
+            .get_role_by_name("reader")
+            .unwrap()
+            .permissions
+            .check("custom", PermissionOp::Read));
+        assert!(!reopened
+            .get_by_id(&id)
+            .unwrap()
+            .roles
+            .iter()
+            .any(|role| role == "reader"));
+    }
+
+    #[test]
+    fn failed_permission_write_preserves_previous_permissions() {
+        let dir = TempDir::new().unwrap();
+        let mut registry = AgentRegistry::with_persistence(dir.path().to_path_buf());
+        let mut agent = make_agent("alice");
+        agent
+            .permissions
+            .grant_op("custom".into(), PermissionOp::Read, None);
+        let id = registry.register(agent);
+        let agents_file = dir.path().join("agents.json");
+        let before = fs::read(&agents_file).unwrap();
+        fs::create_dir(AgentRegistry::tmp_path(&agents_file)).unwrap();
+        assert!(registry
+            .update_agent_permissions(&id, PermissionSet::new())
+            .is_err());
+        assert!(registry
+            .get_by_id(&id)
+            .unwrap()
+            .permissions
+            .check("custom", PermissionOp::Read));
+        assert_eq!(fs::read(agents_file).unwrap(), before);
     }
 
     #[test]

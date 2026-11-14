@@ -1,8 +1,6 @@
 /// Shared SSRF protection utilities used by `web_fetch` and `http_client`.
 ///
-/// Both tools perform pre-flight IP-range checks. Keeping the logic here
-/// prevents the two implementations from drifting (e.g. one copy gaining
-/// CGN-range coverage while the other does not).
+/// Applied to literal destinations and to the addresses returned to the HTTP connector.
 ///
 /// Returns `true` if the IP address falls into any range that should never be
 /// reachable from an agent-initiated HTTP request.
@@ -51,6 +49,41 @@ pub(crate) fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 // fe80::/10 — link local
                 || (ipv6.segments()[0] & 0xffc0) == 0xfe80
         }
+    }
+}
+
+pub(crate) fn allows_local_requests() -> bool {
+    cfg!(any(test, debug_assertions)) && std::env::var_os("AGENTOS_TEST_ALLOW_LOCAL").is_some()
+}
+
+pub(crate) fn blocked_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        return is_private_ip(&ip);
+    }
+    let host = host.trim_end_matches('.');
+    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+}
+
+pub(crate) struct PublicDns;
+
+impl reqwest::dns::Resolve for PublicDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addrs: Vec<_> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
+            if addrs.is_empty()
+                || (!allows_local_requests() && addrs.iter().any(|a| is_private_ip(&a.ip())))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "DNS did not return exclusively public addresses",
+                )
+                .into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 

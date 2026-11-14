@@ -3035,7 +3035,7 @@ impl Kernel {
         trace_id: TraceID,
     ) -> KernelActionResult {
         // Defense-in-depth permission check.
-        if !task.capability_token.permissions.check(
+        if !self.live_task_permissions(task).await.check(
             agentos_capability::PERM_USER_INTERACT,
             PermissionOp::Execute,
         ) {
@@ -3646,10 +3646,9 @@ impl Kernel {
             }
         };
 
-        // Permission check — gated per category. Uses the capability token
-        // permissions, which already include any role-derived observe grants.
+        // Check per-category observe grants against the current registry.
         if let Err(e) = crate::event_permissions::check_subscribe_permission(
-            &task.capability_token.permissions,
+            &self.live_task_permissions(task).await,
             &parsed_filter,
         ) {
             self.audit_log(AuditEntry {

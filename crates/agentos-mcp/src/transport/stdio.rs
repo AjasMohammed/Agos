@@ -143,35 +143,61 @@ impl super::McpTransport for StdioTransport {
         })?;
         line.push('\n');
 
-        conn.stdin.write_all(line.as_bytes()).await.map_err(|e| {
-            McpTransportError::Connection(format!("Failed to write to MCP server: {}", e))
-        })?;
-        conn.stdin.flush().await.map_err(|e| {
-            McpTransportError::Connection(format!("Failed to flush MCP server stdin: {}", e))
-        })?;
+        let resp = tokio::time::timeout(self.timeout, async {
+            conn.stdin.write_all(line.as_bytes()).await.map_err(|e| {
+                McpTransportError::Connection(format!("Failed to write to MCP server: {e}"))
+            })?;
+            conn.stdin.flush().await.map_err(|e| {
+                McpTransportError::Connection(format!("Failed to flush MCP server stdin: {e}"))
+            })?;
 
-        let mut resp_line = String::new();
-        let n = tokio::time::timeout(
-            self.timeout,
-            read_line_limited(&mut conn.stdout, &mut resp_line, MAX_MCP_RESPONSE_BYTES),
-        )
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = read_line_limited(&mut conn.stdout, &mut line, MAX_MCP_RESPONSE_BYTES)
+                    .await
+                    .map_err(|e| McpTransportError::Connection(e.to_string()))?;
+                if n == 0 {
+                    return Err(McpTransportError::Connection(
+                        "MCP server closed connection unexpectedly".into(),
+                    ));
+                }
+
+                let message: serde_json::Value = serde_json::from_str(&line)
+                    .map_err(|e| McpTransportError::Connection(format!("Invalid MCP JSON: {e}")))?;
+                if let Some(method) = message.get("method").and_then(|value| value.as_str()) {
+                    if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
+                        let mut reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32601, "message": "Method not supported"}
+                        })
+                        .to_string();
+                        reply.push('\n');
+                        conn.stdin
+                            .write_all(reply.as_bytes())
+                            .await
+                            .map_err(|e| McpTransportError::Connection(e.to_string()))?;
+                        conn.stdin
+                            .flush()
+                            .await
+                            .map_err(|e| McpTransportError::Connection(e.to_string()))?;
+                    } else {
+                        tracing::debug!(server = %self.name, method, "Received MCP notification");
+                    }
+                    continue;
+                }
+
+                let response: JsonRpcResponse = serde_json::from_value(message).map_err(|e| {
+                    McpTransportError::Connection(format!("Invalid MCP response: {e}"))
+                })?;
+                if response.id == req.id {
+                    return Ok(response);
+                }
+                tracing::debug!(server = %self.name, "Ignoring unmatched MCP response");
+            }
+        })
         .await
-        .map_err(|_| McpTransportError::Timeout(self.timeout))?
-        .map_err(|e| McpTransportError::Connection(e.to_string()))?;
-
-        if n == 0 {
-            return Err(McpTransportError::Connection(
-                "MCP server closed connection unexpectedly (server may have crashed)".into(),
-            ));
-        }
-
-        let resp: JsonRpcResponse = serde_json::from_str(resp_line.trim()).map_err(|e| {
-            McpTransportError::Connection(format!(
-                "Failed to parse MCP response: {} (raw: {:?})",
-                e,
-                resp_line.trim()
-            ))
-        })?;
+        .map_err(|_| McpTransportError::Timeout(self.timeout))??;
 
         if let Some(ref err) = resp.error {
             return Err(McpTransportError::Protocol {
@@ -310,6 +336,35 @@ mod tests {
         let err = result.err().unwrap();
         assert!(err.should_reconnect()); // Connection error
         assert!(err.to_string().contains("Failed to spawn"));
+    }
+
+    #[tokio::test]
+    async fn request_matches_response_after_notification() {
+        let server = r#"read -r request
+printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'
+printf '%s\n' '{"jsonrpc":"2.0","id":99,"result":{"wrong":true}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":7,"result":{"matched":true}}'
+"#;
+        let transport = StdioTransport::spawn(
+            "test".into(),
+            "sh".into(),
+            vec!["-c".into(), server.into()],
+            HashMap::new(),
+            None,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let response = transport
+            .send(&JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: 7.into(),
+                method: "tools/list".into(),
+                params: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({"matched": true})));
     }
 
     #[tokio::test]

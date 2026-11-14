@@ -244,3 +244,62 @@ async fn test_boot_wires_file_store_attachment_sink() {
     kernel.shutdown();
     handle.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn autonomous_shell_revocation_survives_restart_and_is_audited() {
+    use agentos_kernel::Kernel;
+    use agentos_types::PermissionOp;
+    use agentos_vault::ZeroizingString;
+
+    let (kernel, mut client, tmp, handle) = common::setup_kernel().await;
+    let agent_id = common::register_mock_agent(&kernel, "autonomous", vec![]).await;
+    let response = client
+        .send_command(KernelCommand::RevokePermission {
+            agent_name: "autonomous".into(),
+            permission: "process.exec:x".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(response, KernelResponse::Success { .. }),
+        "{response:?}"
+    );
+
+    let mut permissions = kernel
+        .agent_registry
+        .read()
+        .await
+        .compute_effective_permissions(&agent_id);
+    permissions.grant_op("process.exec".into(), PermissionOp::Execute, None);
+    assert!(!permissions.check("process.exec", PermissionOp::Execute));
+
+    kernel.shutdown();
+    handle.await.unwrap();
+    drop(client);
+    drop(kernel);
+
+    let restarted = Kernel::boot(
+        &tmp.path().join("config.toml"),
+        &ZeroizingString::new("test-passphrase".into()),
+    )
+    .await
+    .unwrap();
+    let permissions = restarted
+        .agent_registry
+        .read()
+        .await
+        .compute_effective_permissions(&agent_id);
+    assert!(permissions.is_denied("process.exec"));
+    assert!(restarted.audit.verify_chain(None).unwrap().valid);
+    assert!(restarted
+        .audit
+        .query_recent(100)
+        .unwrap()
+        .iter()
+        .any(|entry| {
+            entry.agent_id == Some(agent_id)
+                && entry.event_type == agentos_audit::AuditEventType::PermissionRevoked
+        }));
+    restarted.shutdown();
+}

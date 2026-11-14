@@ -316,7 +316,7 @@ impl Kernel {
         trace_id: TraceID,
     ) -> Result<IntentCoherenceResult, String> {
         // Layer A: structural validation (existing logic)
-        self.validate_tool_call(task, tool_call, trace_id)?;
+        self.validate_tool_call(task, tool_call, trace_id).await?;
 
         // Layer B: semantic coherence
         let coherence = self

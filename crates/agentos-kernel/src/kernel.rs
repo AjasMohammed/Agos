@@ -4063,8 +4063,9 @@ impl Kernel {
                             ..Default::default()
                         };
 
-                        if let Err(reason) =
-                            self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                        if let Err(reason) = self
+                            .validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                            .await
                         {
                             tracing::warn!(
                                 tool = %tool_name,
@@ -4105,6 +4106,8 @@ impl Kernel {
                                 "error": format!("Tool '{tool_name}' blocked: {reason}")
                             })
                         } else {
+                            let mut exec_ctx = exec_ctx;
+                            exec_ctx.permissions = self.live_task_permissions(&chat_task).await;
                             match self
                                 .tool_runner
                                 .execute(tool_name, payload.clone(), exec_ctx)
@@ -4141,7 +4144,13 @@ impl Kernel {
                                     };
                                     t.capability_token.agent_id = agent_id;
                                     t.capability_token.task_id = t.id;
-                                    t.capability_token.permissions = agent_permissions.clone();
+                                    t.capability_token.permissions = self
+                                        .live_task_permissions(&AgentTask {
+                                            agent_id,
+                                            capability_token: chat_token.clone(),
+                                            ..Default::default()
+                                        })
+                                        .await;
                                     t
                                 };
                                 let outcome = self
@@ -5778,8 +5787,9 @@ impl Kernel {
                             ..Default::default()
                         };
 
-                        if let Err(reason) =
-                            self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                        if let Err(reason) = self
+                            .validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                            .await
                         {
                             tracing::warn!(
                                 tool = %tool_name,
@@ -5820,6 +5830,8 @@ impl Kernel {
                                 "error": format!("Tool '{tool_name}' blocked: {reason}")
                             })
                         } else {
+                            let mut exec_ctx = exec_ctx;
+                            exec_ctx.permissions = self.live_task_permissions(&chat_task).await;
                             match self
                                 .tool_runner
                                 .execute(tool_name, payload.clone(), exec_ctx)
@@ -5856,7 +5868,13 @@ impl Kernel {
                                     };
                                     t.capability_token.agent_id = agent_id;
                                     t.capability_token.task_id = t.id;
-                                    t.capability_token.permissions = agent_permissions.clone();
+                                    t.capability_token.permissions = self
+                                        .live_task_permissions(&AgentTask {
+                                            agent_id,
+                                            capability_token: chat_token.clone(),
+                                            ..Default::default()
+                                        })
+                                        .await;
                                     t
                                 };
                                 let outcome = self
@@ -6470,15 +6488,13 @@ impl Kernel {
                         from_seq = ?from_seq,
                         "Audit chain integrity verified"
                     );
-                    // Ids are AUTOINCREMENT, so a gap is the only trace an
-                    // interior deletion leaves; rotation makes some, but say so.
-                    if result.gaps > 0 {
-                        tracing::warn!(
-                            gaps = result.gaps,
-                            segments = result.gaps + 1,
-                            "Audit chain verified across disjoint segments — rows were removed mid-chain (rotation or cleanup); deletions inside a gap are not detectable"
-                        );
-                    }
+                }
+                Ok(ref result) if result.first_invalid_seq.is_none() => {
+                    tracing::warn!(
+                        entries_checked = result.entries_checked,
+                        gaps = result.gaps,
+                        "Audit history is incomplete"
+                    );
                 }
                 Ok(ref result) => {
                     tracing::error!(

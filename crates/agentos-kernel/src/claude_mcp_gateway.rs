@@ -208,10 +208,7 @@ impl KernelMcpExecutor {
     /// paths use.
     ///
     /// Never snapshotted at construction: this gateway lives as long as the
-    /// kernel process, so a snapshot would mean revoking `process.exec` from a
-    /// misbehaving agent had no effect until it disconnected. A single call per
-    /// invocation backs BOTH the capability token and the
-    /// `ToolExecutionContext`, so the gate and the execution can never disagree.
+    /// kernel process, so a snapshot would let a revoked permission survive until the agent disconnected.
     ///
     /// Fails closed: `compute_effective_permissions` returns an empty set for an
     /// agent that is no longer registered.
@@ -425,11 +422,7 @@ impl KernelMcpExecutor {
             }
         }
 
-        // ONE resolution of the agent's live permissions per call, shared by the
-        // capability token below and by the `ToolExecutionContext` the tool
-        // actually runs under — the gate and the execution must never see
-        // different sets. Re-resolved rather than snapshotted so revocation
-        // takes effect on the next call (see `effective_permissions`).
+        // Snapshot the ceiling for this call, then narrow it again after approval.
         let permissions = self.effective_permissions().await;
 
         // TL-01: validate the call against a capability token scoped to this
@@ -489,6 +482,7 @@ impl KernelMcpExecutor {
         .await
         .map_err(|reason| format!("tool '{tool_name}' denied by policy: {reason}"))?;
 
+        let permissions = permissions.intersect_with(&self.effective_permissions().await);
         let tool_start = std::time::Instant::now();
         let mut result = self
             .tool_runner
@@ -784,8 +778,7 @@ impl KernelMcpExecutor {
     /// Takes the caller's `task_id`/`trace_id` rather than minting its own: the
     /// rows tools stamp with these ids must join to the security events
     /// (`CapabilityViolation`, `PromptInjectionAttempt`) the same call emits.
-    /// `permissions` is the caller's single per-call resolution, so the token
-    /// that authorized the call and the context it runs under always match.
+    /// `permissions` is the authorized scope narrowed by any changes during approval.
     async fn build_ctx(
         &self,
         task_id: TaskID,

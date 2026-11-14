@@ -636,7 +636,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
         )?;
 
         let ws_pipe_step = self.kernel.workspace_paths_for_agent(&self.agent_id);
-        let context = ToolExecutionContext {
+        let mut context = ToolExecutionContext {
             data_dir: self.kernel.data_dir.clone(),
             task_id,
             agent_id: self.agent_id,
@@ -697,6 +697,13 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
                 reason,
             })?;
 
+        let live = self
+            .kernel
+            .agent_registry
+            .read()
+            .await
+            .compute_effective_permissions(&self.agent_id);
+        context.permissions = context.permissions.intersect_with(&live);
         let result = self
             .kernel
             .tool_runner
@@ -1154,7 +1161,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             "pipeline",
         )?;
 
-        let context = ToolExecutionContext {
+        let mut context = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
             task_id,
             agent_id: self.agent_id,
@@ -1224,6 +1231,12 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             reason,
         })?;
 
+        let live = self
+            .agent_registry
+            .read()
+            .await
+            .compute_effective_permissions(&self.agent_id);
+        context.permissions = context.permissions.intersect_with(&live);
         let result = self.tool_runner.execute(tool_name, input, context).await;
 
         // Kernel-action tools emit a `_kernel_action` marker for the kernel

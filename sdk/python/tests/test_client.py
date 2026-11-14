@@ -56,8 +56,7 @@ async def _make_client() -> tuple[BusClient, asyncio.StreamReader, asyncio.Strea
     server_r = asyncio.StreamReader()
     client_w = _MemoryWriter(server_r)
     server_w = _MemoryWriter(client_r)
-    client = BusClient.__new__(BusClient)
-    client._socket_path = None  # type: ignore[assignment]
+    client = BusClient()
     client._reader = client_r
     client._writer = client_w
     return client, server_r, server_w  # type: ignore[return-value]
@@ -80,6 +79,31 @@ class TestFraming:
         (length,) = struct.unpack(_LENGTH_FORMAT, len_buf)
         body = await server_r.readexactly(length)
         assert json.loads(body) == payload
+
+    async def test_concurrent_calls_receive_their_own_responses(self):
+        client, server_r, server_w = await _make_client()
+
+        async def echo_commands():
+            for _ in range(2):
+                (length,) = struct.unpack(_LENGTH_FORMAT, await server_r.readexactly(_LENGTH_SIZE))
+                request = json.loads(await server_r.readexactly(length))
+                server_w.write(_frame({"CommandResponse": request["Command"]}))
+
+        _, first, second = await asyncio.wait_for(
+            asyncio.gather(echo_commands(), client.send_command("First"), client.send_command("Second")),
+            timeout=2,
+        )
+        assert (first, second) == ("First", "Second")
+
+    async def test_cancelled_exchange_closes_connection(self):
+        client, server_r, _ = await _make_client()
+        pending = asyncio.create_task(client.send_command("First"))
+        await asyncio.wait_for(server_r.readexactly(_LENGTH_SIZE), timeout=2)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        with pytest.raises(KernelConnectionError):
+            await client.send_command("Second")
 
     async def test_send_command_parses_success(self):
         """send_command() returns the inner KernelResponse dict on success."""

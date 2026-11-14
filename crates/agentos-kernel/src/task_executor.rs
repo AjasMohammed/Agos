@@ -1052,7 +1052,7 @@ impl Kernel {
     }
 
     /// Validate a tool call against the capability token and permission system.
-    pub(crate) fn validate_tool_call(
+    pub(crate) async fn validate_tool_call(
         &self,
         task: &AgentTask,
         tool_call: &crate::tool_call::ParsedToolCall,
@@ -1115,11 +1115,44 @@ impl Kernel {
             .get_required_permissions_for(&resolved_name, &tool_call.payload)
             .unwrap_or_default();
 
-        let required_for_validate: Vec<(String, PermissionOp)> = required_perms;
-
         self.capability_engine
-            .validate_intent(&task.capability_token, &intent, &required_for_validate)
-            .map_err(|e| format!("{}", e))
+            .validate_intent(&task.capability_token, &intent, &required_perms)
+            .map_err(|e| e.to_string())?;
+        let live = self.live_task_permissions(task).await;
+        for (resource, operation) in required_perms {
+            if !live.check(&resource, operation) {
+                return Err(AgentOSError::PermissionDenied {
+                    resource,
+                    operation: format!("{operation:?}"),
+                }
+                .to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn live_task_permissions(&self, task: &AgentTask) -> PermissionSet {
+        let registry = self.agent_registry.read().await;
+        Self::clamp_task_permissions(&registry, task)
+    }
+
+    fn clamp_task_permissions(
+        registry: &crate::agent_registry::AgentRegistry,
+        task: &AgentTask,
+    ) -> PermissionSet {
+        if registry.get_by_id(&task.agent_id).is_none() {
+            return PermissionSet::new();
+        }
+        let mut live = registry.compute_effective_permissions(&task.agent_id);
+        if task.autonomous {
+            // Autonomous dispatch grants this bit explicitly. Registry denies
+            // still take precedence over the task-mode grant.
+            live.grant_op("process.exec".into(), PermissionOp::Execute, None);
+        }
+        if task.is_team_coordinator {
+            live.grant_op("spawn".into(), PermissionOp::Execute, None);
+        }
+        task.capability_token.permissions.intersect_with(&live)
     }
 
     /// Push a `{"error": …}` tool result into the task context.
@@ -1211,9 +1244,9 @@ impl Kernel {
         }
 
         // 1. Coarse capability grant.
-        if !task
-            .capability_token
-            .permissions
+        if !self
+            .live_task_permissions(task)
+            .await
             .check(&connector_perm, PermissionOp::Execute)
         {
             self.audit_log(agentos_audit::AuditEntry {
@@ -1267,6 +1300,21 @@ impl Kernel {
                     task,
                     tool_call,
                     format!("Blocked by approval policy: {reason}"),
+                )
+                .await,
+            );
+        }
+
+        if !self
+            .live_task_permissions(task)
+            .await
+            .check(&connector_perm, PermissionOp::Execute)
+        {
+            return Some(
+                self.push_tool_error(
+                    task,
+                    tool_call,
+                    format!("Permission revoked for connector '{connector_id}'"),
                 )
                 .await,
             );
@@ -2358,7 +2406,14 @@ impl Kernel {
             let task_id = task.id;
             let agent_id = task.agent_id;
             let trace_id = call.trace_id;
-            let permissions = task.capability_token.permissions.clone();
+            let permission_registry = Arc::clone(&self.agent_registry);
+            let permission_task = AgentTask {
+                agent_id: task.agent_id,
+                autonomous: task.autonomous,
+                is_team_coordinator: task.is_team_coordinator,
+                capability_token: task.capability_token.clone(),
+                ..AgentTask::default()
+            };
             let vault = self.vault.clone();
             let hal = self.hal.clone();
             let agent_registry = agent_snapshot_ref.clone();
@@ -2414,14 +2469,13 @@ impl Kernel {
                         .start_tool_span_from_context(tool_parent_context, &tool_call.tool_name);
                     #[cfg(not(feature = "otel"))]
                     let tool_span = crate::otel_exporter::OtelSpan::default();
-                    let sandbox_permissions = permissions.clone();
                     let sandbox_workspace_paths = workspace_paths.clone();
-                    let exec_context = ToolExecutionContext {
+                    let mut exec_context = ToolExecutionContext {
                         data_dir,
                         task_id,
                         agent_id,
                         trace_id,
-                        permissions,
+                        permissions: PermissionSet::new(),
                         vault: Some(Arc::new(agentos_vault::ProxyVault::new(vault))),
                         hal: Some(hal),
                         // ToolRunner::execute() always overrides this with the shared registry.
@@ -2541,6 +2595,10 @@ impl Kernel {
                         }
                     }
 
+                    exec_context.permissions = {
+                        let registry = permission_registry.read().await;
+                        Self::clamp_task_permissions(&registry, &permission_task)
+                    };
                     let result = if let Some((config, category_overhead_bytes, manifest_weight)) =
                         sandbox_plan
                     {
@@ -2553,7 +2611,7 @@ impl Kernel {
                             task_id: Some(exec_context.task_id),
                             agent_id: Some(exec_context.agent_id),
                             trace_id: Some(exec_context.trace_id),
-                            permissions: sandbox_permissions,
+                            permissions: exec_context.permissions.clone(),
                             workspace_paths: Some(sandbox_workspace_paths),
                         };
                         match sandbox
@@ -6066,7 +6124,7 @@ impl Kernel {
                         task_id: task.id,
                         agent_id: task.agent_id,
                         trace_id,
-                        permissions: task.capability_token.permissions.clone(),
+                        permissions: self.live_task_permissions(task).await,
                         vault: Some(std::sync::Arc::new(agentos_vault::ProxyVault::new(
                             self.vault.clone(),
                         ))),
@@ -7912,6 +7970,58 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::time::Duration;
+
+    #[test]
+    fn task_permissions_follow_registry_revocation_without_widening_the_token() {
+        let mut registry = crate::agent_registry::AgentRegistry::new();
+        let agent_id = AgentID::new();
+        let mut original = PermissionSet::new();
+        original.grant_op("custom".into(), PermissionOp::Execute, None);
+        original.grant_op("process.exec".into(), PermissionOp::Execute, None);
+        let mut agent = AgentProfile {
+            id: agent_id,
+            name: "test".into(),
+            provider: LLMProvider::Ollama,
+            model: "test".into(),
+            status: AgentStatus::Online,
+            permissions: original.clone(),
+            roles: vec![],
+            current_task: None,
+            description: String::new(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            public_key_hex: None,
+            base_url: None,
+            default_thinking_level: ThinkingLevel::Off,
+            system_prompt: None,
+            manually_offline: false,
+            working_set_size: None,
+            avatar: None,
+        };
+        agent
+            .permissions
+            .grant_op("new".into(), PermissionOp::Execute, None);
+        registry.register(agent);
+        let mut task = AgentTask {
+            agent_id,
+            autonomous: true,
+            ..AgentTask::default()
+        };
+        task.capability_token.permissions = original;
+        let before = Kernel::clamp_task_permissions(&registry, &task);
+        assert!(before.check("custom", PermissionOp::Execute));
+        assert!(!before.check("new", PermissionOp::Execute));
+        assert!(before.check("process.exec", PermissionOp::Execute));
+        let mut revoked = PermissionSet::new();
+        revoked.deny("process.exec".into());
+        registry
+            .update_agent_permissions(&agent_id, revoked)
+            .unwrap();
+        assert!(!Kernel::clamp_task_permissions(&registry, &task)
+            .check("custom", PermissionOp::Execute));
+        assert!(!Kernel::clamp_task_permissions(&registry, &task)
+            .check("process.exec", PermissionOp::Execute));
+    }
 
     #[test]
     fn delegation_response_shape_matches_the_park_detector() {

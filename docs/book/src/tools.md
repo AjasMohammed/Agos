@@ -59,7 +59,9 @@ auto-approve a call or escalate it for human review. Unknown tools default to `E
 ## WASM & external tools
 
 Custom tools can be compiled to `.wasm` and installed at runtime via a manifest, executed
-under Wasmtime. Tools can also be imported from external **MCP** servers — see
+under Wasmtime. Verified and Community WASM manifests must include the relative module path
+and a 64-character hexadecimal SHA-256 checksum in `manifest.checksum`. Re-sign older
+WASM manifests after adding the checksum. Tools can also be imported from external **MCP** servers — see
 [MCP Integrations](./mcp.md). MCP tools register as `Community` tier and are subject to the
 same capability and permission enforcement as native tools.
 

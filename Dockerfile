@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # === Builder Stage ===
-FROM rust:1.91-slim-bookworm AS builder
+FROM rust:1.98-slim-bookworm AS builder
 
 # pkg-config + libssl-dev needed by transitive deps (fastembed/hf-hub) that
 # pull in openssl-sys. OPENSSL_STATIC=1 bakes libssl/libcrypto into the binary
@@ -27,6 +27,8 @@ WORKDIR /usr/src/agentos
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY tools/ tools/
+COPY plugins/ plugins/
+COPY pipelines/ pipelines/
 # config/ and skills/core/ are embedded into the binary via rust-embed (see crates/agentos-cli/src/embedded.rs)
 COPY config/ config/
 COPY skills/ skills/
@@ -38,7 +40,7 @@ COPY skills/ skills/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/usr/src/agentos/target,sharing=locked \
-    cargo build --release --bin agentos --features otel \
+    cargo build --locked --release --bin agentos --features otel \
     && cp target/release/agentos /usr/local/bin/agentos
 
 # === Runtime Stage ===

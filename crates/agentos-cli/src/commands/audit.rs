@@ -95,26 +95,17 @@ pub async fn handle(client: &mut BusClient, command: AuditCommands) -> anyhow::R
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
 
-                    let gaps = val.get("gaps").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                    if valid && gaps > 0 {
-                        println!(
-                            "Audit chain VALID ({} entries verified across {} segments; {} gap(s) from rotation/cleanup — deletions inside a gap are not detectable)",
-                            checked,
-                            gaps + 1,
-                            gaps
-                        );
-                    } else if valid {
+                    if valid {
                         println!("Audit chain VALID ({} entries verified)", checked);
                     } else {
-                        let seq = val
-                            .get("first_invalid_seq")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
+                        let seq = val.get("first_invalid_seq").and_then(|v| v.as_i64());
                         let err = val
                             .get("error")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
+                        let Some(seq) = seq else {
+                            anyhow::bail!("Audit chain could not be fully verified ({checked} entries checked): {err}");
+                        };
                         // A tamper check run from cron/CI reads the exit code.
                         anyhow::bail!(
                             "Audit chain INVALID at seq {} ({} entries checked): {}",

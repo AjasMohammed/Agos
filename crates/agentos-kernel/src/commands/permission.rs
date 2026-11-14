@@ -196,7 +196,8 @@ impl Kernel {
             .filter(|(op, _)| agent.permissions.check(&resource, *op))
             .collect();
         let covered_by_broader_grant = !has_direct_entry && !effective.is_empty();
-        if !has_direct_entry && !covered_by_broader_grant {
+        let revokes_autonomous_shell = resource == "process.exec" && execute;
+        if !has_direct_entry && !covered_by_broader_grant && !revokes_autonomous_shell {
             return KernelResponse::Error {
                 message: format!(
                     "Permission '{}' is not granted directly to '{}' (it comes from a role or is absent); edit the role instead",
@@ -207,7 +208,7 @@ impl Kernel {
         // Narrowing a broader grant is recorded as a deny, and a deny has no
         // notion of ops — it kills every op on the resource. Refuse a partial
         // revoke rather than silently taking away bits the operator kept.
-        if covered_by_broader_grant {
+        if covered_by_broader_grant || revokes_autonomous_shell {
             let kept: Vec<char> = effective
                 .iter()
                 .filter(|(op, _)| !requested.iter().any(|(on, r)| *on && r == op))
@@ -217,7 +218,7 @@ impl Kernel {
                 let all: String = effective.iter().map(|(_, c)| *c).collect();
                 return KernelResponse::Error {
                     message: format!(
-                        "'{agent_name}' holds '{resource}' through a broader grant, which can only be narrowed by denying the whole resource — that would also drop '{}'. Re-run with every op it confers: '{resource}:{all}'",
+                        "Revoking '{resource}' from '{agent_name}' requires denying the whole resource — that would also drop '{}'. Re-run with every op it confers: '{resource}:{all}'",
                         kept.iter().collect::<String>(),
                     ),
                 };
@@ -232,14 +233,11 @@ impl Kernel {
         if observe {
             perms.revoke_op(&resource, PermissionOp::Observe);
         }
-        // A fully-revoked default would otherwise be handed back on the next
-        // connect: `revoke` deletes the entry once every bit clears, and
-        // `backfill_late_default_grants` reads an absent entry as "never
-        // granted". Record the operator's decision as a deny, which `check()`
-        // honours ahead of any grant and the backfill skips.
-        if !perms.entries().iter().any(|e| e.resource == resource)
-            && (covered_by_broader_grant
-                || crate::commands::agent::is_late_default_grant(&resource))
+        // Record an explicit deny when dispatch or agent reconnect could restore the grant.
+        if revokes_autonomous_shell
+            || (!perms.entries().iter().any(|e| e.resource == resource)
+                && (covered_by_broader_grant
+                    || crate::commands::agent::is_late_default_grant(&resource)))
         {
             perms.deny(resource.clone());
         }

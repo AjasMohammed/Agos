@@ -864,8 +864,14 @@ mod tests {
         }
         let mut out = Vec::new();
         while out.len() < calls {
-            let v: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(
+                &tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+                    .await
+                    .expect("MCP response timed out")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
             if v["method"] == "elicitation/create" {
                 let reply = match decision {
                     Some(d) => {
@@ -882,8 +888,11 @@ mod tests {
                 out.push(v);
             }
         }
-        drop(cli_w);
-        task.await.unwrap();
+        cli_w.shutdown().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("MCP server did not shut down")
+            .unwrap();
         out
     }
 

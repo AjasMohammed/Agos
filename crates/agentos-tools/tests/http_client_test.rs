@@ -124,8 +124,12 @@ async fn test_ssrf_localhost_blocked() {
 
     let err = tool.execute(payload, ctx).await.unwrap_err();
     match err {
-        AgentOSError::PermissionDenied { operation, .. } => {
-            assert!(operation.contains("blocked access to local/private IP"));
+        AgentOSError::PermissionDenied {
+            resource,
+            operation,
+        } => {
+            assert_eq!(resource, "network.outbound");
+            assert!(operation.contains("SSRF protection"));
         }
         _ => panic!("Expected SSRF PermissionDenied error"),
     }
