@@ -17,6 +17,10 @@ impl BackgroundPool {
         self.tasks.write().await.insert(task.id, task);
     }
 
+    pub async fn remove(&self, task_id: &TaskID) {
+        self.tasks.write().await.remove(task_id);
+    }
+
     pub async fn complete(&self, task_id: &TaskID, result: serde_json::Value) {
         if let Some(task) = self.tasks.write().await.get_mut(task_id) {
             task.state = TaskState::Complete;

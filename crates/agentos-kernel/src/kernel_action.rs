@@ -3394,13 +3394,13 @@ impl Kernel {
         // 5. Create and register the child task
         let child_task = AgentTask {
             id: child_task_id,
-            state: TaskState::Queued,
+            state: TaskState::Running,
             agent_id: target.id,
             capability_token: child_token,
             assigned_llm: None,
             priority: task.priority,
             created_at: chrono::Utc::now(),
-            started_at: None,
+            started_at: Some(chrono::Utc::now()),
             timeout: Duration::from_secs(timeout_secs),
             original_prompt: prompt.to_string(),
             history: Vec::new(),
@@ -3423,14 +3423,13 @@ impl Kernel {
             chain_depth: task.event_chain_depth(),
         };
 
-        self.scheduler.register_external(child_task.clone()).await;
-        // Register for cascade-cancel bookkeeping (parent → child edge).
+        if let Err(error) = self.scheduler.register_external(child_task.clone()).await {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({"error": error.to_string()}),
+            };
+        }
         self.scheduler.register_child(task.id, child_task_id).await;
-        self.scheduler
-            .update_state_if_not_terminal(&child_task_id, TaskState::Running)
-            .await
-            .ok();
-        self.scheduler.mark_started(&child_task_id).await.ok();
 
         // 6. Emit audit and event
         self.audit_log(agentos_audit::AuditEntry {

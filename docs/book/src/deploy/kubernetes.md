@@ -48,7 +48,7 @@ Default resource envelope: requests `250m` CPU / `512Mi` memory, limits `2000m` 
 
 | Value | Default | Purpose |
 |-------|---------|---------|
-| `replicaCount` | `1` | Pod replicas (single-writer state DB — keep at 1 unless you separate volumes). |
+| `replicaCount` | `1` | The chart requires one replica and recreates it on upgrades. Deploy a separate release and volume per trust boundary. |
 | `vault.passphrase` / `vault.existingSecret` | `""` | Vault passphrase source. |
 | `persistence.size` | `10Gi` | Data volume size. |
 | `config.autoInitVault` | `true` | Auto-init the vault on first boot. |
@@ -58,6 +58,11 @@ Default resource envelope: requests `250m` CPU / `512Mi` memory, limits `2000m` 
 
 ## Health & probes
 
-The kernel serves `/healthz`, `/readyz`, and `/metrics` on the health port (`9091`). Wire
-these to Kubernetes liveness/readiness probes and a Prometheus `ServiceMonitor` (see
-[Observability](./observability.md)).
+The kernel serves `/healthz`, `/readyz`, and `/metrics` on the health port (`9091`).
+The chart uses `/healthz` for startup and liveness and `/readyz` for readiness. For a Prometheus `ServiceMonitor`, see
+[Observability](./observability.md).
+
+Each deployment serves one trusted operator. Use dedicated namespaces and data
+volumes, separate Secrets and channel credentials, and network policies between
+instances. API keys apply across records within an instance. Keep the ClusterIP
+private or put it behind a trusted authenticated proxy.

@@ -157,7 +157,10 @@ impl WebhookWakeUp {
             chain_depth: 0,
         };
 
-        self.kernel.scheduler.enqueue(task).await;
+        if let Err(error) = self.kernel.scheduler.enqueue(task).await {
+            tracing::warn!(%task_id, %endpoint_id, %error, "Webhook batch could not be admitted");
+            return;
+        }
 
         tracing::info!(
             task_id = %task_id,

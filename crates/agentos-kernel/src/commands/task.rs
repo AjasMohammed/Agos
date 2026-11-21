@@ -102,13 +102,13 @@ impl Kernel {
         let reasoning_hints = Some(infer_reasoning_hints(&prompt));
         let task = AgentTask {
             id: task_id,
-            state: TaskState::Queued,
+            state: TaskState::Running,
             agent_id: agent.id,
             capability_token,
             assigned_llm: Some(agent.id),
             priority: 5,
             created_at: chrono::Utc::now(),
-            started_at: None,
+            started_at: Some(chrono::Utc::now()),
             timeout: task_timeout,
             original_prompt: prompt,
             history: Vec::new(),
@@ -129,12 +129,11 @@ impl Kernel {
             chain_depth: 0,
         };
 
-        self.scheduler.register_external(task.clone()).await;
-        self.scheduler
-            .update_state_if_not_terminal(&task.id, TaskState::Running)
-            .await
-            .ok();
-        self.scheduler.mark_started(&task.id).await.ok();
+        if let Err(e) = self.scheduler.register_external(task.clone()).await {
+            return KernelResponse::Error {
+                message: e.to_string(),
+            };
+        }
 
         // Start trace accumulation before execution.
         self.trace_collector
@@ -483,7 +482,14 @@ impl Kernel {
             }
         }
 
-        let purged = self.scheduler.purge_agent_tasks(&agent_id, &parsed).await;
+        let purged = match self.scheduler.purge_agent_tasks(&agent_id, &parsed).await {
+            Ok(purged) => purged,
+            Err(error) => {
+                return KernelResponse::Error {
+                    message: error.to_string(),
+                }
+            }
+        };
 
         tracing::warn!(
             agent_id = %agent_id,
@@ -632,7 +638,12 @@ impl Kernel {
             .register_child(parent_task.id, child_task.id)
             .await;
 
-        let _ = self.scheduler.enqueue(child_task.clone()).await;
+        if let Err(e) = self.scheduler.enqueue(child_task.clone()).await {
+            self.scheduler
+                .forget_unadmitted_child(parent_task.id, child_task.id)
+                .await;
+            return Err(e);
+        }
 
         // Emit TaskDelegated from the parent's perspective
         self.emit_event(
@@ -754,7 +765,12 @@ impl Kernel {
         self.scheduler
             .register_child(spawner_task.id, child_task.id)
             .await;
-        let _ = self.scheduler.enqueue(child_task.clone()).await;
+        if let Err(e) = self.scheduler.enqueue(child_task.clone()).await {
+            self.scheduler
+                .forget_unadmitted_child(spawner_task.id, child_task.id)
+                .await;
+            return Err(e);
+        }
 
         self.emit_event(
             EventType::TaskDelegated,
@@ -867,11 +883,8 @@ impl Kernel {
             }
         };
 
-        // 4. Issue a fresh capability token (old one may be expired).
-        let effective_permissions = {
-            let registry = self.agent_registry.read().await;
-            registry.compute_effective_permissions(&agent.id)
-        };
+        // Issue a fresh token with the intersection of the original scope and live grants.
+        let effective_permissions = self.live_task_permissions(&payload.task).await;
         // Resuming must not shrink the task's budget: an autonomous task keeps
         // the autonomous timeout it was created with (matches `cmd_run_task`),
         // otherwise a resumed 24h task died at the 1h interactive default.
@@ -880,10 +893,7 @@ impl Kernel {
             self.config.kernel.default_task_timeout_secs,
             self.config.kernel.autonomous_mode.task_timeout_secs,
         );
-        // Preserve the checkpointed token's tool/intent scoping — resuming must
-        // never BROADEN a task's privileges (e.g. a narrowed delegated child
-        // must stay narrowed). Only the expiry is refreshed. The permission set
-        // is re-derived from the live registry so revoked grants don't survive.
+        // Preserve checkpointed tool and intent restrictions on the refreshed token.
         let capability_token = match self.capability_engine.issue_token(
             task_id,
             agent.id,
@@ -931,13 +941,6 @@ impl Kernel {
             chain_depth: payload.task.chain_depth,
         };
 
-        // 6. Restore context window from checkpoint. Upserts: the failure
-        // teardown that made this task resumable also removed its context
-        // entry, so a plain `replace_context` would silently restore nothing.
-        self.context_manager
-            .restore_context(task_id, agent.id, payload.context.window)
-            .await;
-
         // 7. Re-claim the atomic checkout before re-dispatching. The original
         // claim may have been released (terminal) or swept (lease lapsed while
         // paused/crashed); re-claiming restores single-owner ownership. If another
@@ -978,11 +981,25 @@ impl Kernel {
             return KernelResponse::Error { message };
         }
 
+        // Restore the context while holding the checkout, before making the task runnable.
+        self.context_manager
+            .restore_context(task_id, agent.id, payload.context.window)
+            .await;
+
         // 8. Enqueue the task onto the run queue so the background
         // task_executor_loop dequeues and executes it. `register_external`
         // only inserts into the task map without queueing, which would leave
         // the resumed task parked in Queued state forever (never executed).
-        self.scheduler.enqueue(resumed_task.clone()).await;
+        if let Err(e) = self.scheduler.enqueue(resumed_task).await {
+            self.context_manager.remove_context(&task_id).await;
+            if let Err(release_error) = self.task_checkout_store.release(&task_id, &agent.id).await
+            {
+                tracing::warn!(%task_id, error = %release_error, "Could not release the checkout after resume was refused");
+            }
+            return KernelResponse::Error {
+                message: e.to_string(),
+            };
+        }
 
         tracing::info!(
             task_id = %task_id,
@@ -1049,27 +1066,43 @@ impl Kernel {
         agent_name: Option<String>,
         prompt: String,
         autonomous: bool,
-    ) -> Result<TaskID, String> {
+    ) -> Result<TaskID, AgentOSError> {
         let registry = self.agent_registry.read().await;
         let agent_id = match agent_name {
             Some(ref name) => match registry.get_by_name(name) {
                 Some(a) if a.status != AgentStatus::Offline => a.id,
-                Some(_) => return Err(format!("Agent '{}' is offline", name)),
-                None => return Err(format!("Agent '{}' not found", name)),
+                Some(_) => {
+                    return Err(AgentOSError::KernelError {
+                        reason: format!("Agent '{name}' is offline"),
+                    })
+                }
+                None => {
+                    return Err(AgentOSError::KernelError {
+                        reason: format!("Agent '{name}' not found"),
+                    })
+                }
             },
             None => {
                 let agents: Vec<AgentProfile> =
                     registry.list_online().into_iter().cloned().collect();
                 match self.router.route(&prompt, &agents).await {
                     Ok(id) => id,
-                    Err(e) => return Err(format!("Failed to route task: {}", e)),
+                    Err(e) => {
+                        return Err(AgentOSError::KernelError {
+                            reason: format!("Failed to route task: {e}"),
+                        })
+                    }
                 }
             }
         };
 
         let agent: AgentProfile = match registry.get_by_id(&agent_id) {
             Some(a) => a.clone(),
-            None => return Err(format!("Agent '{}' not found after routing", agent_id)),
+            None => {
+                return Err(AgentOSError::KernelError {
+                    reason: format!("Agent '{agent_id}' not found after routing"),
+                })
+            }
         };
         let mut effective_permissions = registry.compute_effective_permissions(&agent_id);
         drop(registry);
@@ -1106,7 +1139,9 @@ impl Kernel {
                 effective_permissions,
                 task_timeout,
             )
-            .map_err(|e| format!("Failed to issue capability token: {}", e))?;
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("Failed to issue capability token: {e}"),
+            })?;
 
         let task = AgentTask {
             id: task_id,
@@ -1137,13 +1172,7 @@ impl Kernel {
             chain_depth: 0,
         };
 
-        self.trace_collector
-            .start_task(task.id, agent.id, &task.original_prompt)
-            .await;
-
-        let _ = self.scheduler.enqueue(task).await;
-
-        Ok(task_id)
+        self.scheduler.enqueue(task).await
     }
 }
 

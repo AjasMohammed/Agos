@@ -92,11 +92,11 @@ SBOM (CycloneDX `bom.json`) is attached to every release for dependency scanning
 
 Honest list of what the current release does **not** defend against. Each item names the operator mitigation. Items move out of this list only when a regression test lands.
 
-- **Single operator only.** REST scopes such as `memory:r` or `agents:r` gate the *verb*, not the *row*: any key holding a scope can read every agent's or task's data by id. Do not issue keys to mutually untrusted users. Multi-tenant isolation is out of scope before v2.
+- **Single operator only.** REST scopes such as `memory:r` or `agents:r` gate the *verb*, not the *row*: any key holding a scope can read every agent's or task's data by id. Run one dedicated instance and data volume per trust boundary. Do not issue keys to mutually untrusted users.
 - **`operator_token` is a shared bearer secret.** Anyone holding it has full control-plane access; there is no per-operator identity or audit attribution. Mitigation: API and health servers bind `127.0.0.1` by default and the API server is off by default (`[api] enabled = false`). Expose only behind a reverse proxy that adds its own authentication. `operator_token` has no runtime rotation endpoint: change it in config and restart. Individual API keys can be revoked (`DELETE /api/v1/keys/{id}`) or rotated via `POST /api/v1/auth/refresh` when `[api] refresh_enabled = true` (off by default).
 - **Vault records carry no additional authenticated data (AAD).** Ciphertexts are AES-256-GCM authenticated, but a record could be swapped for another *valid* record from the same vault by someone with write access to the SQLite file. Mitigation: file permissions on `data/`; an attacker with that access already has the audit log and config.
 - **The prompt-injection scanner is a regex denylist.** It is defense-in-depth, not the boundary. The boundary is `<user_data>` wrapping in the system prompt plus tool-call approval (`RiskClass`) and capability tokens. Expect novel injections to pass the scanner.
-- **Scheduler maps are bounded per agent, not globally.** `max_queued_per_agent` caps queue depth; a very large number of agents can still grow `tasks`/`child_map` until restart.
+- **The daemon is a single writer.** `max_outstanding_tasks` bounds queued, running, and parked tasks across agents. Run one daemon per data volume. Use separate volumes, credentials, and isolated execution environments for separate customers.
 - Seccomp sandboxing is Linux-only (gated behind `#[cfg(target_os = "linux")]`); macOS/Windows degrade gracefully without it.
 - WASM tool sandboxing via Wasmtime is not yet enforced for all tools.
 - The HAL device quarantine workflow is partially implemented.

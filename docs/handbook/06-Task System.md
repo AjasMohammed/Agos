@@ -614,3 +614,17 @@ See [[05-Agent Management]] for the full multi-agent coordination reference.
 | Schedule pause | `agentos schedule pause <name>` | Suspend schedule |
 | Schedule resume | `agentos schedule resume <name>` | Re-activate schedule |
 | Schedule delete | `agentos schedule delete <name>` | Remove schedule |
+
+
+## After an interrupted run
+
+At startup, AgentOS can queue work that never began. It marks interrupted tasks
+and queued tasks with a saved checkpoint as failed for review. A checkpoint can
+lag behind a write the agent made in an external system. Check that system
+before using `agentos task resume <task-id>` with a saved checkpoint or submitting
+a new task. If the operation already completed, reconcile the result before
+requesting additional work.
+
+New work is admitted within the per-agent queue limit and the service-wide
+`kernel.max_outstanding_tasks` limit (2,000 by default). The REST API returns
+HTTP 429 when capacity is exhausted and HTTP 503 if the task could not be saved.

@@ -163,8 +163,10 @@ impl Kernel {
             })
             .await;
 
-        let _ = self.scheduler.enqueue(task).await;
-
+        if let Err(error) = self.scheduler.enqueue(task).await {
+            self.background_pool.remove(&task_id).await;
+            return Err(error);
+        }
         Ok(task_id)
     }
 

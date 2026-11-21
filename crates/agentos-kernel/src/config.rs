@@ -932,12 +932,14 @@ pub struct KernelSettings {
     #[serde(default)]
     pub context_compaction: ContextCompactionConfig,
     /// Maximum *queued* (not running) tasks a single agent may accumulate.
-    /// Further enqueues are rejected and marked `Failed` without emitting any
-    /// event. `max_concurrent_tasks` bounds execution, not queue depth — the
+    /// New work above this limit is rejected without emitting a task lifecycle event. `max_concurrent_tasks` bounds execution, not queue depth — the
     /// 2026-07-26 trigger-loop incident piled up 190k queued tasks while never
     /// exceeding 4 concurrent runs. 0 disables the cap.
     #[serde(default = "default_max_queued_per_agent")]
     pub max_queued_per_agent: usize,
+    /// Total queued, running, and parked tasks across all agents.
+    #[serde(default = "default_max_outstanding_tasks")]
+    pub max_outstanding_tasks: usize,
     /// Queued tasks older than this are cancelled at boot instead of replayed.
     /// Without a cutoff a runaway backlog resurrects itself on every restart.
     /// 0 disables the cutoff (replay everything).
@@ -959,6 +961,10 @@ pub struct KernelSettings {
     /// less than this. Slow failures are ordinary errors, not a runaway.
     #[serde(default = "default_failure_streak_fast_ms")]
     pub failure_streak_fast_ms: u64,
+}
+
+fn default_max_outstanding_tasks() -> usize {
+    crate::scheduler::DEFAULT_MAX_OUTSTANDING_TASKS
 }
 
 fn default_max_queued_per_agent() -> usize {
@@ -2722,6 +2728,9 @@ fn validate_otel_config(otel: &OtelConfig) -> Result<(), anyhow::Error> {
 }
 
 fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Error> {
+    if kernel.max_outstanding_tasks == 0 {
+        anyhow::bail!("kernel.max_outstanding_tasks must be > 0");
+    }
     if kernel.max_concurrent_sandbox_children == 0 {
         anyhow::bail!(
             "kernel.max_concurrent_sandbox_children must be > 0 (got 0); \

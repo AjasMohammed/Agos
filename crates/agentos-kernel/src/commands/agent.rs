@@ -1098,8 +1098,16 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                             .await
                             .insert(onboarding_task_id, payload);
                     }
-                    self.scheduler.enqueue(onboarding_task).await;
-                    onboarding_task_id_opt = Some(onboarding_task_id);
+                    match self.scheduler.enqueue(onboarding_task).await {
+                        Ok(id) => onboarding_task_id_opt = Some(id),
+                        Err(error) => {
+                            self.pending_agent_announce
+                                .write()
+                                .await
+                                .remove(&onboarding_task_id);
+                            tracing::warn!(%agent_id, %error, "Onboarding task could not be admitted");
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(

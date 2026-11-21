@@ -85,3 +85,8 @@ data:
     disk_warning_percent = 85.0
     disk_critical_percent = 95.0
     gpu_vram_warning_percent = 90.0
+
+    [api]
+    enabled = true
+    host = "0.0.0.0"
+    port = {{ .Values.service.port }}

@@ -323,7 +323,14 @@ impl Kernel {
         self.scheduler
             .register_child(parent_task_id, child_task_id)
             .await;
-        self.scheduler.enqueue(child_task).await;
+        if let Err(e) = self.scheduler.enqueue(child_task).await {
+            self.scheduler
+                .forget_unadmitted_child(parent_task_id, child_task_id)
+                .await;
+            return KernelResponse::Error {
+                message: e.to_string(),
+            };
+        }
 
         // Fire AgentSpawned hook so audit and metrics hooks can track the spawn event.
         self.hook_registry
@@ -525,7 +532,7 @@ mod tests {
         let scheduler = TaskScheduler::new(10);
         let parent = make_task_at_depth(MAX_SPAWN_DEPTH);
         let parent_id = parent.id;
-        scheduler.enqueue(parent).await;
+        scheduler.enqueue(parent).await.unwrap();
 
         // Retrieve the task and assert the guard condition directly.
         let task = scheduler.get_task(&parent_id).await.unwrap();
@@ -549,7 +556,7 @@ mod tests {
         let scheduler = TaskScheduler::new(10);
         let parent = make_task_at_depth(MAX_SPAWN_DEPTH - 1);
         let parent_id = parent.id;
-        scheduler.enqueue(parent).await;
+        scheduler.enqueue(parent).await.unwrap();
 
         let task = scheduler.get_task(&parent_id).await.unwrap();
         let would_be_blocked = task.spawn_depth >= MAX_SPAWN_DEPTH;
@@ -604,8 +611,8 @@ mod tests {
         child_task.id = child_id;
         child_task.parent_task_id = Some(parent_id);
 
-        scheduler.enqueue(parent_task).await;
-        scheduler.enqueue(child_task).await;
+        scheduler.enqueue(parent_task).await.unwrap();
+        scheduler.enqueue(child_task).await.unwrap();
         scheduler.register_child(parent_id, child_id).await;
 
         // Parent must report exactly one child.

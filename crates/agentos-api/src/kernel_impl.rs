@@ -10,8 +10,8 @@ use crate::types::*;
 use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
 use agentos_kernel::{ChatStreamEvent, Kernel};
 use agentos_types::{
-    DeliveryChannel, LLMProvider, NotificationID, SecretMetadata, SecretScope, TaskID, TaskState,
-    ToolID, UserResponse,
+    AgentOSError, DeliveryChannel, LLMProvider, NotificationID, SecretMetadata, SecretScope,
+    TaskID, TaskState, ToolID, UserResponse,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -1909,7 +1909,11 @@ impl KernelService for Kernel {
     async fn run_task(&self, req: RunTaskRequest) -> Result<TaskID, ApiError> {
         self.api_submit_task(req.agent_name, req.prompt, req.autonomous)
             .await
-            .map_err(ApiError::Conflict)
+            .map_err(|error| match error {
+                AgentOSError::RateLimited { .. } => ApiError::RateLimited(error.to_string()),
+                AgentOSError::StorageError(_) => ApiError::ServiceUnavailable(error.to_string()),
+                _ => ApiError::Conflict(error.to_string()),
+            })
     }
 
     async fn cancel_task(&self, id: TaskID) -> Result<(), ApiError> {

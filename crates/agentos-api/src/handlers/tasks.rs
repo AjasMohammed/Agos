@@ -61,9 +61,12 @@ pub async fn get(
     post, path = "/api/v1/tasks/run", tag = "tasks", operation_id = "tasks_run",
     request_body = crate::types::RunTaskRequest,
     responses(
-        (status = 200, description = "Task submitted", body = crate::response::Envelope<serde_json::Value>),
+        (status = 200, description = "Task persisted and submitted", body = crate::response::Envelope<serde_json::Value>),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorBody),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
+        (status = 409, description = "Task routing or setup failed", body = crate::error::ApiErrorBody),
+        (status = 429, description = "Task backlog is full", body = crate::error::ApiErrorBody),
+        (status = 503, description = "Task state could not be persisted", body = crate::error::ApiErrorBody)
     ),
     security(("bearer_auth" = []))
 )]

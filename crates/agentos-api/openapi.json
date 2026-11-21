@@ -8736,7 +8736,7 @@
         },
         "responses": {
           "200": {
-            "description": "Task submitted",
+            "description": "Task persisted and submitted",
             "content": {
               "application/json": {
                 "schema": {
@@ -8757,6 +8757,36 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Task routing or setup failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Task backlog is full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Task state could not be persisted",
             "content": {
               "application/json": {
                 "schema": {

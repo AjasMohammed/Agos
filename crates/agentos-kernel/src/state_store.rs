@@ -84,6 +84,23 @@ impl KernelStateStore {
     }
 
     pub async fn upsert_scheduler_task(&self, task: AgentTask) -> anyhow::Result<()> {
+        self.write_scheduler_task(task, None).await
+    }
+
+    pub async fn finish_interrupted_scheduler_task(
+        &self,
+        task: &AgentTask,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        self.write_scheduler_task(task.clone(), Some(reason.to_owned()))
+            .await
+    }
+
+    async fn write_scheduler_task(
+        &self,
+        task: AgentTask,
+        failure_reason: Option<String>,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let payload = serde_json::to_vec(&task)
@@ -100,15 +117,16 @@ impl KernelStateStore {
             guard
                 .execute(
                     "INSERT INTO scheduler_tasks (
-                        task_id, agent_id, state, priority, enqueued_at, payload, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                        task_id, agent_id, state, priority, enqueued_at, payload, updated_at, last_error
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     ON CONFLICT(task_id) DO UPDATE SET
                         agent_id = excluded.agent_id,
                         state = excluded.state,
                         priority = excluded.priority,
                         enqueued_at = excluded.enqueued_at,
                         payload = excluded.payload,
-                        updated_at = excluded.updated_at",
+                        updated_at = excluded.updated_at,
+                        last_error = COALESCE(excluded.last_error, scheduler_tasks.last_error)",
                     params![
                         task_id,
                         agent_id,
@@ -116,7 +134,8 @@ impl KernelStateStore {
                         i64::from(task.priority),
                         enqueued_at,
                         payload,
-                        updated_at
+                        updated_at,
+                        failure_reason
                     ],
                 )
                 .context("Failed to upsert scheduler task")?;
@@ -183,9 +202,10 @@ impl KernelStateStore {
         let ids: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            let guard = conn
+            let mut guard = conn
                 .lock()
                 .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let tx = guard.transaction().context("Begin scheduler purge")?;
             let mut deleted = 0usize;
             for chunk in ids.chunks(500) {
                 let placeholders = std::iter::repeat_n("?", chunk.len())
@@ -194,11 +214,11 @@ impl KernelStateStore {
                 let sql = format!("DELETE FROM scheduler_tasks WHERE task_id IN ({placeholders})");
                 let params = rusqlite::params_from_iter(chunk.iter());
                 deleted = deleted.saturating_add(
-                    guard
-                        .execute(&sql, params)
+                    tx.execute(&sql, params)
                         .context("Failed to delete scheduler tasks")?,
                 );
             }
+            tx.commit().context("Commit scheduler purge")?;
             Ok(deleted)
         })
         .await
@@ -870,7 +890,7 @@ impl KernelStateStore {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
+            PRAGMA synchronous = FULL;
             PRAGMA foreign_keys = ON;
             PRAGMA busy_timeout = 5000;
             ",

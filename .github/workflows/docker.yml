@@ -2,7 +2,7 @@ name: Docker Image
 
 on:
   # Tagged releases (v*) are built+pushed by the canonical docker job in
-  # release.yml — this workflow only builds the rolling :latest image from main
+  # release.yml — this workflow builds the rolling development image from main
   # to avoid double-publishing the same image on a v* tag.
   push:
     branches:
@@ -40,7 +40,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/ajasmohammed/agos:latest
             ghcr.io/ajasmohammed/agos:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

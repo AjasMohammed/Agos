@@ -1,9 +1,14 @@
+{{- if ne (int .Values.replicaCount) 1 }}
+{{- fail "AgentOS requires replicaCount=1. Use a separate release and volume for each instance." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "agentos.fullname" . }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "agentos.name" . }}
@@ -36,8 +41,10 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["agentos"]
-          args: ["web", "serve", "--host", "0.0.0.0", "--port", "{{ .Values.service.port }}"]
+          args: ["start"]
           env:
+            - name: AGENTOS_DATA_DIR
+              value: /var/lib/agentos/data
             - name: AGENTOS_CONFIG
               value: /etc/agentos/config.toml
             - name: AGENTOS_AUTO_INIT_VAULT
@@ -88,7 +95,7 @@ spec:
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10

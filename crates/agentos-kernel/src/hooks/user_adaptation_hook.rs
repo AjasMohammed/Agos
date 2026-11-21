@@ -585,7 +585,7 @@ mod tests {
             spawn_depth: 1,
             ..AgentTask::default()
         };
-        let task_id = f.scheduler.register_external(task).await;
+        let task_id = f.scheduler.register_external(task).await.unwrap();
         record_chat_prompt(
             &f,
             task_id,

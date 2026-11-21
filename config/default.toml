@@ -10,9 +10,11 @@ state_db_path = "/tmp/agentos/data/kernel_state.db"
 # --- Runaway-task containment -------------------------------------------------
 # max_concurrent_tasks bounds how many tasks RUN at once; these bound how many
 # can pile up, how long a backlog survives, and when a failing agent is paused.
-# Max queued (not running) tasks per agent. Past this, enqueues are rejected and
-# marked Failed. 0 disables.
+# Max queued (not running) tasks per agent. Past this, new submissions are
+# rejected. 0 disables the per-agent limit.
 max_queued_per_agent = 500
+# Global work bound across queued, running, and parked tasks.
+max_outstanding_tasks = 2000
 # Queued tasks older than this are cancelled at boot instead of replayed, so a
 # runaway backlog cannot resurrect itself on every restart. 0 disables.
 boot_replay_max_age_hours = 24

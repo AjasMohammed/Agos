@@ -20,7 +20,7 @@ async fn kernel_scheduler_team_await_fingerprint_dedup() {
     };
     let tid = task.id;
 
-    kernel.scheduler.register_external(task).await;
+    kernel.scheduler.register_external(task).await.unwrap();
 
     let fp = "550e8400-e29b-41d4-a716-446655440001,550e8400-e29b-41d4-a716-446655440002";
     kernel

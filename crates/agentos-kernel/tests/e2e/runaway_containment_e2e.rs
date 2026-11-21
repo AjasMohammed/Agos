@@ -59,7 +59,8 @@ async fn purge_tasks_drains_backlog_without_restart() {
         kernel
             .scheduler
             .enqueue(queued_task(agent_id, &format!("backlog {i}")))
-            .await;
+            .await
+            .unwrap();
     }
     assert_eq!(
         kernel.scheduler.queued_count_for_agent(&agent_id).await,
@@ -137,7 +138,8 @@ async fn paused_agent_backlog_is_held_not_executed() {
         kernel
             .scheduler
             .enqueue(queued_task(paused_id, &format!("held {i}")))
-            .await;
+            .await
+            .unwrap();
     }
 
     // Give the executor loop (100ms tick) several chances to pick work up.
@@ -195,11 +197,12 @@ async fn disabling_subscription_cancels_its_live_tasks() {
         subscription_id: sub_id,
         chain_depth: 1,
     });
-    let triggered_id = kernel.scheduler.enqueue(triggered).await;
+    let triggered_id = kernel.scheduler.enqueue(triggered).await.unwrap();
     let unrelated_id = kernel
         .scheduler
         .enqueue(queued_task(agent_id, "operator task"))
-        .await;
+        .await
+        .unwrap();
 
     // The incident shape: the triggered task holds an open approval prompt.
     kernel

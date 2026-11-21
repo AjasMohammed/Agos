@@ -1480,9 +1480,7 @@ impl Kernel {
             chain_depth: 0,
         };
 
-        self.scheduler.enqueue(task).await;
-
-        Ok(task_id)
+        self.scheduler.enqueue(task).await
     }
 }
 

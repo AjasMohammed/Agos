@@ -40,7 +40,7 @@ services:
       # ONLY if the container-runtime tools are needed (this grants host root).
       # - /var/run/docker.sock:/var/run/docker.sock
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
       # Health/metrics: bind to loopback on the host so /metrics and /healthz
       # (operational internals, unauthenticated) are not reachable from other
       # hosts. Scrape locally or front with a trusted proxy.

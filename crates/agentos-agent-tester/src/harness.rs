@@ -79,6 +79,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             max_concurrent_sandbox_children: 4,
             context_compaction: Default::default(),
             max_queued_per_agent: 500,
+            max_outstanding_tasks: 2_000,
             boot_replay_max_age_hours: 24,
             task_retention_days: 7,
             failure_streak_limit: 25,

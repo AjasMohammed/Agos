@@ -194,7 +194,11 @@ impl Kernel {
             chain_depth: 0,
         };
 
-        self.scheduler.enqueue(coordinator_task).await;
+        if let Err(error) = self.scheduler.enqueue(coordinator_task).await {
+            return KernelResponse::Error {
+                message: error.to_string(),
+            };
+        }
 
         tracing::info!(
             team_name = %config.name,

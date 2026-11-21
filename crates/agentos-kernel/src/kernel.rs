@@ -7710,6 +7710,7 @@ impl Kernel {
             config.kernel.max_concurrent_tasks,
             Some(state_store.clone()),
             config.kernel.max_queued_per_agent,
+            config.kernel.max_outstanding_tasks,
         ));
         let active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -8042,24 +8043,20 @@ impl Kernel {
             config.context.clone(),
         ));
 
-        // Tasks with a saved checkpoint are exempt from the boot-replay cutoff
-        // and the queue cap: `recover_checkpointed_tasks` resumes them from
-        // their saved context (A1) and looks them up in the scheduler map, so
-        // cancelling one here would silently drop the resume. Storm tasks never
-        // reach a tool call, so they never have a checkpoint.
-        let resumable: std::collections::HashSet<TaskID> = match checkpoint_store
+        let checkpointed = checkpoint_store
             .list_checkpoints()
-            .await
-        {
-            Ok(summaries) => summaries.iter().map(|s| s.task_id).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "Boot: cannot list checkpoints — restore cutoff will not exempt resumable tasks");
-                std::collections::HashSet::new()
-            }
-        };
-        let (restored_tasks, stale_cancelled) = scheduler
-            .restore_from_store(config.kernel.boot_replay_max_age_hours, &resumable)
+            .await?
+            .into_iter()
+            .map(|summary| summary.task_id)
+            .collect();
+        let (restored_tasks, stale_cancelled, interrupted) = scheduler
+            .restore_from_store(config.kernel.boot_replay_max_age_hours, &checkpointed)
             .await?;
+        for (task_id, agent_id) in interrupted {
+            if let Err(error) = task_checkout_store.release(&task_id, &agent_id).await {
+                tracing::warn!(%task_id, %error, "Interrupted task checkout will expire at the end of its lease");
+            }
+        }
         // Finished tasks are history, not work: load a bounded window so the
         // panel/CLI task list survives a restart (the 72h prune keeps it small).
         match scheduler.restore_terminal_history(500).await {
@@ -8083,25 +8080,6 @@ impl Kernel {
                 cap = config.kernel.max_queued_per_agent,
                 "Cancelled stale/over-cap queued tasks instead of replaying them at boot"
             );
-        }
-
-        // Discover tasks with checkpoints. These are auto-resumed from saved
-        // context by `recover_checkpointed_tasks()` when the supervisor starts
-        // (run_loop.rs), before the executor runs — no manual resume needed.
-        match checkpoint_store.list_checkpoints().await {
-            Ok(summaries) if !summaries.is_empty() => {
-                tracing::info!(
-                    count = summaries.len(),
-                    "Boot: found {} checkpointed tasks — will auto-resume on supervisor start",
-                    summaries.len()
-                );
-            }
-            Ok(_) => {
-                tracing::debug!("Boot: no checkpointed tasks found");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Boot: failed to query checkpoint store");
-            }
         }
 
         // Event channel capacity is configurable so operators can tune it under heavy
@@ -9824,6 +9802,7 @@ mod preflight_tests {
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
                 max_queued_per_agent: 500,
+                max_outstanding_tasks: crate::scheduler::DEFAULT_MAX_OUTSTANDING_TASKS,
                 boot_replay_max_age_hours: 24,
                 task_retention_days: 7,
                 failure_streak_limit: 25,
@@ -10098,6 +10077,7 @@ mod vault_bootstrap_tests {
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
                 max_queued_per_agent: 500,
+                max_outstanding_tasks: crate::scheduler::DEFAULT_MAX_OUTSTANDING_TASKS,
                 boot_replay_max_age_hours: 24,
                 task_retention_days: 7,
                 failure_streak_limit: 25,

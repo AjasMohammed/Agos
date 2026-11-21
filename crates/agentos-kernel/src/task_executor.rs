@@ -7051,22 +7051,20 @@ impl Kernel {
                 .start_task_span(&task.id.to_string(), &task.agent_id.to_string(), "");
         crate::metrics::record_task_queued();
 
-        // Transition to Running — bail out if the task is already terminal
-        // (e.g. cancelled before execution started).
-        let transitioned = self
-            .scheduler
-            .update_state_if_not_terminal(&task.id, TaskState::Running)
-            .await
-            .unwrap_or(false);
-        if !transitioned {
-            tracing::info!(
-                task_id = %task.id,
-                "Task already in terminal state before execution, skipping"
-            );
-            return;
-        }
-        if let Err(e) = self.scheduler.mark_started(&task.id).await {
-            tracing::error!(error = %e, task_id = %task.id, "Failed to mark task as started in scheduler");
+        match self.scheduler.start_queued(&task.id).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::error!(task_id = %task.id, error = %e, "Task dispatch refused");
+                self.complete_task_failure(
+                    task,
+                    e.into(),
+                    start.elapsed().as_millis() as u64,
+                    task_trace_id,
+                )
+                .await;
+                return;
+            }
         }
         self.trace_collector
             .start_task(task.id, task.agent_id, &task.original_prompt)
